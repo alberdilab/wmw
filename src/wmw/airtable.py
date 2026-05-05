@@ -147,3 +147,25 @@ class AirtableClient:
             for rid in record_ids
         ]
         self.update_records(samples_table, updates)
+
+    # ------------------------------------------------------------------
+    # Studies table — status helpers
+    # ------------------------------------------------------------------
+
+    def fetch_studies_by_status(
+        self,
+        studies_table: str,
+        status: str = "approved",
+    ) -> list[dict[str, Any]]:
+        """Return all study records whose status field equals *status*."""
+        formula = f'{{status}} = "{status}"'
+        return self.fetch_all(studies_table, formula=formula)
+
+    def set_study_status(
+        self,
+        studies_table: str,
+        record_ids: list[str],
+        status: str,
+    ) -> None:
+        updates = [{"id": rid, "fields": {"status": status}} for rid in record_ids]
+        self.update_records(studies_table, updates)

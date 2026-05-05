@@ -2,14 +2,66 @@
 # Edit this file with: wmw config --edit
 
 # --- Airtable ---
-AIRTABLE_TOKEN: ""          # Personal access token (or set $AIRTABLE_TOKEN env var)
-WMW_BASE: ""                # Airtable base ID, e.g. appXXXXXXXXXXXXXX
-STUDIES_TABLE: "Studies"    # Table name for study-level records
-SAMPLES_TABLE: "Samples"    # Table name for run/sample-level records
+# Token: use $AIRTABLE_TOKEN env var or --airtable-token flag (not stored in config)
+WMW_BASE: "appHz4Vc5NpVdfU3K"   # Airtable base ID, e.g. appXXXXXXXXXXXXXX
+STUDIES_TABLE: "Studies"        # Table name for study-level records
+SAMPLES_TABLE: "Samples"        # Table name for run/sample-level records
+
+# --- Studies table column IDs ---
+# Airtable field IDs (fldXXXXXXXXXXXXXX) for each column in the Studies table.
+# Leave blank to use field names instead.
+STUDIES_COL_STUDY_ACCESSION: ""
+STUDIES_COL_SECONDARY_STUDY_ACCESSION: ""
+STUDIES_COL_STUDY_TITLE: ""
+STUDIES_COL_STUDY_DESCRIPTION: ""
+STUDIES_COL_SOURCE: ""
+STUDIES_COL_SCIENTIFIC_NAME: ""
+STUDIES_COL_TAX_ID: ""
+STUDIES_COL_FIRST_PUBLIC: ""
+STUDIES_COL_CENTER_NAME: ""
+STUDIES_COL_STATUS: ""
+STUDIES_COL_PUBMED_ID: ""
+STUDIES_COL_PUB_DOI: ""
+STUDIES_COL_PUB_URL: ""
+STUDIES_COL_PUB_TITLE: ""
+STUDIES_COL_PUB_YEAR: ""
+STUDIES_COL_PUB_JOURNAL: ""
+STUDIES_COL_PUB_AUTHORS: ""
+
+# --- Samples table column IDs ---
+# Airtable field IDs (fldXXXXXXXXXXXXXX) for each column in the Samples table.
+# Leave blank to use field names instead.
+SAMPLES_COL_RUN_ACCESSION: ""
+SAMPLES_COL_STUDY_ACCESSION: ""
+SAMPLES_COL_SAMPLE_ACCESSION: ""
+SAMPLES_COL_EXPERIMENT_ACCESSION: ""
+SAMPLES_COL_SCIENTIFIC_NAME: ""
+SAMPLES_COL_TAX_ID: ""
+SAMPLES_COL_INSTRUMENT_PLATFORM: ""
+SAMPLES_COL_INSTRUMENT_MODEL: ""
+SAMPLES_COL_LIBRARY_STRATEGY: ""
+SAMPLES_COL_LIBRARY_SOURCE: ""
+SAMPLES_COL_LIBRARY_LAYOUT: ""
+SAMPLES_COL_BASE_COUNT: ""
+SAMPLES_COL_READ_COUNT: ""
+SAMPLES_COL_FASTQ_FTP: ""
+SAMPLES_COL_FASTQ_MD5: ""
+SAMPLES_COL_FASTQ_URL_1: ""
+SAMPLES_COL_FASTQ_URL_2: ""
+SAMPLES_COL_COLLECTION_DATE: ""
+SAMPLES_COL_FIRST_PUBLIC: ""
+SAMPLES_COL_GEO_LOC_NAME: ""
+SAMPLES_COL_HOST: ""
+SAMPLES_COL_HOST_TAX_ID: ""
+SAMPLES_COL_HOST_SCIENTIFIC_NAME: ""
+SAMPLES_COL_COUNTRY: ""
+SAMPLES_COL_CENTER_NAME: ""
+SAMPLES_COL_SOURCE: ""
+SAMPLES_COL_STATUS: ""
 
 # --- Drakkar ---
-DRAKKAR_CONDA_ENV: ""       # Conda env name or path containing drakkar; leave blank to use $PATH
-DRAKKAR_OUTPUT_DIR: ""      # Root output directory for drakkar runs
+DRAKKAR_CONDA_ENV: "/projects/alberdilab/data/environments/conda/drakkar" # Conda env name or path containing drakkar; leave blank to use $PATH
+DRAKKAR_OUTPUT_DIR: "/projects/alberdilab/data/wmw"                       # Root output directory for drakkar runs
 
 # --- NCBI / ENA ---
 NCBI_EMAIL: ""              # Required by NCBI Entrez (any valid email)

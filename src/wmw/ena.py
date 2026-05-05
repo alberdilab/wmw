@@ -10,6 +10,7 @@ import requests
 ENA_SEARCH_URL = "https://www.ebi.ac.uk/ena/portal/api/search"
 
 VALID_DATE_FIELDS = {"first_public", "collection_date", "last_updated"}
+VALID_STUDY_DATE_FIELDS = {"first_public", "last_updated"}
 
 # Fields fetched per run record from ENA
 RUN_FIELDS = ",".join([
@@ -173,6 +174,62 @@ def search_study(study_accession: str) -> list[dict[str, Any]]:
         "fields": RUN_FIELDS,
         "format": "json",
         "limit": 50000,
+    }
+    return _get(ENA_SEARCH_URL, params)
+
+
+def search_studies(
+    date_from: str,
+    date_to: str,
+    *,
+    host_tax_id: str = "",
+    date_field: str = "first_public",
+    keyword: str = "",
+    limit: int = 10000,
+) -> list[dict[str, Any]]:
+    """Search ENA for study records within a date window.
+
+    Uses the ENA Portal ``result=study`` endpoint, which returns study-level
+    metadata including ``study_description`` and ``pubmed_id``.  Run-level
+    fields (library_strategy, instrument_platform, base_count) are not
+    available at this level; they are applied post-fetch by ``wmw fetch``.
+
+    Parameters
+    ----------
+    date_from / date_to:
+        ISO date strings (YYYY-MM-DD).
+    host_tax_id:
+        NCBI taxon ID matched against the study ``tax_id`` field (approximate
+        host filter at study level).
+    date_field:
+        ``first_public`` or ``last_updated`` — ``collection_date`` is a
+        run-level field not available in the study index.
+    keyword:
+        Free-text substring matched against ``study_title``.
+    limit:
+        Maximum number of records to return.
+    """
+    if date_field not in VALID_STUDY_DATE_FIELDS:
+        raise ValueError(
+            f"date_field for study search must be one of {sorted(VALID_STUDY_DATE_FIELDS)}, "
+            f"got {date_field!r}"
+        )
+
+    query_parts: list[str] = [f"{date_field}>={date_from} AND {date_field}<={date_to}"]
+
+    if host_tax_id:
+        query_parts.append(f"tax_id={host_tax_id}")
+
+    if keyword:
+        safe = keyword.replace('"', "")
+        query_parts.append(f'study_title="*{safe}*"')
+
+    params = {
+        "result": "study",
+        "query": " AND ".join(query_parts),
+        "fields": STUDY_FIELDS,
+        "format": "json",
+        "limit": limit,
     }
     return _get(ENA_SEARCH_URL, params)
 

@@ -256,16 +256,28 @@ def filter_runs(
     *,
     exclude_host_tax_ids: list[str] | None = None,
     min_bases: int | None = None,
+    library_strategies: list[str] | None = None,
+    library_sources: list[str] | None = None,
+    instrument_platform: str | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """Post-fetch filter applied after normalization.
 
-    Used as a secondary safety net — ENA exclusions are applied at query time,
-    but SRA records (which lack host_tax_id in the index) are filtered here.
-    Also handles min_bases for SRA (which can't be filtered at query time).
+    Used as a secondary safety net for host/base filters, and as the primary
+    filter layer for wmw fetch (library strategy, source, platform).
 
     Returns (kept_runs, excluded_count).
     """
     exclude_set = {str(t).strip() for t in (exclude_host_tax_ids or []) if str(t).strip()}
+    strategy_set = (
+        {s.strip().upper() for s in library_strategies if s.strip()}
+        if library_strategies else None
+    )
+    source_set = (
+        {s.strip().upper() for s in library_sources if s.strip()}
+        if library_sources else None
+    )
+    platform_upper = instrument_platform.strip().upper() if instrument_platform else None
+
     kept: list[dict[str, Any]] = []
     excluded = 0
 
@@ -277,13 +289,31 @@ def filter_runs(
 
         if min_bases is not None:
             raw = str(run.get("base_count") or "").strip()
-            if raw:  # skip filter when base_count is unknown
+            if raw:
                 try:
                     if int(raw) < min_bases:
                         excluded += 1
                         continue
                 except (ValueError, TypeError):
                     pass
+
+        if strategy_set:
+            strat = str(run.get("library_strategy") or "").strip().upper()
+            if strat and strat not in strategy_set:
+                excluded += 1
+                continue
+
+        if source_set:
+            src = str(run.get("library_source") or "").strip().upper()
+            if src and src not in source_set:
+                excluded += 1
+                continue
+
+        if platform_upper:
+            plat = str(run.get("instrument_platform") or "").strip().upper()
+            if plat and plat != platform_upper:
+                excluded += 1
+                continue
 
         kept.append(run)
 

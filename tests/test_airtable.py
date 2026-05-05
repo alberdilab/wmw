@@ -88,3 +88,27 @@ def test_set_sample_status(mock_client):
     updates = mock_table.batch_update.call_args[0][0]
     assert all(u["fields"]["status"] == "running" for u in updates)
     assert {u["id"] for u in updates} == {"rec1", "rec2"}
+
+
+def test_fetch_studies_by_status(mock_client):
+    mock_table = MagicMock()
+    mock_table.all.return_value = [
+        _make_record("rec1", {"study_accession": "PRJEB001", "status": "approved"}),
+        _make_record("rec2", {"study_accession": "PRJEB002", "status": "approved"}),
+    ]
+    mock_client._api.table.return_value = mock_table
+
+    result = mock_client.fetch_studies_by_status("Studies", status="approved")
+    assert len(result) == 2
+    mock_table.all.assert_called_once_with(formula='{status} = "approved"')
+
+
+def test_set_study_status(mock_client):
+    mock_table = MagicMock()
+    mock_client._api.table.return_value = mock_table
+
+    mock_client.set_study_status("Studies", ["rec1", "rec2"], "indexed")
+    mock_table.batch_update.assert_called_once()
+    updates = mock_table.batch_update.call_args[0][0]
+    assert all(u["fields"]["status"] == "indexed" for u in updates)
+    assert {u["id"] for u in updates} == {"rec1", "rec2"}

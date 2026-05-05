@@ -143,3 +143,66 @@ def test_filter_runs_no_filters():
     kept, excluded = metadata.filter_runs(runs)
     assert excluded == 0
     assert len(kept) == 2
+
+
+# ---------------------------------------------------------------------------
+# filter_runs — library strategy, source, platform
+# ---------------------------------------------------------------------------
+
+def _run_full(run_accession, library_strategy="WGS", library_source="METAGENOMIC",
+              instrument_platform="ILLUMINA"):
+    return {
+        "run_accession": run_accession,
+        "host_tax_id": "",
+        "base_count": "10000000000",
+        "library_strategy": library_strategy,
+        "library_source": library_source,
+        "instrument_platform": instrument_platform,
+        "status": "pending",
+    }
+
+
+def test_filter_runs_library_strategy():
+    runs = [
+        _run_full("ERR040", library_strategy="WGS"),
+        _run_full("ERR041", library_strategy="AMPLICON"),
+        _run_full("ERR042", library_strategy="METAGENOMIC"),
+    ]
+    kept, excluded = metadata.filter_runs(runs, library_strategies=["WGS", "METAGENOMIC"])
+    assert excluded == 1
+    assert {r["run_accession"] for r in kept} == {"ERR040", "ERR042"}
+
+
+def test_filter_runs_library_source():
+    runs = [
+        _run_full("ERR050", library_source="METAGENOMIC"),
+        _run_full("ERR051", library_source="GENOMIC"),
+    ]
+    kept, excluded = metadata.filter_runs(runs, library_sources=["METAGENOMIC"])
+    assert excluded == 1
+    assert kept[0]["run_accession"] == "ERR050"
+
+
+def test_filter_runs_instrument_platform():
+    runs = [
+        _run_full("ERR060", instrument_platform="ILLUMINA"),
+        _run_full("ERR061", instrument_platform="OXFORD_NANOPORE"),
+    ]
+    kept, excluded = metadata.filter_runs(runs, instrument_platform="ILLUMINA")
+    assert excluded == 1
+    assert kept[0]["run_accession"] == "ERR060"
+
+
+def test_filter_runs_unknown_field_not_excluded():
+    """Runs with blank library_strategy/source/platform should not be excluded."""
+    runs = [
+        _run_full("ERR070", library_strategy="", library_source="", instrument_platform=""),
+    ]
+    kept, excluded = metadata.filter_runs(
+        runs,
+        library_strategies=["WGS"],
+        library_sources=["METAGENOMIC"],
+        instrument_platform="ILLUMINA",
+    )
+    assert excluded == 0
+    assert len(kept) == 1

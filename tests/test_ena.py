@@ -143,3 +143,51 @@ def test_unique_studies():
         {"study_accession": ""},
     ]
     assert ena.unique_studies(runs) == ["PRJEB001", "PRJEB002"]
+
+
+# ---------------------------------------------------------------------------
+# search_studies
+# ---------------------------------------------------------------------------
+
+def test_search_studies_builds_correct_params():
+    with patch("wmw.ena.requests.get", return_value=_mock_response([])) as mock_get:
+        ena.search_studies(date_from="2024-01-01", date_to="2024-12-31")
+        params = mock_get.call_args[1]["params"]
+        assert params["result"] == "study"
+        assert "first_public>=2024-01-01" in params["query"]
+        assert "first_public<=2024-12-31" in params["query"]
+        assert params["format"] == "json"
+
+
+def test_search_studies_host_tax_id():
+    with patch("wmw.ena.requests.get", return_value=_mock_response([])) as mock_get:
+        ena.search_studies(date_from="2024-01-01", date_to="2024-12-31", host_tax_id="7742")
+        assert "tax_id=7742" in _query(mock_get)
+
+
+def test_search_studies_keyword():
+    with patch("wmw.ena.requests.get", return_value=_mock_response([])) as mock_get:
+        ena.search_studies(date_from="2024-01-01", date_to="2024-12-31", keyword="fox")
+        assert 'study_title="*fox*"' in _query(mock_get)
+
+
+def test_search_studies_last_updated_field():
+    with patch("wmw.ena.requests.get", return_value=_mock_response([])) as mock_get:
+        ena.search_studies(date_from="2024-01-01", date_to="2024-12-31",
+                           date_field="last_updated")
+        q = _query(mock_get)
+        assert "last_updated>=2024-01-01" in q
+        assert "first_public" not in q
+
+
+def test_search_studies_invalid_date_field_raises():
+    with pytest.raises(ValueError, match="date_field"):
+        ena.search_studies(date_from="2024-01-01", date_to="2024-12-31",
+                           date_field="collection_date")
+
+
+def test_search_studies_returns_list():
+    fake = [{"study_accession": "PRJEB001", "study_title": "Test study"}]
+    with patch("wmw.ena.requests.get", return_value=_mock_response(fake)):
+        result = ena.search_studies(date_from="2024-01-01", date_to="2024-12-31")
+    assert result == fake

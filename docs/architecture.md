@@ -5,26 +5,33 @@
 wmw automates the discovery, curation, and processing of shotgun metagenomic datasets
 from wild animals. It connects three external systems:
 
-- **ENA / NCBI SRA** — source of raw dataset metadata and FASTQ file URLs
+- **ENA** — source of raw dataset metadata and FASTQ file URLs
 - **Airtable** — persistent store and curation layer (Studies + Samples tables)
 - **Drakkar** — genome-resolved metagenomics pipeline (invoked as a subprocess)
 
 ## Data flow
 
 ```
-ENA Portal API ──┐
-                 ├─► wmw scan ─► normalize ─► filter ─► upsert ─► Airtable
-NCBI SRA ────────┘                                   PubMed/CrossRef ─┘
+ENA Portal API ──► wmw scan  ──► normalize ──► upsert ──► Airtable Studies
+                                             PubMed/CrossRef ─┘
+                                                  │
+                                   (user reviews; sets status = "approved")
+                                                  │
+ENA Portal API ──► wmw fetch ──► normalize ──► filter ──► upsert ──► Airtable Samples
+                                                               │
+                                                  study status → "indexed"
 
 Airtable ──► wmw process ──► build manifest ──► drakkar <workflow> ──► update status
 ```
 
 ## Module responsibilities
 
-### `cli.py` (711 lines)
+### `cli.py`
 Single argparse module; all command logic lives here as `cmd_*()` functions.
-`_resolve_scan_params()` consolidates CLI flags and config defaults into one dict passed
-to both `ena.search_runs()` and `sra.search_runs()`.
+
+- `cmd_scan` / `_scan_single_study` — ENA study-level discovery; writes to Studies only.
+- `cmd_fetch` / `_resolve_fetch_params` — run-level fetch for approved studies; writes to Samples.
+- `cmd_process`, `cmd_status`, `cmd_config`, `cmd_update` — downstream pipeline commands.
 
 ### `config.py`
 Loads `src/wmw/data/config.yaml` on demand (no caching). Provides `get()`, `require()`,
@@ -39,28 +46,30 @@ is not installed. Colour disabled by `WMW_NO_COLOR=1`.
 ### `airtable.py`
 `AirtableClient` wraps pyairtable `Api`. Uses field names (not field IDs). Deduplication
 is accession-based: `upsert_studies()` fetches all existing `study_accession` values before
-inserting; `upsert_samples()` does the same for `run_accession`. This means re-running
-`wmw scan` over an overlapping date range is safe.
+inserting; `upsert_samples()` does the same for `run_accession`. Re-running over overlapping
+date ranges is safe. `fetch_studies_by_status()` / `set_study_status()` drive the approval
+workflow between `wmw scan` and `wmw fetch`.
 
 ### `ena.py`
-Queries the ENA Portal REST API (`/search?result=read_run`). All filters (strategy, source,
-platform, date field, min bases, keyword, exclusions) are encoded into a single `query`
-string sent to ENA, so exclusions are applied server-side. `search_study()` fetches all
-runs for a single accession and passes no additional filters.
+Queries the ENA Portal REST API.
+
+- `search_studies()` — `result=study` endpoint; used by `wmw scan`. Returns study-level
+  metadata (title, description, pubmed_id, tax_id). Supports date range, keyword, and
+  approximate organism filter (`tax_id`). Date field must be `first_public` or `last_updated`.
+- `search_study(accession)` — `result=read_run` for a single accession; used by `wmw fetch`.
+- `fetch_study_metadata(accession)` — single-study metadata lookup; used by `wmw scan --study`.
+- `search_runs()` — bulk run search (retained for direct use / future reference).
 
 ### `sra.py`
-Queries NCBI SRA via Biopython Entrez (`esearch` → `efetch XML`). Most filters map to
-Entrez search fields (`[Strategy]`, `[Source]`, `[Platform]`, `[Title]`). Exception:
-**base_count** — Entrez has no base-count index, so it is filtered post-fetch inside
-`search_runs()`. Host taxon exclusion maps to `NOT txidX[Organism:exp]`, which filters
-on the metagenome organism, not the host (NCBI limitation; host is in BioSample, not
-the SRA index). Fetches in batches of 200 with 0.4 s delay between batches.
+Queries NCBI SRA via Biopython Entrez (`esearch` → `efetch XML`). Retained for direct use
+but no longer invoked by `wmw scan` or `wmw fetch` — all automated discovery goes through ENA.
 
 ### `metadata.py`
 Provides two normalization paths (ENA / SRA) for both runs and studies, converging on a
-shared schema. `filter_runs()` is the post-fetch safety net: it checks `host_tax_id` on
-already-normalized records (catches ENA records where the field was blank in the index,
-and any SRA records that happen to carry it). Runs with no `base_count` are kept.
+shared schema. `filter_runs()` is the post-fetch safety net and the primary filter layer
+for `wmw fetch`: it checks `host_tax_id`, `base_count`, `library_strategy`, `library_source`,
+and `instrument_platform` on already-normalized records. Fields with empty values are never
+excluded by a filter (unknown ≠ excluded).
 
 ### `drakkar.py`
 `build_manifest()` writes a three-column TSV (`sample`, `R1`, `R2`) from Airtable sample
@@ -79,9 +88,11 @@ between requests. Returns empty dict on any failure (publication metadata is opt
 
 | Decision | Rationale |
 |---|---|
-| No Snakemake host | `wmw process` delegates to `drakkar` as a subprocess, same as ehio |
-| src layout | Cleaner packaging isolation; matches ehio |
-| No Click/Typer | Matches ehio and drakkar; no extra dependency |
-| Two-layer exclusion | ENA at query time (efficient); post-fetch fallback for SRA and blank ENA fields |
-| Dedup by accession | Re-running scan over overlapping periods is safe |
-| Config in package dir | Consistent with ehio; single location, editable in-place |
+| Two-phase scan/fetch | Users review study metadata in Airtable before committing to run-level data fetches, which can be expensive for large studies. |
+| ENA-only for scan | ENA provides a `result=study` endpoint with study-level metadata (including `study_description`). SRA has no equivalent date-filtered study search. |
+| Study-level vs run-level filters | Broad filters (date, keyword, organism) apply at study level in `wmw scan`; precise filters (library_strategy, min_bases, platform) apply at run level in `wmw fetch`. |
+| No Snakemake host | `wmw process` delegates to `drakkar` as a subprocess, same as ehio. |
+| src layout | Cleaner packaging isolation; matches ehio. |
+| No Click/Typer | Matches ehio and drakkar; no extra dependency. |
+| Dedup by accession | Re-running scan or fetch over overlapping accessions is safe. |
+| Config in package dir | Consistent with ehio; single location, editable in-place. |
