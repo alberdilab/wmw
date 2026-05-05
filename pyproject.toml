@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wmw"
+version = "0.1.0"
+description = "Wild Microbiome Watch — scan ENA/SRA for wild animal metagenomes and drive Drakkar processing via Airtable."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "pyairtable>=2.3",
+  "requests>=2.28",
+  "biopython>=1.80",
+  "pyyaml>=6",
+  "rich>=13",
+  "pandas>=2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+release = [
+  "build>=1.2",
+  "twine>=5",
+]
+
+[project.scripts]
+wmw = "wmw.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+wmw = ["data/*.yaml"]

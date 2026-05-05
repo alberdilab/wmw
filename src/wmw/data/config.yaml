@@ -1,0 +1,67 @@
+# wmw configuration
+# Edit this file with: wmw config --edit
+
+# --- Airtable ---
+AIRTABLE_TOKEN: ""          # Personal access token (or set $AIRTABLE_TOKEN env var)
+WMW_BASE: ""                # Airtable base ID, e.g. appXXXXXXXXXXXXXX
+STUDIES_TABLE: "Studies"    # Table name for study-level records
+SAMPLES_TABLE: "Samples"    # Table name for run/sample-level records
+
+# --- Drakkar ---
+DRAKKAR_CONDA_ENV: ""       # Conda env name or path containing drakkar; leave blank to use $PATH
+DRAKKAR_OUTPUT_DIR: ""      # Root output directory for drakkar runs
+
+# --- NCBI / ENA ---
+NCBI_EMAIL: ""              # Required by NCBI Entrez (any valid email)
+NCBI_API_KEY: ""            # Optional NCBI API key for higher rate limits
+
+# --- Scan defaults ---
+# These are used when the corresponding CLI flag is not provided.
+LIBRARY_SOURCE: ""          # e.g. METAGENOMIC — leave blank for no filter
+INSTRUMENT_PLATFORM: ""     # e.g. ILLUMINA — leave blank for no filter
+MIN_BASES: ""               # Minimum base count, e.g. 1000000000 — leave blank for no filter
+DATE_FIELD: "first_public"  # ENA date field to filter on: first_public | collection_date | last_updated
+
+# --- Host taxon exclusions ---
+# Runs/studies whose host_tax_id matches any entry below are removed from scan results.
+# Taxon IDs are NCBI taxonomy IDs (strings). Comment out any line to re-enable that group.
+# Override at runtime with: wmw scan --exclude-taxa 9913,9823  (appended to this list)
+#                           wmw scan --no-exclude              (disables all exclusions)
+EXCLUDED_HOST_TAX_IDS:
+  # Human
+  - "9606"    # Homo sapiens
+
+  # Livestock / farm animals
+  - "9913"    # Bos taurus (cattle)
+  - "9823"    # Sus scrofa (pig)
+  - "9940"    # Ovis aries (sheep)
+  - "9925"    # Capra hircus (goat)
+  - "9796"    # Equus caballus (horse)
+  - "89462"   # Bubalus bubalis (water buffalo)
+  - "9838"    # Camelus dromedarius (dromedary camel)
+  - "30521"   # Lama glama (llama)
+  - "30538"   # Vicugna pacos (alpaca)
+
+  # Poultry
+  - "9031"    # Gallus gallus (chicken)
+  - "9103"    # Meleagris gallopavo (turkey)
+  - "8839"    # Anas platyrhynchos (duck)
+
+  # Aquaculture
+  - "8030"    # Salmo salar (Atlantic salmon)
+  - "8022"    # Oncorhynchus mykiss (rainbow trout)
+  - "8128"    # Oreochromis niloticus (Nile tilapia)
+  - "7962"    # Cyprinus carpio (common carp)
+  - "7110"    # Dicentrarchus labrax (European sea bass)
+  - "8175"    # Sparus aurata (gilthead sea bream)
+
+  # Laboratory animals
+  - "10090"   # Mus musculus (mouse)
+  - "10116"   # Rattus norvegicus (rat)
+  - "9986"    # Oryctolagus cuniculus (rabbit)
+  - "10141"   # Cavia porcellus (guinea pig)
+  - "10036"   # Mesocricetus auratus (golden hamster)
+  - "10053"   # Meriones unguiculatus (Mongolian gerbil)
+  - "9544"    # Macaca mulatta (rhesus macaque)
+  - "9541"    # Macaca fascicularis (crab-eating macaque)
+  - "7955"    # Danio rerio (zebrafish)
