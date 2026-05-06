@@ -8,6 +8,36 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.3.1] - 2026-05-06
+
+### Changed
+
+- `wmw scan`: batch querying now shows a Rich progress bar (`XX/YY studies · N runs across K studies`) instead of accumulating log lines for each batch, when stdout is a TTY. Falls back to per-batch `INFO:` lines when output is not a TTY.
+- `ena.fetch_studies_batch`: reduced default `chunk_size` from 100 to 20 to avoid excessively long ENA API query URLs when scanning large numbers of studies.
+- `wmw scan`: the "Excluding N host taxon ID(s)" log message (and its run-removal count) now
+  appears after "Excluded N studies from summary table: no host taxon ID in any run", making
+  the output order match the logical filtering sequence — blank-host studies first, then
+  explicitly excluded hosts.
+- `wmw fetch`: host taxon exclusion is now applied as an explicit post-fetch run-level step
+  (using `host_tax_id` from sample metadata), separate from and reported before other
+  run-level filters (library strategy, platform, min bases). The early "Excluding N host
+  taxon ID(s)" upfront message has been replaced by a message printed after runs are fetched.
+
+### Fixed
+
+- `AirtableClient` now respects the `STUDIES_COL_*` and `SAMPLES_COL_*` field IDs from config. When field IDs are configured, the client uses `use_field_ids=True` and translates python field names to Airtable field IDs in all payloads, formulas, and responses — fixing a 422 `UNKNOWN_FIELD_NAME` error caused by sending snake_case python names (e.g. `study_accession`) when the actual Airtable field names differ. Field maps are now derived entirely from `config.yaml` (`STUDIES_COL_*` / `SAMPLES_COL_*` keys): the config is the single source of truth for all Airtable column codes, with no hardcoded mapping tables in the Python code.
+
+### Added
+
+- Early Airtable connectivity check: `wmw scan`, `wmw fetch`, and `wmw process` now verify read access to the relevant Airtable tables immediately on startup (before any ENA queries or other network work), so misconfigured credentials or an unreachable base are reported right away rather than after a long run.
+
+
+- `wmw scan --year YEAR[,YEAR]` and `--month MONTH[,MONTH]`: shorthand flags for defining
+  the search date window without writing full ISO dates. A single value covers that
+  year/month; two comma-separated values define start and end (e.g. `--year 2025,2026`,
+  `--month March,June`). The flags can be combined — `--year 2025 --month March` resolves to
+  `2025-03-01 → 2025-03-31`. When `--month` is used without `--year`, the current calendar
+  year is assumed. Month names are full English names, case-insensitive.
 ## [0.3.0] - 2026-05-06
 
 ### Added
@@ -43,6 +73,7 @@ All notable changes to wmw are documented here.
   already date-scoped at the study level.
 - `ena.search_studies()` no longer accepts or applies the `taxonomy_tax_id` parameter in
   its query; taxonomy filtering has moved entirely to the post-fetch run-level step.
+  
 ## [0.2.0] - 2026-05-05
 
 ### Added

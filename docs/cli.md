@@ -23,7 +23,10 @@ wmw process → run Drakkar workflow on pending samples
 Search ENA for wild-animal studies and populate the **Studies** table. Run-level sample data is **not** fetched — that is deferred to `wmw fetch` after manual review.
 
 ```
-wmw scan [--from DATE] [--to DATE] [--study ACCESSION]
+wmw scan [--from DATE] [--to DATE]
+         [--year YEAR[,YEAR]]             # e.g. 2025 or 2024,2026
+         [--month MONTH[,MONTH]]          # e.g. March or March,June
+         [--study ACCESSION]
          [--host-tax-id TAXON_ID]
          [--date-field FIELD]             # first_public|last_updated; config: DATE_FIELD
          [--keyword TEXT]
@@ -36,8 +39,21 @@ wmw scan [--from DATE] [--to DATE] [--study ACCESSION]
 ```
 
 **Modes:**
-- Date-range: requires `--from` and `--to`
+- Date-range: `--from`/`--to` (explicit ISO dates) **or** `--year`/`--month` (shorthand)
 - Single-study: `--study PRJEB12345` (overrides date window)
+
+**Date shorthand (`--year` / `--month`):**
+
+| Flags | Resolved window |
+|---|---|
+| `--year 2025` | `2025-01-01` → `2025-12-31` |
+| `--year 2024,2026` | `2024-01-01` → `2026-12-31` |
+| `--month March` | `{current_year}-03-01` → `{current_year}-03-31` |
+| `--month March,June` | `{current_year}-03-01` → `{current_year}-06-30` |
+| `--year 2025 --month March` | `2025-03-01` → `2025-03-31` |
+| `--year 2025,2026 --month March,June` | `2025-03-01` → `2026-06-30` |
+
+Month names are full English names, case-insensitive (e.g. `January`, `march`). When `--month` is used without `--year`, the current calendar year is assumed. `--year`/`--month` take precedence over `--from`/`--to` when both are supplied.
 
 **Notes:**
 - Uses the ENA Portal `result=study` endpoint — returns study-level metadata including `study_description`.

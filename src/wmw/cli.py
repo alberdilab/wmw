@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import calendar
 import os
 import sys
 from collections.abc import Sequence
+from datetime import date
 from pathlib import Path
 
 try:
@@ -47,6 +49,10 @@ def _die(msg: str) -> None:
     sys.exit(1)
 
 
+def _pl(n: int, singular: str, plural: str | None = None) -> str:
+    return f"{n} {singular if n == 1 else (plural or singular + 's')}"
+
+
 def _conf(args: argparse.Namespace, cli_attr: str, config_key: str, required: bool = False) -> str:
     """Return first non-empty value from: CLI flag → config file → ''."""
     value = (getattr(args, cli_attr, None) or "").strip()
@@ -77,10 +83,41 @@ def _airtable_client(args: argparse.Namespace):
     from wmw.airtable import AirtableClient
     token = _resolve_token(args)
     base_id = _conf(args, "base_id", "WMW_BASE", required=True)
-    return AirtableClient(token, base_id)
+    studies_fm = _field_map_from_config("STUDIES_COL_")
+    samples_fm = _field_map_from_config("SAMPLES_COL_")
+    return AirtableClient(
+        token,
+        base_id,
+        studies_field_map=studies_fm or None,
+        samples_field_map=samples_fm or None,
+    )
+
+
+def _require_airtable(args: argparse.Namespace, *table_names: str):
+    """Create AirtableClient, verify read access to each table, and return the client."""
+    client = _airtable_client(args)
+    try:
+        client.check_access(list(table_names))
+    except RuntimeError as exc:
+        _die(str(exc))
+    return client
 
 
 _EXCLUDE_GROUPS = {"Human", "Livestock", "Aquaculture", "Laboratory"}
+
+
+def _field_map_from_config(prefix: str) -> dict[str, str]:
+    """Return {python_snake_name: field_id} from all config keys starting with *prefix*.
+
+    The python name is the key suffix lowercased, e.g.
+    STUDIES_COL_STUDY_ACCESSION → study_accession.
+    Only entries with a non-empty value are included.
+    """
+    return {
+        key[len(prefix):].lower(): str(value).strip()
+        for key, value in cfg.load_config().items()
+        if key.startswith(prefix) and isinstance(value, str) and value.strip()
+    }
 
 
 def _build_exclude_ids(args: argparse.Namespace) -> list[str]:
@@ -112,6 +149,55 @@ def _build_exclude_ids(args: argparse.Namespace) -> list[str]:
     return exclude_ids
 
 
+_MONTH_NAMES: dict[str, int] = {
+    "january": 1, "february": 2, "march": 3, "april": 4,
+    "may": 5, "june": 6, "july": 7, "august": 8,
+    "september": 9, "october": 10, "november": 11, "december": 12,
+}
+
+
+def _parse_month_name(s: str) -> int:
+    key = s.strip().lower()
+    if key not in _MONTH_NAMES:
+        _die(f"--month: unrecognised month name {s!r}. Use full names, e.g. January, March.")
+    return _MONTH_NAMES[key]
+
+
+def _resolve_scan_dates(args: argparse.Namespace) -> None:
+    """Populate args.date_from / args.date_to from --year / --month if provided."""
+    year_str = (getattr(args, "year", "") or "").strip()
+    month_str = (getattr(args, "month", "") or "").strip()
+    if not year_str and not month_str:
+        return
+
+    today = date.today()
+
+    if year_str:
+        parts = [p.strip() for p in year_str.split(",") if p.strip()]
+        if len(parts) not in (1, 2):
+            _die(f"--year: provide one or two comma-separated years, got {year_str!r}.")
+        try:
+            y_start = int(parts[0])
+            y_end = int(parts[-1])
+        except ValueError:
+            _die(f"--year: expected integer year(s), got {year_str!r}.")
+    else:
+        y_start = y_end = today.year
+
+    if month_str:
+        parts = [p.strip() for p in month_str.split(",") if p.strip()]
+        if len(parts) not in (1, 2):
+            _die(f"--month: provide one or two comma-separated month names, got {month_str!r}.")
+        m_start = _parse_month_name(parts[0])
+        m_end = _parse_month_name(parts[-1])
+    else:
+        m_start, m_end = 1, 12
+
+    last_day = calendar.monthrange(y_end, m_end)[1]
+    args.date_from = f"{y_start:04d}-{m_start:02d}-01"
+    args.date_to = f"{y_end:04d}-{m_end:02d}-{last_day:02d}"
+
+
 # ---------------------------------------------------------------------------
 # wmw scan  (phase 1 — study discovery, ENA only)
 # ---------------------------------------------------------------------------
@@ -119,6 +205,7 @@ def _build_exclude_ids(args: argparse.Namespace) -> list[str]:
 def cmd_scan(args: argparse.Namespace) -> int:
     from wmw import ena, metadata
     ena.DEBUG = getattr(args, "debug", False)
+    _resolve_scan_dates(args)
 
     studies_table = _conf(args, "studies_table", "STUDIES_TABLE") or "Studies"
     dry_run = args.dry_run
@@ -153,9 +240,12 @@ def cmd_scan(args: argparse.Namespace) -> int:
         except Exception as exc:
             _die(f"Could not resolve taxonomy {taxonomy!r}: {exc}")
 
+    # Verify Airtable access before starting any ENA work
+    client = _require_airtable(args, studies_table) if not dry_run else None
+
     # --- single-study mode ---
     if args.study:
-        return _scan_single_study(args, args.study, studies_table, dry_run)
+        return _scan_single_study(args, args.study, studies_table, dry_run, client=client)
 
     # --- date-range mode ---
     if not args.date_from or not args.date_to:
@@ -174,13 +264,6 @@ def cmd_scan(args: argparse.Namespace) -> int:
         out.info(f"Host taxon filter: {host_tax_id}")
     if keyword:
         out.info(f"Keyword filter: \"{keyword}\" (study title and description)")
-    if exclude_ids:
-        include_arg = (getattr(args, "include", None) or "").strip()
-        out.info(
-            f"Excluding {len(exclude_ids)} host taxon ID(s)"
-            + (f" (included: {include_arg})" if include_arg else "")
-            + ". Use --include All to disable."
-        )
     out.info("Database: ENA (study endpoint pre-filter → run endpoint → study discovery)")
 
     # tax_tree() and study_description keyword search are only valid in result=study.
@@ -220,10 +303,36 @@ def cmd_scan(args: argparse.Namespace) -> int:
         out.info(
             f"Querying ENA runs in {n_batches} batch(es) of up to {run_batch} studies…"
         )
+        _pg = None
+        _task_id = None
+        try:
+            from rich.progress import (
+                BarColumn,
+                MofNCompleteColumn,
+                Progress,
+                SpinnerColumn,
+                TextColumn,
+            )
+            from rich.console import Console as _Console
+            if sys.stdout.isatty():
+                _pg = Progress(
+                    SpinnerColumn(style="#5f9ea0"),
+                    TextColumn("[#5f9ea0]Querying ENA runs"),
+                    BarColumn(bar_width=None, style="#b7c7d3", complete_style="#5f9ea0"),
+                    MofNCompleteColumn(),
+                    TextColumn("[#b7c7d3]studies  ·  [#e6edf3]{task.fields[summary]}"),
+                    console=_Console(theme=out.WMW_THEME, highlight=False, soft_wrap=True),
+                    transient=False,
+                )
+                _pg.start()
+                _task_id = _pg.add_task("", total=len(study_list), summary="")
+        except ImportError:
+            pass
         for i in range(0, len(study_list), run_batch):
             batch = study_list[i : i + run_batch]
             batch_num = i // run_batch + 1
-            out.info(f"  Batch {batch_num}/{n_batches}: querying {len(batch)} studies…")
+            if _pg is None:
+                out.info(f"  Batch {batch_num}/{n_batches}: querying {len(batch)} studies…")
             try:
                 batch_runs = ena.search_runs(
                     host_tax_id=host_tax_id,
@@ -233,13 +342,28 @@ def cmd_scan(args: argparse.Namespace) -> int:
                 )
                 raw_runs.extend(batch_runs)
             except Exception as exc:
+                if _pg is not None:
+                    _pg.stop()
                 _die(f"ENA run query failed (batch {batch_num}): {exc}")
                 return 1
-            out.info(
-                f"    → {len(batch_runs)} run(s) found"
-                f"  |  cumulative: {len(raw_runs)} run(s) across"
-                f" {len({r.get('study_accession') for r in raw_runs if r.get('study_accession')})} study/studies."
-            )
+            n_studies = len({r.get('study_accession') for r in raw_runs if r.get('study_accession')})
+            if _pg is not None:
+                _pg.update(
+                    _task_id,
+                    advance=len(batch),
+                    summary=(
+                        f"{_pl(len(raw_runs), 'run')} across"
+                        f" {_pl(n_studies, 'study', 'studies')}"
+                    ),
+                )
+            else:
+                out.info(
+                    f"    → {_pl(len(batch_runs), 'run')} found"
+                    f"  |  cumulative: {_pl(len(raw_runs), 'run')} across"
+                    f" {_pl(n_studies, 'study', 'studies')}."
+                )
+        if _pg is not None:
+            _pg.stop()
     else:
         out.info("Querying ENA Portal API for runs…")
         try:
@@ -255,10 +379,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
             _die(f"ENA run query failed: {exc}")
             return 1
 
+    n_host_excluded = 0
     if exclude_ids:
-        raw_runs, n_excluded = metadata.filter_runs(raw_runs, exclude_host_tax_ids=exclude_ids)
-        if n_excluded:
-            out.info(f"  Host exclusion filter removed {n_excluded} run(s).")
+        raw_runs, n_host_excluded = metadata.filter_runs(raw_runs, exclude_host_tax_ids=exclude_ids)
 
     if taxonomy_tax_id and taxonomy_sci_name:
         unique_host_ids = {r.get("host_tax_id", "") for r in raw_runs if r.get("host_tax_id")}
@@ -279,12 +402,12 @@ def cmd_scan(args: argparse.Namespace) -> int:
         removed = before - len(raw_runs)
         if removed:
             out.info(
-                f"  Host taxonomy filter removed {removed} run(s) outside {taxonomy_sci_name}."
+                f"  Host taxonomy filter removed {_pl(removed, 'run')} outside {taxonomy_sci_name}."
             )
 
     study_accessions = ena.unique_studies(raw_runs)
     out.success(
-        f"ENA: {len(raw_runs)} qualifying run(s) → {len(study_accessions)} unique study/studies."
+        f"ENA: {_pl(len(raw_runs), 'qualifying run')} → {_pl(len(study_accessions), 'unique study', 'unique studies')}."
     )
 
     if not study_accessions:
@@ -320,13 +443,48 @@ def cmd_scan(args: argparse.Namespace) -> int:
             found = sum(1 for s in studies if s.get("pub_title"))
             out.success(f"Publications resolved: {found}/{len(studies)}.")
 
-    _print_scan_summary(studies)
+    run_stats: dict[str, dict] = {}
+    for run in raw_runs:
+        acc = run.get("study_accession", "")
+        if not acc:
+            continue
+        if acc not in run_stats:
+            run_stats[acc] = {"runs": 0, "host_taxids": set()}
+        run_stats[acc]["runs"] += 1
+        htid = run.get("host_tax_id", "")
+        if htid:
+            run_stats[acc]["host_taxids"].add(htid)
+    final_run_stats = {
+        acc: {"runs": d["runs"], "host_taxa": len(d["host_taxids"])}
+        for acc, d in run_stats.items()
+    }
+
+    studies_with_hosts = [
+        s for s in studies
+        if final_run_stats.get(s.get("study_accession", ""), {}).get("host_taxa", 0) > 0
+    ]
+    n_no_host = len(studies) - len(studies_with_hosts)
+    if n_no_host:
+        out.info(
+            f"Excluded {_pl(n_no_host, 'study', 'studies')} from summary table: no host taxon ID in any run (Host taxa = 0)."
+        )
+
+    if exclude_ids:
+        include_arg = (getattr(args, "include", None) or "").strip()
+        out.info(
+            f"Excluding {len(exclude_ids)} host taxon ID(s)"
+            + (f" (included: {include_arg})" if include_arg else "")
+            + ". Use --include All to disable."
+        )
+        if n_host_excluded:
+            out.info(f"  Host exclusion filter removed {_pl(n_host_excluded, 'run')}.")
+
+    _print_scan_summary(studies_with_hosts, run_stats=final_run_stats)
 
     if dry_run:
         out.info("Dry-run mode — no changes written to Airtable.")
         return 0
 
-    client = _airtable_client(args)
     s_inserted, s_skipped = client.upsert_studies(studies_table, studies)
     out.success(f"Studies: {s_inserted} inserted, {s_skipped} already existed.")
     return 0
@@ -337,6 +495,7 @@ def _scan_single_study(
     study_accession: str,
     studies_table: str,
     dry_run: bool,
+    client=None,
 ) -> int:
     from wmw import ena, metadata
 
@@ -363,7 +522,8 @@ def _scan_single_study(
         out.info("Dry-run — no Airtable writes.")
         return 0
 
-    client = _airtable_client(args)
+    if client is None:
+        client = _require_airtable(args, studies_table)
     s_inserted, s_skipped = client.upsert_studies(studies_table, [study])
     out.success(f"Studies: {s_inserted} inserted, {s_skipped} already existed.")
     return 0
@@ -421,14 +581,18 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     out.section("WMW FETCH")
 
     record_id_map: dict[str, str] = {}
-    client = None
+
+    # Verify Airtable access early; for --study + --dry-run Airtable is not used at all
+    if args.study and dry_run:
+        client = None
+    else:
+        client = _require_airtable(args, studies_table, samples_table)
 
     if args.study:
         out.info(f"Single-study mode: {args.study}")
         studies_to_fetch = [args.study]
     else:
         status_filter = args.status or "approved"
-        client = _airtable_client(args)
         out.info(f"Reading studies with status='{status_filter}' from Airtable…")
         approved_records = client.fetch_studies_by_status(studies_table, status=status_filter)
         if not approved_records:
@@ -437,7 +601,7 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         studies_to_fetch = [r["fields"].get("study_accession", "") for r in approved_records]
         studies_to_fetch = [acc for acc in studies_to_fetch if acc]
         record_id_map = {r["fields"].get("study_accession", ""): r["id"] for r in approved_records}
-        out.success(f"{len(studies_to_fetch)} approved study/studies to fetch.")
+        out.success(f"{_pl(len(studies_to_fetch), 'approved study', 'approved studies')} to fetch.")
 
     if params["library_strategies"]:
         out.info(f"Library strategy filter: {','.join(params['library_strategies'])}")
@@ -447,8 +611,6 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         out.info(f"Instrument platform filter: {params['instrument_platform']}")
     if params["min_bases"]:
         out.info(f"Minimum base count: {params['min_bases']:,}")
-    if params["exclude_ids"]:
-        out.info(f"Excluding {len(params['exclude_ids'])} host taxon ID(s).")
 
     all_runs: list[dict] = []
     fetched_accessions: list[str] = []
@@ -458,7 +620,7 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         try:
             runs = ena.search_study(acc)
             normalized = metadata.normalize_runs(runs, "ENA")
-            out.info(f"  {acc}: {len(normalized)} run(s).")
+            out.info(f"  {acc}: {_pl(len(normalized), 'run')}.")
             all_runs.extend(normalized)
             fetched_accessions.append(acc)
         except Exception as exc:
@@ -470,16 +632,26 @@ def cmd_fetch(args: argparse.Namespace) -> int:
 
     all_runs = metadata.deduplicate_runs(all_runs)
 
-    all_runs, n_excluded = metadata.filter_runs(
+    if params["exclude_ids"]:
+        all_runs, n_host_excluded = metadata.filter_runs(
+            all_runs,
+            exclude_host_tax_ids=params["exclude_ids"],
+        )
+        out.info(
+            f"Excluding {len(params['exclude_ids'])} host taxon ID(s). Use --include All to disable."
+        )
+        if n_host_excluded:
+            out.info(f"  Host exclusion filter removed {_pl(n_host_excluded, 'run')}.")
+
+    all_runs, n_other_excluded = metadata.filter_runs(
         all_runs,
-        exclude_host_tax_ids=params["exclude_ids"],
         min_bases=params["min_bases"],
         library_strategies=params["library_strategies"],
         library_sources=params["library_sources"],
         instrument_platform=params["instrument_platform"],
     )
-    if n_excluded:
-        out.info(f"Post-fetch filter removed {n_excluded} run(s).")
+    if n_other_excluded:
+        out.info(f"Run filter(s) removed {_pl(n_other_excluded, 'run')}.")
 
     out.info(f"Total runs after filtering: {len(all_runs)}")
 
@@ -487,8 +659,6 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         out.info("Dry-run mode — no changes written to Airtable.")
         return 0
 
-    if client is None:
-        client = _airtable_client(args)
     r_inserted, r_skipped = client.upsert_samples(samples_table, all_runs)
     out.success(f"Samples/runs: {r_inserted} inserted, {r_skipped} already existed.")
 
@@ -501,20 +671,31 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     return 0
 
 
-def _print_scan_summary(studies: list[dict]) -> None:
-    tbl = out.make_table("Study accession", "Scientific name", "Tax ID", "Title", "First public")
+def _print_scan_summary(
+    studies: list[dict],
+    run_stats: dict[str, dict] | None = None,
+) -> None:
+    tbl = out.make_table("Study accession", "Runs", "Host taxa", "Title", "First public")
     if tbl is None:
         for s in studies:
+            acc = s.get("study_accession", "")
+            stats = (run_stats or {}).get(acc, {})
+            runs = str(stats.get("runs", "—")) if run_stats is not None else "—"
+            taxa = str(stats.get("host_taxa", "—")) if run_stats is not None else "—"
             print(
-                f"  {s.get('study_accession')}  {s.get('scientific_name', '')}  "
-                f"[{s.get('tax_id', '')}]  {s.get('study_title', '')[:50]}"
+                f"  {acc}  runs={runs}  taxa={taxa}  "
+                f"{s.get('study_title', '')[:50]}"
             )
         return
     for s in studies:
+        acc = s.get("study_accession", "")
+        stats = (run_stats or {}).get(acc, {})
+        runs = str(stats.get("runs", "—")) if run_stats is not None else "—"
+        taxa = str(stats.get("host_taxa", "—")) if run_stats is not None else "—"
         tbl.add_row(
-            s.get("study_accession", ""),
-            s.get("scientific_name", ""),
-            s.get("tax_id", ""),
+            acc,
+            runs,
+            taxa,
             (s.get("study_title") or "")[:50],
             s.get("first_public", ""),
         )
@@ -538,7 +719,7 @@ def cmd_process(args: argparse.Namespace) -> int:
     out.section("WMW PROCESS")
     out.info(f"Fetching samples from Airtable (batch={batch or 'all'}, status=pending)…")
 
-    client = _airtable_client(args)
+    client = _require_airtable(args, samples_table)
     samples = client.fetch_samples_for_processing(samples_table, batch=batch)
 
     if not samples:
@@ -696,6 +877,28 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="date_to",
         metavar="DATE",
         help="End of date window (YYYY-MM-DD).",
+    )
+    p_scan.add_argument(
+        "--year",
+        metavar="YEAR[,YEAR]",
+        default="",
+        help=(
+            "One or two comma-separated years that define the date window "
+            "(e.g. 2025 or 2024,2026). "
+            "Single year → full calendar year. Two years → first Jan to last Dec. "
+            "Can be combined with --month. Overrides --from/--to."
+        ),
+    )
+    p_scan.add_argument(
+        "--month",
+        metavar="MONTH[,MONTH]",
+        default="",
+        help=(
+            "One or two comma-separated month names that define the date window "
+            "(e.g. March or March,June). "
+            "Single month → that month only. Two months → first month to last month. "
+            "Uses the current year unless --year is also provided. Overrides --from/--to."
+        ),
     )
     p_scan.add_argument(
         "--study",

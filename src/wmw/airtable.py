@@ -19,23 +19,71 @@ def _require() -> None:
 
 
 class AirtableClient:
-    def __init__(self, api_key: str, base_id: str) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        base_id: str,
+        studies_field_map: dict[str, str] | None = None,
+        samples_field_map: dict[str, str] | None = None,
+    ) -> None:
         _require()
-        self._api = Api(api_key, use_field_ids=False)
         self._base_id = base_id
+        self._studies_fm: dict[str, str] = studies_field_map or {}
+        self._samples_fm: dict[str, str] = samples_field_map or {}
+        self._api = Api(api_key, use_field_ids=False)
+        self._api_fid = (
+            Api(api_key, use_field_ids=True)
+            if (self._studies_fm or self._samples_fm)
+            else None
+        )
 
-    def _table(self, table_name: str):
-        return self._api.table(self._base_id, table_name)
+    def _tbl(self, table_name: str, field_map: dict[str, str]):
+        """Return pyairtable Table, using field-ID API when a field map is present."""
+        api = self._api_fid if field_map else self._api
+        return api.table(self._base_id, table_name)
+
+    @staticmethod
+    def _enc(fields: dict[str, Any], fm: dict[str, str]) -> dict[str, Any]:
+        """Translate python field names to Airtable field IDs in an outgoing payload."""
+        if not fm:
+            return fields
+        return {fm.get(k, k): v for k, v in fields.items()}
+
+    @staticmethod
+    def _dec(record: dict[str, Any], fm: dict[str, str]) -> dict[str, Any]:
+        """Translate Airtable field IDs back to python names in a received record."""
+        if not fm:
+            return record
+        rev = {v: k for k, v in fm.items()}
+        return {
+            **record,
+            "fields": {rev.get(k, k): v for k, v in record.get("fields", {}).items()},
+        }
+
+    @staticmethod
+    def _fld(python_name: str, fm: dict[str, str]) -> str:
+        """Return the field ID (or the python name as fallback) for formula use."""
+        return fm.get(python_name, python_name)
+
+    def check_access(self, table_names: list[str]) -> None:
+        """Verify connectivity and read access to each table. Raises RuntimeError on failure."""
+        for name in table_names:
+            try:
+                self._api.table(self._base_id, name).all(max_records=1)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Airtable access check failed for table {name!r}: {exc}"
+                ) from exc
 
     # ------------------------------------------------------------------
-    # Generic helpers
+    # Generic helpers (public, use field names — no field map translation)
     # ------------------------------------------------------------------
 
     def fetch_all(self, table_name: str, formula: str | None = None) -> list[dict[str, Any]]:
         kwargs: dict[str, Any] = {}
         if formula:
             kwargs["formula"] = formula
-        return self._table(table_name).all(**kwargs)
+        return self._api.table(self._base_id, table_name).all(**kwargs)
 
     def fetch_by_field(
         self,
@@ -44,7 +92,7 @@ class AirtableClient:
         value: str,
     ) -> dict[str, Any] | None:
         formula = f'{{{field}}} = "{value}"'
-        records = self._table(table_name).all(formula=formula)
+        records = self._api.table(self._base_id, table_name).all(formula=formula)
         return records[0] if records else None
 
     def create_records(
@@ -54,7 +102,7 @@ class AirtableClient:
     ) -> list[dict[str, Any]]:
         if not fields_list:
             return []
-        return self._table(table_name).batch_create(fields_list)
+        return self._api.table(self._base_id, table_name).batch_create(fields_list)
 
     def update_records(
         self,
@@ -64,7 +112,7 @@ class AirtableClient:
         """updates: list of {"id": recXXX, "fields": {...}}."""
         if not updates:
             return
-        self._table(table_name).batch_update(updates)
+        self._api.table(self._base_id, table_name).batch_update(updates)
 
     # ------------------------------------------------------------------
     # Studies table
@@ -72,11 +120,13 @@ class AirtableClient:
 
     def existing_study_accessions(self, studies_table: str) -> set[str]:
         """Return the set of study_accession values already in the Studies table."""
-        records = self.fetch_all(studies_table)
+        tbl = self._tbl(studies_table, self._studies_fm)
+        records = tbl.all()
+        key = self._fld("study_accession", self._studies_fm)
         return {
-            r["fields"].get("study_accession", "")
+            r["fields"].get(key, "")
             for r in records
-            if r["fields"].get("study_accession")
+            if r["fields"].get(key)
         }
 
     def upsert_studies(
@@ -91,7 +141,8 @@ class AirtableClient:
         existing = self.existing_study_accessions(studies_table)
         new = [s for s in studies if s.get("study_accession") not in existing]
         if new:
-            self.create_records(studies_table, new)
+            tbl = self._tbl(studies_table, self._studies_fm)
+            tbl.batch_create([self._enc(s, self._studies_fm) for s in new])
         return len(new), len(studies) - len(new)
 
     # ------------------------------------------------------------------
@@ -100,11 +151,13 @@ class AirtableClient:
 
     def existing_run_accessions(self, samples_table: str) -> set[str]:
         """Return the set of run_accession values already in the Samples table."""
-        records = self.fetch_all(samples_table)
+        tbl = self._tbl(samples_table, self._samples_fm)
+        records = tbl.all()
+        key = self._fld("run_accession", self._samples_fm)
         return {
-            r["fields"].get("run_accession", "")
+            r["fields"].get(key, "")
             for r in records
-            if r["fields"].get("run_accession")
+            if r["fields"].get(key)
         }
 
     def upsert_samples(
@@ -119,7 +172,8 @@ class AirtableClient:
         existing = self.existing_run_accessions(samples_table)
         new = [s for s in samples if s.get("run_accession") not in existing]
         if new:
-            self.create_records(samples_table, new)
+            tbl = self._tbl(samples_table, self._samples_fm)
+            tbl.batch_create([self._enc(s, self._samples_fm) for s in new])
         return len(new), len(samples) - len(new)
 
     def fetch_samples_for_processing(
@@ -129,11 +183,14 @@ class AirtableClient:
         status: str = "pending",
     ) -> list[dict[str, Any]]:
         """Return samples ready for Drakkar processing."""
-        parts = [f'{{status}} = "{status}"']
+        status_key = self._fld("status", self._samples_fm)
+        batch_key = self._fld("batch", self._samples_fm)
+        parts = [f'{{{status_key}}} = "{status}"']
         if batch:
-            parts.append(f'{{batch}} = "{batch}"')
+            parts.append(f'{{{batch_key}}} = "{batch}"')
         formula = "AND(" + ", ".join(parts) + ")" if len(parts) > 1 else parts[0]
-        return self.fetch_all(samples_table, formula=formula)
+        tbl = self._tbl(samples_table, self._samples_fm)
+        return tbl.all(formula=formula)
 
     def set_sample_status(
         self,
@@ -142,11 +199,13 @@ class AirtableClient:
         status: str,
         extra_fields: dict[str, Any] | None = None,
     ) -> None:
+        status_key = self._fld("status", self._samples_fm)
         updates = [
-            {"id": rid, "fields": {"status": status, **(extra_fields or {})}}
+            {"id": rid, "fields": {status_key: status, **(extra_fields or {})}}
             for rid in record_ids
         ]
-        self.update_records(samples_table, updates)
+        tbl = self._tbl(samples_table, self._samples_fm)
+        tbl.batch_update(updates)
 
     # ------------------------------------------------------------------
     # Studies table — status helpers
@@ -158,8 +217,11 @@ class AirtableClient:
         status: str = "approved",
     ) -> list[dict[str, Any]]:
         """Return all study records whose status field equals *status*."""
-        formula = f'{{status}} = "{status}"'
-        return self.fetch_all(studies_table, formula=formula)
+        status_key = self._fld("status", self._studies_fm)
+        formula = f'{{{status_key}}} = "{status}"'
+        tbl = self._tbl(studies_table, self._studies_fm)
+        records = tbl.all(formula=formula)
+        return [self._dec(r, self._studies_fm) for r in records]
 
     def set_study_status(
         self,
@@ -167,5 +229,7 @@ class AirtableClient:
         record_ids: list[str],
         status: str,
     ) -> None:
-        updates = [{"id": rid, "fields": {"status": status}} for rid in record_ids]
-        self.update_records(studies_table, updates)
+        status_key = self._fld("status", self._studies_fm)
+        updates = [{"id": rid, "fields": {status_key: status}} for rid in record_ids]
+        tbl = self._tbl(studies_table, self._studies_fm)
+        tbl.batch_update(updates)

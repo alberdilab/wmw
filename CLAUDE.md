@@ -56,5 +56,9 @@ wmw update
 ## Tests & release
 `pytest tests/` (74 tests) · `python scripts/release.py X.Y.Z` (add `--dry-run` first)
 
+## Changelog policy
+- Every code change must be logged under the `[Unreleased]` section of `CHANGELOG.md` before the work is considered done.
+- Do NOT run `scripts/release.py` or bump the version unless the user explicitly requests a release.
+
 ## Docs
 `docs/architecture.md` · `docs/schema.md` · `docs/cli.md` · `docs/filters.md` · `docs/release.md`

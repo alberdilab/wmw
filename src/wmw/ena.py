@@ -312,7 +312,7 @@ def fetch_study_metadata(study_accession: str) -> dict[str, Any] | None:
 def fetch_studies_batch(
     accessions: list[str],
     *,
-    chunk_size: int = 100,
+    chunk_size: int = 20,
 ) -> list[dict[str, Any]]:
     """Fetch study metadata for multiple accessions in chunked API calls.
 

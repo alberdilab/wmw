@@ -4,8 +4,8 @@
 # --- Airtable ---
 # Token: use $AIRTABLE_TOKEN env var or --airtable-token flag (not stored in config)
 WMW_BASE: "appHz4Vc5NpVdfU3K"   # Airtable base ID, e.g. appXXXXXXXXXXXXXX
-STUDIES_TABLE: "Studies"        # Table name for study-level records
-SAMPLES_TABLE: "Samples"        # Table name for run/sample-level records
+STUDIES_TABLE: "tblBzrwZn1IVKUlfQ"        # Table name for study-level records
+SAMPLES_TABLE: "tblXdKvsFaLUgLtU5"        # Table name for run/sample-level records
 
 # --- Studies table column IDs ---
 # Airtable field IDs (fldXXXXXXXXXXXXXX) for each column in the Studies table.
