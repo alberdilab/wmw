@@ -8,6 +8,41 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.3.0] - 2026-05-06
+
+### Added
+
+- `wmw scan` now fetches the open-access PDF of each resolved publication via the
+  [Unpaywall API](https://unpaywall.org/products/api) and stores it in the `pub_pdf`
+  Attachment field of the Studies table. Only populated when an OA PDF URL is available;
+  skipped along with other publication metadata when `--no-publications` is passed.
+- `wmw scan --run-batch N` (default 20): when a keyword filter is active, the matched study
+  accessions are split into batches of N and runs are queried per-batch via the ENA run
+  endpoint. This avoids ENA's 10 000-record API limit that previously caused qualifying runs
+  to be silently truncated when many studies matched the date window.
+- `wmw scan --debug`: prints the full ENA API URL (with encoded query string) before every
+  request, making it straightforward to paste queries into a browser and inspect raw results.
+- `ena.get_lineage(tax_id)` — fetches the semicolon-separated ancestor-name lineage for a
+  taxon via the ENA Taxonomy REST API (`/tax-id/{id}`), with in-process caching so each
+  unique taxon is only looked up once per run.
+- Per-batch progress line in scan output: after each batch completes, reports the number of
+  runs found in that batch and the cumulative run and study totals.
+
+### Changed
+
+- `wmw scan --taxonomy` no longer filters studies at the ENA study endpoint using
+  `tax_tree()`. Many multi-organism metagenomic studies (e.g. EHI) have no `tax_id` set in
+  ENA's study index and were silently excluded. Taxonomy is now applied post-fetch at the
+  run level: each unique `host_tax_id` in the fetched runs is checked against the ENA
+  taxonomy lineage, and runs whose host falls outside the target taxon's subtree are
+  removed. Runs with no `host_tax_id` are kept.
+- `ena.search_runs()` gains an optional `study_accessions` parameter; when provided, a
+  `study_accession` IN-clause is added to the query so results are restricted to those
+  specific studies. Also makes `date_from`/`date_to` optional (date clause is omitted when
+  both are empty), which is used by batch mode to avoid double-filtering runs that were
+  already date-scoped at the study level.
+- `ena.search_studies()` no longer accepts or applies the `taxonomy_tax_id` parameter in
+  its query; taxonomy filtering has moved entirely to the post-fetch run-level step.
 ## [0.2.0] - 2026-05-05
 
 ### Added

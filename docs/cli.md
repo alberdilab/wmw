@@ -27,6 +27,7 @@ wmw scan [--from DATE] [--to DATE] [--study ACCESSION]
          [--host-tax-id TAXON_ID]
          [--date-field FIELD]             # first_public|last_updated; config: DATE_FIELD
          [--keyword TEXT]
+         [--include GROUPS]              # Human,Livestock,Aquaculture,Laboratory or All
          [--dry-run]
          [--no-publications]
          [--airtable-token TOKEN]         # or $AIRTABLE_TOKEN env var
@@ -43,13 +44,15 @@ wmw scan [--from DATE] [--to DATE] [--study ACCESSION]
 - `--host-tax-id` is matched against the ENA study `tax_id` field, which is an approximate host filter at study level.
 - `collection_date` is a run-level field not available in the study index; use `first_public` or `last_updated`.
 - New studies are written with `status = "new"`.
+- By default, studies whose `tax_id` matches any entry in `EXCLUDED_HOST_TAX_IDS` (Human, Livestock, Aquaculture, Laboratory) are removed before writing to Airtable. Use `--include` to re-enable specific groups or `--include All` to disable all exclusions.
 
 **Execution order:**
 1. Query ENA study endpoint (date range + optional host_tax_id, keyword)
 2. Normalize → deduplicate by study_accession
-3. Resolve publications via PubMed/CrossRef (unless `--no-publications`)
-4. Print summary table
-5. Upsert Studies into Airtable (unless `--dry-run`)
+3. Filter by excluded host taxa (unless `--include All`)
+4. Resolve publications via PubMed/CrossRef and fetch OA PDF URL via Unpaywall (unless `--no-publications`)
+5. Print summary table
+6. Upsert Studies into Airtable (unless `--dry-run`)
 
 ---
 
@@ -64,8 +67,8 @@ wmw fetch [--status VALUE]               # default: "approved"
           [--library-source SOURCE]      # e.g. METAGENOMIC; config: LIBRARY_SOURCE
           [--instrument-platform PLATFORM] # e.g. ILLUMINA; config: INSTRUMENT_PLATFORM
           [--min-bases N]                # config: MIN_BASES
-          [--exclude-taxa IDS]           # comma-sep, appended to config EXCLUDED_HOST_TAX_IDS
-          [--no-exclude]                 # disables all exclusions
+          [--include GROUPS]             # Human,Livestock,Aquaculture,Laboratory or All
+          [--exclude-taxa IDS]           # comma-sep extra taxon IDs to also exclude
           [--dry-run]
           [--airtable-token TOKEN]       # or $AIRTABLE_TOKEN env var
           [--base-id BASE_ID]            # or config WMW_BASE
@@ -77,11 +80,15 @@ wmw fetch [--status VALUE]               # default: "approved"
 - Batch (default): reads all studies where `status = --status` from Airtable, then fetches each
 - Single-study: `--study PRJEB12345` (bypasses Airtable status filter; does not update study status)
 
+**Notes:**
+- Host taxon exclusions (`EXCLUDED_HOST_TAX_IDS` groups) are active by default. Use `--include Human` etc. to re-enable specific groups, or `--include All` to disable all exclusions.
+- `--exclude-taxa` appends individual taxon IDs on top of the group-based exclusions.
+
 **Execution order:**
 1. Read approved studies from Airtable Studies table (or use `--study` directly)
 2. For each study, call `ena.search_study(accession)` to fetch all run records
 3. Normalize → deduplicate
-4. Post-fetch `filter_runs()`: host taxon exclusions, min_bases, library_strategy, library_source, instrument_platform
+4. Post-fetch `filter_runs()`: host taxon exclusions (`--include` / `--exclude-taxa`), min_bases, library_strategy, library_source, instrument_platform
 5. Upsert Samples into Airtable (unless `--dry-run`)
 6. Update study `status = "indexed"` for successfully fetched studies
 

@@ -19,10 +19,10 @@ Discovers wild-animal shotgun metagenome studies in ENA, populates Airtable, and
 | `sra.py` | NCBI SRA via Biopython Entrez; `search_runs()`, `search_study()` — retained but not used in automated scan/fetch |
 | `metadata.py` | `normalize_ena/sra_run/study()`, `filter_runs()` (host_tax_id, min_bases, library_strategy, library_source, instrument_platform), `deduplicate_runs()`, `studies_from_runs()` |
 | `drakkar.py` | `build_manifest()` → TSV; `run_workflow()` → subprocess; `parse_preprocessing_stats()` |
-| `publications.py` | `fetch_from_pubmed()`, `fetch_from_crossref()`, `resolve_batch()` |
+| `publications.py` | `fetch_from_pubmed()`, `fetch_from_crossref()`, `fetch_pdf_url()` (Unpaywall), `resolve_batch()` |
 
 ## Airtable schema
-**Studies** — `study_accession`, `secondary_study_accession`, `study_title`, `study_description`, `source` (ENA), `scientific_name`, `tax_id`, `first_public`, `center_name`, `status` (`new`→`approved`→`indexed`), `pubmed_id`, `pub_doi`, `pub_url`, `pub_title`, `pub_year`, `pub_journal`, `pub_authors`
+**Studies** — `study_accession`, `secondary_study_accession`, `study_title`, `study_description`, `source` (ENA), `scientific_name`, `tax_id`, `first_public`, `center_name`, `status` (`new`→`approved`→`indexed`), `pubmed_id`, `pub_doi`, `pub_url`, `pub_title`, `pub_year`, `pub_journal`, `pub_authors`, `pub_pdf` (Attachment; OA PDF via Unpaywall)
 **Samples** — `run_accession`, `study_accession`, `sample_accession`, `experiment_accession`, `scientific_name`, `tax_id`, `instrument_platform`, `instrument_model`, `library_strategy`, `library_source`, `library_layout`, `base_count`, `read_count`, `fastq_ftp`, `fastq_md5`, `fastq_url_1`, `fastq_url_2`, `collection_date`, `first_public`, `geo_loc_name`, `host`, `host_tax_id`, `host_scientific_name`, `country`, `center_name`, `source`, `status`
 
 ## Config keys (`src/wmw/data/config.yaml`)
@@ -32,11 +32,12 @@ Discovers wild-animal shotgun metagenome studies in ENA, populates Airtable, and
 ```
 wmw scan   [--from DATE] [--to DATE] [--study ACC]
            [--host-tax-id ID] [--date-field first_public|last_updated]
-           [--keyword TEXT] [--dry-run] [--no-publications]
+           [--keyword TEXT] [--include GROUPS] [--run-batch N]
+           [--dry-run] [--no-publications]
 wmw fetch  [--status VALUE] [--study ACC]
            [--library-strategy STR] [--library-source STR]
            [--instrument-platform STR] [--min-bases N]
-           [--exclude-taxa IDs] [--no-exclude] [--dry-run]
+           [--include GROUPS] [--exclude-taxa IDs] [--dry-run]
 wmw process --batch BATCH [--workflow preprocessing|cataloging|...] [--slurm] [--output-dir DIR]
 wmw status  [--batch BATCH]
 wmw config  --view | --edit
@@ -46,12 +47,14 @@ wmw update
 ## Key patterns
 - `_conf(args, "cli_attr", "CONFIG_KEY")` — CLI flag → config → `''`
 - `_die(msg)` — error to stderr + `sys.exit(1)`
-- Scan filters: study-level only (date, organism tax_id, keyword) — applied at ENA query time
+- Scan filters: study-level (date, organism tax_id, keyword, host taxon exclusions) — applied at query/normalize time
+- `--run-batch N` (default 20): when a taxonomy/keyword filter is active, studies are split into batches of N and runs are queried per-batch to avoid the ENA 10 000-record API limit
 - Fetch filters: run-level (library_strategy, library_source, instrument_platform, min_bases, host_tax_id exclusions) — applied post-fetch by `metadata.filter_runs()`
+- `_build_exclude_ids(args)` — reads `EXCLUDED_HOST_TAX_IDS` dict groups minus any named in `--include`; `--include All` disables all exclusions
 - Fields with blank values are never excluded by any filter
 
 ## Tests & release
-`pytest tests/` (67 tests) · `python scripts/release.py X.Y.Z` (add `--dry-run` first)
+`pytest tests/` (74 tests) · `python scripts/release.py X.Y.Z` (add `--dry-run` first)
 
 ## Docs
 `docs/architecture.md` · `docs/schema.md` · `docs/cli.md` · `docs/filters.md` · `docs/release.md`

@@ -117,6 +117,76 @@ def test_fetch_from_pubmed_success():
 
 
 # ---------------------------------------------------------------------------
+# fetch_pdf_url (Unpaywall)
+# ---------------------------------------------------------------------------
+
+def test_fetch_pdf_url_success():
+    payload = {
+        "doi": "10.1000/test",
+        "is_oa": True,
+        "best_oa_location": {
+            "url_for_pdf": "https://europepmc.org/articles/pmc123/pdf/",
+        },
+    }
+    with patch("wmw.publications.requests.get") as mock_get:
+        mock_get.return_value = MagicMock(status_code=200, json=lambda: payload)
+        mock_get.return_value.raise_for_status.return_value = None
+        result = publications.fetch_pdf_url("10.1000/test", "test@example.com")
+    assert result == "https://europepmc.org/articles/pmc123/pdf/"
+
+
+def test_fetch_pdf_url_no_pdf_location():
+    payload = {"doi": "10.1000/test", "is_oa": True, "best_oa_location": {"url_for_pdf": None}}
+    with patch("wmw.publications.requests.get") as mock_get:
+        mock_get.return_value = MagicMock(status_code=200, json=lambda: payload)
+        mock_get.return_value.raise_for_status.return_value = None
+        result = publications.fetch_pdf_url("10.1000/test", "test@example.com")
+    assert result == ""
+
+
+def test_fetch_pdf_url_404():
+    with patch("wmw.publications.requests.get") as mock_get:
+        mock_get.return_value = MagicMock(status_code=404)
+        result = publications.fetch_pdf_url("10.1000/missing", "test@example.com")
+    assert result == ""
+
+
+def test_fetch_pdf_url_failure():
+    with patch("wmw.publications.requests.get", side_effect=Exception("timeout")):
+        result = publications.fetch_pdf_url("10.1000/bad", "test@example.com")
+    assert result == ""
+
+
+def test_fetch_pdf_url_empty_inputs():
+    assert publications.fetch_pdf_url("", "test@example.com") == ""
+    assert publications.fetch_pdf_url("10.1000/test", "") == ""
+
+
+def test_resolve_includes_pub_pdf():
+    fake_pub = {
+        "pub_title": "A paper", "pub_year": "2024", "pub_journal": "Nature",
+        "pub_doi": "10.1000/x", "pub_url": "https://doi.org/10.1000/x",
+        "pub_authors": "Smith J", "pubmed_id": "",
+    }
+    with patch("wmw.publications.fetch_from_crossref", return_value=dict(fake_pub)), \
+         patch("wmw.publications.fetch_pdf_url", return_value="https://example.com/paper.pdf"):
+        result = publications.resolve(doi="10.1000/x", email="test@example.com")
+    assert result["pub_pdf"] == [{"url": "https://example.com/paper.pdf"}]
+
+
+def test_resolve_no_pub_pdf_when_unpaywall_empty():
+    fake_pub = {
+        "pub_title": "A paper", "pub_year": "2024", "pub_journal": "Nature",
+        "pub_doi": "10.1000/x", "pub_url": "https://doi.org/10.1000/x",
+        "pub_authors": "Smith J", "pubmed_id": "",
+    }
+    with patch("wmw.publications.fetch_from_crossref", return_value=dict(fake_pub)), \
+         patch("wmw.publications.fetch_pdf_url", return_value=""):
+        result = publications.resolve(doi="10.1000/x", email="test@example.com")
+    assert "pub_pdf" not in result
+
+
+# ---------------------------------------------------------------------------
 # resolve_batch
 # ---------------------------------------------------------------------------
 

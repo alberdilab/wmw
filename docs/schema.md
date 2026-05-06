@@ -24,6 +24,7 @@ linked to Studies by `study_accession`).
 | `pub_year` | text | PubMed / CrossRef | 4-digit string |
 | `pub_journal` | text | PubMed / CrossRef | Full journal name |
 | `pub_authors` | text | PubMed / CrossRef | Up to 5 names, then "et al." |
+| `pub_pdf` | attachment | Unpaywall | OA PDF; Airtable Attachment field; set only when an open-access PDF is found |
 
 ## Samples table
 

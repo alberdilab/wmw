@@ -8,9 +8,34 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+try:
+    from rich_argparse import RawDescriptionRichHelpFormatter as _RichFmt
+    from rich.style import Style
+    _RichFmt.styles.update(  # type: ignore[attr-defined]
+        {
+            "argparse.prog":    Style(bold=True, color="#7fb069"),
+            "argparse.groups":  Style(bold=True, color="#5f9ea0"),
+            "argparse.help":    Style(color="#e6edf3"),
+            "argparse.metavar": Style(color="#b7c7d3"),
+            "argparse.syntax":  Style(color="#7fb069"),
+            "argparse.args":    Style(color="#5f9ea0"),
+        }
+    )
+    _RICH_ARGPARSE = True
+except ImportError:
+    _RichFmt = argparse.RawDescriptionHelpFormatter  # type: ignore[misc,assignment]
+    _RICH_ARGPARSE = False
+
 from wmw import __version__
 from wmw import config as cfg
 from wmw import output as out
+
+
+class _WmwParser(argparse.ArgumentParser):
+    """argparse.ArgumentParser with wmw-themed Rich help and raw-description formatting."""
+
+    def __init__(self, *args, formatter_class: type = _RichFmt, **kwargs) -> None:
+        super().__init__(*args, formatter_class=formatter_class, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -55,26 +80,78 @@ def _airtable_client(args: argparse.Namespace):
     return AirtableClient(token, base_id)
 
 
+_EXCLUDE_GROUPS = {"Human", "Livestock", "Aquaculture", "Laboratory"}
+
+
+def _build_exclude_ids(args: argparse.Namespace) -> list[str]:
+    """Return host tax IDs to exclude, honouring --include group names."""
+    include_arg = (getattr(args, "include", None) or "").strip()
+    if include_arg.lower() == "all":
+        return []
+
+    included_groups = {g.strip().title() for g in include_arg.split(",") if g.strip()}
+
+    config_val = cfg.get("EXCLUDED_HOST_TAX_IDS") or {}
+    exclude_ids: list[str] = []
+
+    if isinstance(config_val, dict):
+        for group, ids in config_val.items():
+            if group in included_groups:
+                continue
+            for tid in (ids or []):
+                tid = str(tid).strip()
+                if tid and tid not in exclude_ids:
+                    exclude_ids.append(tid)
+    else:
+        # Legacy flat-list fallback
+        for tid in config_val:
+            tid = str(tid).strip()
+            if tid and tid not in exclude_ids:
+                exclude_ids.append(tid)
+
+    return exclude_ids
+
+
 # ---------------------------------------------------------------------------
 # wmw scan  (phase 1 — study discovery, ENA only)
 # ---------------------------------------------------------------------------
 
 def cmd_scan(args: argparse.Namespace) -> int:
     from wmw import ena, metadata
+    ena.DEBUG = getattr(args, "debug", False)
 
     studies_table = _conf(args, "studies_table", "STUDIES_TABLE") or "Studies"
     dry_run = args.dry_run
     date_field = _conf(args, "date_field", "DATE_FIELD") or "first_public"
     host_tax_id = (args.host_tax_id or "").strip()
+    # --keyword replaces SCAN_KEYWORDS config default; empty CLI arg falls back to config
     keyword = (getattr(args, "keyword", "") or "").strip()
+    if not keyword:
+        keyword = str(cfg.get("SCAN_KEYWORDS") or "").strip()
+    taxonomy = (getattr(args, "taxonomy", "") or "").strip()
+    library_strategy_str = (
+        (getattr(args, "library_strategy", "") or "").strip()
+        or _conf(args, "library_strategy", "LIBRARY_STRATEGY")
+        or "WGS,METAGENOMIC"
+    )
+    library_source_str = _conf(args, "library_source", "LIBRARY_SOURCE") or ""
 
-    from wmw.ena import VALID_STUDY_DATE_FIELDS
-    if date_field not in VALID_STUDY_DATE_FIELDS:
+    from wmw.ena import VALID_DATE_FIELDS
+    if date_field not in VALID_DATE_FIELDS:
         _die(
             f"--date-field for wmw scan must be one of "
-            f"{sorted(VALID_STUDY_DATE_FIELDS)}, got: {date_field!r}. "
-            f"Use wmw fetch for run-level date fields."
+            f"{sorted(VALID_DATE_FIELDS)}, got: {date_field!r}."
         )
+
+    # Resolve --taxonomy name → tax_id early so we can report it and fail fast
+    taxonomy_tax_id = ""
+    taxonomy_sci_name = ""
+    if taxonomy:
+        out.info(f"Resolving taxonomy name: {taxonomy!r}…")
+        try:
+            taxonomy_tax_id, taxonomy_sci_name = ena.resolve_taxonomy_name(taxonomy)
+        except Exception as exc:
+            _die(f"Could not resolve taxonomy {taxonomy!r}: {exc}")
 
     # --- single-study mode ---
     if args.study:
@@ -84,29 +161,139 @@ def cmd_scan(args: argparse.Namespace) -> int:
     if not args.date_from or not args.date_to:
         _die("Provide --from and --to dates, or a --study accession.")
 
+    exclude_ids = _build_exclude_ids(args)
+
     out.section("WMW SCAN")
     out.info(f"Date range: {args.date_from} → {args.date_to}  (field: {date_field})")
-    if host_tax_id:
+    out.info(f"Library strategy: {library_strategy_str}")
+    if library_source_str:
+        out.info(f"Library source: {library_source_str}")
+    if taxonomy_tax_id:
+        out.info(f"Taxonomy filter: {taxonomy_sci_name} (tax_id: {taxonomy_tax_id}, applied to runs via host lineage)")
+    elif host_tax_id:
         out.info(f"Host taxon filter: {host_tax_id}")
     if keyword:
-        out.info(f"Keyword filter: \"{keyword}\"")
-    out.info("Database: ENA (study level)")
-
-    out.info("Querying ENA Portal API for studies…")
-    try:
-        raw_studies = ena.search_studies(
-            date_from=args.date_from,
-            date_to=args.date_to,
-            host_tax_id=host_tax_id,
-            date_field=date_field,
-            keyword=keyword,
+        out.info(f"Keyword filter: \"{keyword}\" (study title and description)")
+    if exclude_ids:
+        include_arg = (getattr(args, "include", None) or "").strip()
+        out.info(
+            f"Excluding {len(exclude_ids)} host taxon ID(s)"
+            + (f" (included: {include_arg})" if include_arg else "")
+            + ". Use --include All to disable."
         )
-        out.success(f"ENA: {len(raw_studies)} study record(s) found.")
-    except Exception as exc:
-        _die(f"ENA study query failed: {exc}")
-        return 1  # unreachable; satisfies type checker
+    out.info("Database: ENA (study endpoint pre-filter → run endpoint → study discovery)")
 
-    studies = [metadata.normalize_ena_study(s) for s in raw_studies]
+    # tax_tree() and study_description keyword search are only valid in result=study.
+    # When taxonomy or keywords are set, first fetch matching study accessions via the
+    # study endpoint, then use that set to filter the run results.
+    from wmw.ena import VALID_STUDY_DATE_FIELDS
+    study_date_field = date_field if date_field in VALID_STUDY_DATE_FIELDS else "first_public"
+
+    study_accession_filter: set[str] | None = None
+    if keyword:
+        out.info(
+            f"Querying ENA study endpoint for keyword \"{keyword}\" filter"
+            f" (date field: {study_date_field})…"
+        )
+        try:
+            study_raw = ena.search_studies(
+                date_from=args.date_from,
+                date_to=args.date_to,
+                date_field=study_date_field,
+                keyword=keyword,
+            )
+            study_accession_filter = {
+                s.get("study_accession") for s in study_raw
+                if s.get("study_accession")
+            }
+            out.info(f"  {len(study_accession_filter)} studies match study-level filter(s).")
+        except Exception as exc:
+            _die(f"ENA study query failed: {exc}")
+            return 1
+
+    run_batch = getattr(args, "run_batch", 20) or 20
+    raw_runs: list[dict] = []
+
+    if study_accession_filter is not None:
+        study_list = sorted(study_accession_filter)
+        n_batches = (len(study_list) + run_batch - 1) // run_batch
+        out.info(
+            f"Querying ENA runs in {n_batches} batch(es) of up to {run_batch} studies…"
+        )
+        for i in range(0, len(study_list), run_batch):
+            batch = study_list[i : i + run_batch]
+            batch_num = i // run_batch + 1
+            out.info(f"  Batch {batch_num}/{n_batches}: querying {len(batch)} studies…")
+            try:
+                batch_runs = ena.search_runs(
+                    host_tax_id=host_tax_id,
+                    library_strategy=library_strategy_str,
+                    library_source=library_source_str,
+                    study_accessions=batch,
+                )
+                raw_runs.extend(batch_runs)
+            except Exception as exc:
+                _die(f"ENA run query failed (batch {batch_num}): {exc}")
+                return 1
+            out.info(
+                f"    → {len(batch_runs)} run(s) found"
+                f"  |  cumulative: {len(raw_runs)} run(s) across"
+                f" {len({r.get('study_accession') for r in raw_runs if r.get('study_accession')})} study/studies."
+            )
+    else:
+        out.info("Querying ENA Portal API for runs…")
+        try:
+            raw_runs = ena.search_runs(
+                date_from=args.date_from,
+                date_to=args.date_to,
+                host_tax_id=host_tax_id,
+                library_strategy=library_strategy_str,
+                library_source=library_source_str,
+                date_field=date_field,
+            )
+        except Exception as exc:
+            _die(f"ENA run query failed: {exc}")
+            return 1
+
+    if exclude_ids:
+        raw_runs, n_excluded = metadata.filter_runs(raw_runs, exclude_host_tax_ids=exclude_ids)
+        if n_excluded:
+            out.info(f"  Host exclusion filter removed {n_excluded} run(s).")
+
+    if taxonomy_tax_id and taxonomy_sci_name:
+        unique_host_ids = {r.get("host_tax_id", "") for r in raw_runs if r.get("host_tax_id")}
+        out.info(
+            f"Checking host taxonomy ({taxonomy_sci_name}) for"
+            f" {len(unique_host_ids)} unique host taxon ID(s)…"
+        )
+        valid_host_ids: set[str] = set()
+        for hid in unique_host_ids:
+            lineage = ena.get_lineage(hid)
+            if taxonomy_sci_name in lineage or hid == taxonomy_tax_id:
+                valid_host_ids.add(hid)
+        before = len(raw_runs)
+        raw_runs = [
+            r for r in raw_runs
+            if not r.get("host_tax_id") or r.get("host_tax_id") in valid_host_ids
+        ]
+        removed = before - len(raw_runs)
+        if removed:
+            out.info(
+                f"  Host taxonomy filter removed {removed} run(s) outside {taxonomy_sci_name}."
+            )
+
+    study_accessions = ena.unique_studies(raw_runs)
+    out.success(
+        f"ENA: {len(raw_runs)} qualifying run(s) → {len(study_accessions)} unique study/studies."
+    )
+
+    if not study_accessions:
+        out.info("Nothing to insert.")
+        return 0
+
+    out.info(f"Fetching study metadata for {len(study_accessions)} studies…")
+    raw_study_records = ena.fetch_studies_batch(study_accessions)
+    studies = [metadata.normalize_ena_study(s) for s in raw_study_records]
 
     seen: set[str] = set()
     deduped: list[dict] = []
@@ -199,15 +386,12 @@ def _resolve_fetch_params(args: argparse.Namespace) -> dict:
         except ValueError:
             _die(f"--min-bases / MIN_BASES must be an integer, got: {min_bases_str!r}")
 
-    exclude_ids: list[str] = []
-    if not args.no_exclude:
-        config_list = cfg.get("EXCLUDED_HOST_TAX_IDS") or []
-        exclude_ids = [str(t).strip() for t in config_list if str(t).strip()]
-        cli_extra = getattr(args, "exclude_taxa", "") or ""
-        for tid in cli_extra.split(","):
-            tid = tid.strip()
-            if tid and tid not in exclude_ids:
-                exclude_ids.append(tid)
+    exclude_ids = _build_exclude_ids(args)
+    cli_extra = getattr(args, "exclude_taxa", "") or ""
+    for tid in cli_extra.split(","):
+        tid = tid.strip()
+        if tid and tid not in exclude_ids:
+            exclude_ids.append(tid)
 
     library_strategy_str = args.library_strategy or "WGS,METAGENOMIC"
     library_strategies = [s.strip() for s in library_strategy_str.split(",") if s.strip()] or None
@@ -318,16 +502,20 @@ def cmd_fetch(args: argparse.Namespace) -> int:
 
 
 def _print_scan_summary(studies: list[dict]) -> None:
-    tbl = out.make_table("Study accession", "Title", "Source", "First public")
+    tbl = out.make_table("Study accession", "Scientific name", "Tax ID", "Title", "First public")
     if tbl is None:
         for s in studies:
-            print(f"  {s.get('study_accession')}  {s.get('study_title', '')[:60]}")
+            print(
+                f"  {s.get('study_accession')}  {s.get('scientific_name', '')}  "
+                f"[{s.get('tax_id', '')}]  {s.get('study_title', '')[:50]}"
+            )
         return
     for s in studies:
         tbl.add_row(
             s.get("study_accession", ""),
-            (s.get("study_title") or "")[:60],
-            s.get("source", ""),
+            s.get("scientific_name", ""),
+            s.get("tax_id", ""),
+            (s.get("study_title") or "")[:50],
             s.get("first_public", ""),
         )
     out.render_table(tbl)
@@ -459,10 +647,9 @@ def cmd_update(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _WmwParser(
         prog="wmw",
         description="Wild Microbiome Watch — scan ENA/SRA and drive Drakkar metagenomics workflows.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Typical workflow:\n"
             "  1. wmw scan --from 2024-01-01 --to 2024-12-31\n"
@@ -485,7 +672,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # Common Airtable flags (available on scan, fetch, process, status)
     _add_airtable_flags(parser)
 
-    sub = parser.add_subparsers(title="commands", metavar="<command>")
+    sub = parser.add_subparsers(title="commands", metavar="<command>", parser_class=_WmwParser)
 
     # ---- scan ----
     p_scan = sub.add_parser(
@@ -516,6 +703,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Add a single study by ENA accession (overrides date window).",
     )
     p_scan.add_argument(
+        "--taxonomy",
+        metavar="NAME",
+        default="",
+        help=(
+            "Restrict studies to a taxonomic group by name (e.g. Chiroptera, Mammalia). "
+            "Resolved to an NCBI tax_id via the ENA Taxonomy API and applied with "
+            "ENA's tax_tree() operator, which matches all organisms within the subtree."
+        ),
+    )
+    p_scan.add_argument(
         "--host-tax-id",
         metavar="TAXON_ID",
         default="",
@@ -525,17 +722,63 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_scan.add_argument(
+        "--library-strategy",
+        metavar="STRATEGY",
+        default="",
+        help=(
+            "Comma-separated ENA library strategies to require (default from config or WGS,METAGENOMIC). "
+            "Excludes amplicon and other non-shotgun data at query time."
+        ),
+    )
+    p_scan.add_argument(
+        "--library-source",
+        metavar="SOURCE",
+        default="",
+        help=(
+            "Comma-separated ENA library sources to require, e.g. METAGENOMIC "
+            "(default from config: no filter). Excludes animal genomic libraries."
+        ),
+    )
+    p_scan.add_argument(
         "--date-field",
         metavar="FIELD",
         default="",
-        choices=["", "first_public", "last_updated"],
+        choices=["", "first_public", "last_updated", "collection_date"],
         help="ENA date field for the date window (default from config: first_public).",
     )
     p_scan.add_argument(
         "--keyword",
         metavar="TEXT",
         default="",
-        help="Free-text substring to match against study title.",
+        help=(
+            "Free-text keyword(s) matched against study title and description. "
+            "Separate multiple keywords with | (OR logic). "
+            "Overrides SCAN_KEYWORDS from config (default: ECOLOGY|EVOLUTION|WILD)."
+        ),
+    )
+    p_scan.add_argument(
+        "--include",
+        metavar="GROUPS",
+        default="",
+        help=(
+            "Comma-separated exclusion groups to re-enable: Human, Livestock, Aquaculture, Laboratory. "
+            "Use 'All' to disable all host-taxon exclusions (default: all groups excluded)."
+        ),
+    )
+    p_scan.add_argument(
+        "--run-batch",
+        metavar="N",
+        type=int,
+        default=20,
+        help=(
+            "Number of studies per run-query batch when a taxonomy/keyword filter is active "
+            "(default: 20). Smaller values avoid the ENA 10 000-record limit per query."
+        ),
+    )
+    p_scan.add_argument(
+        "--debug",
+        action="store_true",
+        help="Print the full ENA API URL for every request (useful for diagnosing query issues).",
     )
     p_scan.add_argument(
         "--dry-run",
@@ -603,18 +846,22 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Minimum total base count per run (default: no minimum).",
     )
     p_fetch.add_argument(
+        "--include",
+        metavar="GROUPS",
+        default="",
+        help=(
+            "Comma-separated exclusion groups to re-enable: Human, Livestock, Aquaculture, Laboratory. "
+            "Use 'All' to disable all host-taxon exclusions (default: all groups excluded)."
+        ),
+    )
+    p_fetch.add_argument(
         "--exclude-taxa",
         metavar="IDS",
         default="",
         help=(
-            "Comma-separated host taxon IDs to exclude, appended to the config exclusion list "
+            "Comma-separated host taxon IDs to exclude in addition to config groups "
             "(e.g. 9615,9685 to also exclude dogs and cats)."
         ),
-    )
-    p_fetch.add_argument(
-        "--no-exclude",
-        action="store_true",
-        help="Disable all host taxon exclusions (config list and --exclude-taxa).",
     )
     p_fetch.add_argument(
         "--dry-run",

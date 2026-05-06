@@ -25,6 +25,7 @@ except ImportError:
 
 CROSSREF_URL = "https://api.crossref.org/works/{doi}"
 PUBMED_BASE = "https://pubmed.ncbi.nlm.nih.gov"
+UNPAYWALL_URL = "https://api.unpaywall.org/v2/{doi}?email={email}"
 
 
 # ---------------------------------------------------------------------------
@@ -157,6 +158,31 @@ def fetch_from_crossref(doi: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Unpaywall — OA PDF URL
+# ---------------------------------------------------------------------------
+
+def fetch_pdf_url(doi: str, email: str) -> str:
+    """Return the best OA PDF URL from Unpaywall for *doi*, or '' if unavailable."""
+    if not doi or not email:
+        return ""
+    url = UNPAYWALL_URL.format(doi=doi.strip(), email=email)
+    try:
+        resp = requests.get(
+            url,
+            headers={"User-Agent": "wmw/0.2 (mailto:wmw@wildmicrobiome.org)"},
+            timeout=15,
+        )
+        if resp.status_code == 404:
+            return ""
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception:
+        return ""
+    best = data.get("best_oa_location") or {}
+    return str(best.get("url_for_pdf") or "").strip()
+
+
+# ---------------------------------------------------------------------------
 # Unified resolver
 # ---------------------------------------------------------------------------
 
@@ -170,6 +196,8 @@ def resolve(
 
     Tries PubMed first when a pubmed_id is available; falls back to CrossRef
     using the DOI (which may itself come from the PubMed response).
+    Sets pub_pdf to an Airtable attachment list [{"url": ...}] when an OA PDF
+    is found via Unpaywall.
     """
     result: dict[str, Any] = {}
 
@@ -181,6 +209,12 @@ def resolve(
         result = fetch_from_crossref(effective_doi)
         if pubmed_id:
             result["pubmed_id"] = pubmed_id
+
+    effective_doi = result.get("pub_doi") or doi
+    if effective_doi and email:
+        pdf_url = fetch_pdf_url(effective_doi, email)
+        if pdf_url:
+            result["pub_pdf"] = [{"url": pdf_url}]
 
     return result
 

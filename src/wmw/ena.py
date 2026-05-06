@@ -4,10 +4,17 @@ from __future__ import annotations
 
 import time
 from typing import Any
+from urllib.parse import urlencode
 
 import requests
 
 ENA_SEARCH_URL = "https://www.ebi.ac.uk/ena/portal/api/search"
+ENA_TAXONOMY_URL = "https://www.ebi.ac.uk/ena/taxonomy/rest/any-name"
+ENA_TAXONOMY_TAXID_URL = "https://www.ebi.ac.uk/ena/taxonomy/rest/tax-id"
+
+DEBUG: bool = False
+
+_lineage_cache: dict[str, str] = {}
 
 VALID_DATE_FIELDS = {"first_public", "collection_date", "last_updated"}
 VALID_STUDY_DATE_FIELDS = {"first_public", "last_updated"}
@@ -33,7 +40,6 @@ RUN_FIELDS = ",".join([
     "fastq_md5",
     "collection_date",
     "first_public",
-    "geo_loc_name",
     "host",
     "host_tax_id",
     "host_scientific_name",
@@ -53,11 +59,12 @@ STUDY_FIELDS = ",".join([
     "first_public",
     "last_updated",
     "center_name",
-    "pubmed_id",
 ])
 
 
 def _get(url: str, params: dict[str, Any], retries: int = 3) -> list[dict[str, Any]]:
+    if DEBUG:
+        print(f"DEBUG ENA request: {url}?{urlencode(params)}")
     for attempt in range(retries):
         try:
             resp = requests.get(url, params=params, timeout=60)
@@ -76,9 +83,46 @@ def _get(url: str, params: dict[str, Any], retries: int = 3) -> list[dict[str, A
     return []
 
 
+def resolve_taxonomy_name(name: str) -> tuple[str, str]:
+    """Resolve a taxonomic name to (tax_id, scientific_name) via the ENA Taxonomy REST API.
+
+    Raises ValueError if the name cannot be resolved.
+    """
+    resp = requests.get(
+        f"{ENA_TAXONOMY_URL}/{requests.utils.quote(name, safe='')}",
+        timeout=30,
+    )
+    resp.raise_for_status()
+    results = resp.json()
+    if not results:
+        raise ValueError(f"Taxonomy name not found in ENA: {name!r}")
+    first = results[0]
+    return str(first["taxId"]), first.get("scientificName", name)
+
+
+def get_lineage(tax_id: str) -> str:
+    """Return the semicolon-separated lineage string for a taxon (ancestor names).
+
+    Results are cached in-process. Returns empty string on error or blank input.
+    """
+    if not tax_id:
+        return ""
+    if tax_id in _lineage_cache:
+        return _lineage_cache[tax_id]
+    try:
+        resp = requests.get(f"{ENA_TAXONOMY_TAXID_URL}/{tax_id}", timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        lineage = data.get("lineage", "") if isinstance(data, dict) else ""
+    except Exception:
+        lineage = ""
+    _lineage_cache[tax_id] = lineage
+    return lineage
+
+
 def search_runs(
-    date_from: str,
-    date_to: str,
+    date_from: str = "",
+    date_to: str = "",
     *,
     host_tax_id: str = "",
     library_strategy: str = "WGS,METAGENOMIC",
@@ -88,6 +132,7 @@ def search_runs(
     min_bases: int | None = None,
     keyword: str = "",
     exclude_host_tax_ids: list[str] | None = None,
+    study_accessions: list[str] | None = None,
     limit: int = 10000,
 ) -> list[dict[str, Any]]:
     """Search ENA for metagenomic run records within a date window.
@@ -130,8 +175,9 @@ def search_runs(
         if sources:
             query_parts.append("(" + " OR ".join(f'library_source="{s}"' for s in sources) + ")")
 
-    # Date range
-    query_parts.append(f"{date_field}>={date_from} AND {date_field}<={date_to}")
+    # Date range (omitted when querying by explicit study accessions)
+    if date_from and date_to:
+        query_parts.append(f"{date_field}>={date_from} AND {date_field}<={date_to}")
 
     # Host taxon inclusion
     if host_tax_id:
@@ -155,6 +201,11 @@ def search_runs(
         tid = str(tid).strip()
         if tid:
             query_parts.append(f"NOT host_tax_id={tid}")
+
+    # Restrict to specific studies (batched scan mode)
+    if study_accessions:
+        parts = " OR ".join(f'study_accession="{acc}"' for acc in study_accessions)
+        query_parts.append(f"({parts})")
 
     params = {
         "result": "read_run",
@@ -185,12 +236,13 @@ def search_studies(
     host_tax_id: str = "",
     date_field: str = "first_public",
     keyword: str = "",
+    taxonomy_tax_id: str = "",
     limit: int = 10000,
 ) -> list[dict[str, Any]]:
     """Search ENA for study records within a date window.
 
     Uses the ENA Portal ``result=study`` endpoint, which returns study-level
-    metadata including ``study_description`` and ``pubmed_id``.  Run-level
+    metadata including ``study_description``.  Run-level
     fields (library_strategy, instrument_platform, base_count) are not
     available at this level; they are applied post-fetch by ``wmw fetch``.
 
@@ -206,6 +258,11 @@ def search_studies(
         run-level field not available in the study index.
     keyword:
         Free-text substring matched against ``study_title``.
+    taxonomy_tax_id:
+        NCBI taxon ID used with ENA's ``tax_tree()`` operator to match all
+        studies whose organism falls within the given taxonomic subtree
+        (e.g. "9397" for Chiroptera).  Resolved from a name via
+        ``resolve_taxonomy_name()`` before calling this function.
     limit:
         Maximum number of records to return.
     """
@@ -221,8 +278,13 @@ def search_studies(
         query_parts.append(f"tax_id={host_tax_id}")
 
     if keyword:
-        safe = keyword.replace('"', "")
-        query_parts.append(f'study_title="*{safe}*"')
+        kws = [k.strip().replace('"', '') for k in keyword.split('|') if k.strip()]
+        if kws:
+            conditions = []
+            for kw in kws:
+                conditions.append(f'study_title="*{kw}*"')
+                conditions.append(f'study_description="*{kw}*"')
+            query_parts.append("(" + " OR ".join(conditions) + ")")
 
     params = {
         "result": "study",
@@ -245,6 +307,34 @@ def fetch_study_metadata(study_accession: str) -> dict[str, Any] | None:
     }
     records = _get(ENA_SEARCH_URL, params)
     return records[0] if records else None
+
+
+def fetch_studies_batch(
+    accessions: list[str],
+    *,
+    chunk_size: int = 100,
+) -> list[dict[str, Any]]:
+    """Fetch study metadata for multiple accessions in chunked API calls.
+
+    Splits accessions into chunks to avoid excessively long query strings,
+    then concatenates the results.
+    """
+    results: list[dict[str, Any]] = []
+    for i in range(0, len(accessions), chunk_size):
+        chunk = accessions[i : i + chunk_size]
+        parts = [
+            f'study_accession="{acc}" OR secondary_study_accession="{acc}"'
+            for acc in chunk
+        ]
+        params = {
+            "result": "study",
+            "query": " OR ".join(parts),
+            "fields": STUDY_FIELDS,
+            "format": "json",
+            "limit": len(chunk) * 2 + 10,
+        }
+        results.extend(_get(ENA_SEARCH_URL, params))
+    return results
 
 
 def unique_studies(run_records: list[dict[str, Any]]) -> list[str]:

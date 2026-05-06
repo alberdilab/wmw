@@ -10,23 +10,25 @@ SAMPLES_TABLE: "Samples"        # Table name for run/sample-level records
 # --- Studies table column IDs ---
 # Airtable field IDs (fldXXXXXXXXXXXXXX) for each column in the Studies table.
 # Leave blank to use field names instead.
-STUDIES_COL_STUDY_ACCESSION: ""
-STUDIES_COL_SECONDARY_STUDY_ACCESSION: ""
-STUDIES_COL_STUDY_TITLE: ""
-STUDIES_COL_STUDY_DESCRIPTION: ""
-STUDIES_COL_SOURCE: ""
-STUDIES_COL_SCIENTIFIC_NAME: ""
-STUDIES_COL_TAX_ID: ""
-STUDIES_COL_FIRST_PUBLIC: ""
-STUDIES_COL_CENTER_NAME: ""
-STUDIES_COL_STATUS: ""
-STUDIES_COL_PUBMED_ID: ""
-STUDIES_COL_PUB_DOI: ""
-STUDIES_COL_PUB_URL: ""
-STUDIES_COL_PUB_TITLE: ""
-STUDIES_COL_PUB_YEAR: ""
-STUDIES_COL_PUB_JOURNAL: ""
-STUDIES_COL_PUB_AUTHORS: ""
+STUDIES_COL_RECORD_ID: "fldNXCU0PQnLrJtrD"
+STUDIES_COL_CODE: "fldRfMOd1L883JWjv"
+STUDIES_COL_STATUS: "fldkLaSE7cLsCofM8"
+STUDIES_COL_STUDY_ACCESSION: "fldbvVzhJYhlAmfJ2"
+STUDIES_COL_SECONDARY_STUDY_ACCESSION: "fld9XOx8v9dV7Z7Kb"
+STUDIES_COL_STUDY_TITLE: "fldD7svrwpxPxnfDO"
+STUDIES_COL_STUDY_DESCRIPTION: "fldetzxa7PkCgwwSL"
+STUDIES_COL_SOURCE: "fldX3JsT4ZaoMHVTW"
+STUDIES_COL_SCIENTIFIC_NAME: "fldGb7UaDPvrgDHvq"
+STUDIES_COL_TAX_ID: "fldXvyUwz2MHJ6FTU"
+STUDIES_COL_FIRST_PUBLIC: "fldi61UxzSOxbW52L"
+STUDIES_COL_CENTER_NAME: "fldTppFs69eUifRun"
+STUDIES_COL_PUBMED_ID: "fldEwRR39eXp20InM"
+STUDIES_COL_PUB_DOI: "fldzcVlYfBMhUR1Hl"
+STUDIES_COL_PUB_URL: "fld47Tntnn1fvpngg"
+STUDIES_COL_PUB_TITLE: "fldZ9MVHAX6crmOV5"
+STUDIES_COL_PUB_YEAR: "fldhkgGV6F4sFeJEq"
+STUDIES_COL_PUB_JOURNAL: "fldCZI74qN2kUUrIU"
+STUDIES_COL_PUB_AUTHORS: "fld32udFDIKAiW36P"
 
 # --- Samples table column IDs ---
 # Airtable field IDs (fldXXXXXXXXXXXXXX) for each column in the Samples table.
@@ -69,51 +71,53 @@ NCBI_API_KEY: ""            # Optional NCBI API key for higher rate limits
 
 # --- Scan defaults ---
 # These are used when the corresponding CLI flag is not provided.
-LIBRARY_SOURCE: ""          # e.g. METAGENOMIC — leave blank for no filter
+LIBRARY_STRATEGY: "WGS,METAGENOMIC"  # Comma-separated strategies; excludes amplicon data
+LIBRARY_SOURCE: "METAGENOMIC"        # Comma-separated sources; excludes animal genomic libraries
 INSTRUMENT_PLATFORM: ""     # e.g. ILLUMINA — leave blank for no filter
 MIN_BASES: ""               # Minimum base count, e.g. 1000000000 — leave blank for no filter
 DATE_FIELD: "first_public"  # ENA date field to filter on: first_public | collection_date | last_updated
+SCAN_KEYWORDS: "ECOLOG|EVOLUT|WILD"  # | -separated keywords matched against study title and description; --keyword overrides
 
 # --- Host taxon exclusions ---
-# Runs/studies whose host_tax_id matches any entry below are removed from scan results.
-# Taxon IDs are NCBI taxonomy IDs (strings). Comment out any line to re-enable that group.
-# Override at runtime with: wmw scan --exclude-taxa 9913,9823  (appended to this list)
-#                           wmw scan --no-exclude              (disables all exclusions)
+# Studies/runs whose tax_id (scan) or host_tax_id (fetch) matches any entry below are excluded.
+# Taxon IDs are NCBI taxonomy IDs (strings). Organised by named group.
+# Override at runtime with: wmw scan --include Human        (re-enable one group)
+#                           wmw scan --include Human,Livestock (re-enable multiple groups)
+#                           wmw scan --include All           (disable all exclusions)
+# Recognised group names: Human, Livestock, Aquaculture, Laboratory
 EXCLUDED_HOST_TAX_IDS:
-  # Human
-  - "9606"    # Homo sapiens
+  Human:
+    - "9606"    # Homo sapiens
 
-  # Livestock / farm animals
-  - "9913"    # Bos taurus (cattle)
-  - "9823"    # Sus scrofa (pig)
-  - "9940"    # Ovis aries (sheep)
-  - "9925"    # Capra hircus (goat)
-  - "9796"    # Equus caballus (horse)
-  - "89462"   # Bubalus bubalis (water buffalo)
-  - "9838"    # Camelus dromedarius (dromedary camel)
-  - "30521"   # Lama glama (llama)
-  - "30538"   # Vicugna pacos (alpaca)
+  Livestock:
+    - "9913"    # Bos taurus (cattle)
+    - "9823"    # Sus scrofa (pig)
+    - "9940"    # Ovis aries (sheep)
+    - "9925"    # Capra hircus (goat)
+    - "9796"    # Equus caballus (horse)
+    - "89462"   # Bubalus bubalis (water buffalo)
+    - "9838"    # Camelus dromedarius (dromedary camel)
+    - "30521"   # Lama glama (llama)
+    - "30538"   # Vicugna pacos (alpaca)
+    - "9031"    # Gallus gallus (chicken)
+    - "9103"    # Meleagris gallopavo (turkey)
+    - "8839"    # Anas platyrhynchos (duck)
 
-  # Poultry
-  - "9031"    # Gallus gallus (chicken)
-  - "9103"    # Meleagris gallopavo (turkey)
-  - "8839"    # Anas platyrhynchos (duck)
+  Aquaculture:
+    - "8030"    # Salmo salar (Atlantic salmon)
+    - "8022"    # Oncorhynchus mykiss (rainbow trout)
+    - "8128"    # Oreochromis niloticus (Nile tilapia)
+    - "7962"    # Cyprinus carpio (common carp)
+    - "7110"    # Dicentrarchus labrax (European sea bass)
+    - "8175"    # Sparus aurata (gilthead sea bream)
 
-  # Aquaculture
-  - "8030"    # Salmo salar (Atlantic salmon)
-  - "8022"    # Oncorhynchus mykiss (rainbow trout)
-  - "8128"    # Oreochromis niloticus (Nile tilapia)
-  - "7962"    # Cyprinus carpio (common carp)
-  - "7110"    # Dicentrarchus labrax (European sea bass)
-  - "8175"    # Sparus aurata (gilthead sea bream)
-
-  # Laboratory animals
-  - "10090"   # Mus musculus (mouse)
-  - "10116"   # Rattus norvegicus (rat)
-  - "9986"    # Oryctolagus cuniculus (rabbit)
-  - "10141"   # Cavia porcellus (guinea pig)
-  - "10036"   # Mesocricetus auratus (golden hamster)
-  - "10053"   # Meriones unguiculatus (Mongolian gerbil)
-  - "9544"    # Macaca mulatta (rhesus macaque)
-  - "9541"    # Macaca fascicularis (crab-eating macaque)
-  - "7955"    # Danio rerio (zebrafish)
+  Laboratory:
+    - "10090"   # Mus musculus (mouse)
+    - "10116"   # Rattus norvegicus (rat)
+    - "9986"    # Oryctolagus cuniculus (rabbit)
+    - "10141"   # Cavia porcellus (guinea pig)
+    - "10036"   # Mesocricetus auratus (golden hamster)
+    - "10053"   # Meriones unguiculatus (Mongolian gerbil)
+    - "9544"    # Macaca mulatta (rhesus macaque)
+    - "9541"    # Macaca fascicularis (crab-eating macaque)
+    - "7955"    # Danio rerio (zebrafish)

@@ -131,6 +131,42 @@ def test_empty_exclusion_list_adds_no_not_clause():
         assert "NOT" not in _query(mock_get)
 
 
+def test_search_runs_has_no_tax_tree():
+    # tax_tree() is invalid in result=read_run; must not appear regardless of args
+    with patch("wmw.ena.requests.get", return_value=_mock_response([])) as mock_get:
+        ena.search_runs(date_from="2024-01-01", date_to="2024-12-31")
+        assert "tax_tree" not in _query(mock_get)
+
+
+# ---------------------------------------------------------------------------
+# fetch_studies_batch
+# ---------------------------------------------------------------------------
+
+def test_fetch_studies_batch_single_chunk():
+    fake = [{"study_accession": "PRJEB001"}, {"study_accession": "PRJEB002"}]
+    with patch("wmw.ena.requests.get", return_value=_mock_response(fake)) as mock_get:
+        result = ena.fetch_studies_batch(["PRJEB001", "PRJEB002"])
+    assert result == fake
+    params = mock_get.call_args[1]["params"]
+    assert params["result"] == "study"
+    assert 'study_accession="PRJEB001"' in params["query"]
+    assert 'study_accession="PRJEB002"' in params["query"]
+
+
+def test_fetch_studies_batch_empty():
+    with patch("wmw.ena.requests.get", return_value=_mock_response([])) as mock_get:
+        result = ena.fetch_studies_batch([])
+    assert result == []
+    mock_get.assert_not_called()
+
+
+def test_fetch_studies_batch_chunking():
+    fake = [{"study_accession": f"PRJEB{i:03d}"} for i in range(5)]
+    with patch("wmw.ena.requests.get", return_value=_mock_response(fake)) as mock_get:
+        ena.fetch_studies_batch(["PRJEB001", "PRJEB002", "PRJEB003"], chunk_size=2)
+    assert mock_get.call_count == 2
+
+
 # ---------------------------------------------------------------------------
 # Misc
 # ---------------------------------------------------------------------------
@@ -168,7 +204,23 @@ def test_search_studies_host_tax_id():
 def test_search_studies_keyword():
     with patch("wmw.ena.requests.get", return_value=_mock_response([])) as mock_get:
         ena.search_studies(date_from="2024-01-01", date_to="2024-12-31", keyword="fox")
-        assert 'study_title="*fox*"' in _query(mock_get)
+        q = _query(mock_get)
+        assert 'study_title="*fox*"' in q
+        assert 'study_description="*fox*"' in q
+
+
+def test_search_studies_keyword_pipe_separated():
+    # Root-style keywords: *ECOLOG* matches ecology/ecological/ecologist etc.
+    with patch("wmw.ena.requests.get", return_value=_mock_response([])) as mock_get:
+        ena.search_studies(date_from="2024-01-01", date_to="2024-12-31",
+                           keyword="ECOLOG|EVOLUT|WILD")
+        q = _query(mock_get)
+        assert 'study_title="*ECOLOG*"' in q
+        assert 'study_description="*ECOLOG*"' in q
+        assert 'study_title="*EVOLUT*"' in q
+        assert 'study_description="*EVOLUT*"' in q
+        assert 'study_title="*WILD*"' in q
+        assert 'study_description="*WILD*"' in q
 
 
 def test_search_studies_last_updated_field():
