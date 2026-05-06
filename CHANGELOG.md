@@ -8,6 +8,45 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.3.2] - 2026-05-06
+
+### Added
+
+- `airtable.AirtableClient.link_studies_to_species()`: new method that, given a mapping of study accessions to sets of host taxon IDs, looks up matching records in a Species table (by `taxid` field) and appends the study's Airtable record ID to a linked-record field — without overwriting existing links.
+- `wmw scan`: after upserting studies, automatically links each study to its matching Species table records via host taxids resolved from the associated ENA runs. Controlled by three new config keys (`SPECIES_TABLE`, `SPECIES_TAXID_FIELD`, `SPECIES_STUDIES_LINK_FIELD`); linking is skipped if any of these keys are blank.
+- `config.yaml`: new `SPECIES_TABLE`, `SPECIES_TAXID_FIELD`, and `SPECIES_STUDIES_LINK_FIELD` config keys for the Species table integration.
+
+- `publications`: new `find_pubmed_ids(bioproject_accession)` function that resolves a BioProject accession to PubMed IDs using three strategies in order: (1) NCBI elink BioProject→PubMed and BioProject→SRA→PubMed, (2) NCBI esearch text search in PubMed and PMC databases, (3) Europe PMC text search. `resolve()` also falls back to a Europe PMC DOI when all PMID strategies return nothing. `resolve_batch` now automatically uses this for any study that lacks a pre-existing `pubmed_id` or DOI.
+- `publications`: NCBI authentication now reads `NCBI_TOKEN` from the environment (`export NCBI_TOKEN="…"`); falls back to `NCBI_API_KEY` in config. Setting this enables 10 req/s instead of 3 req/s.
+
+### Changed
+
+- `publications.fetch_from_pubmed`: replaced Biopython `Entrez` with direct `urllib` + NCBI E-utils calls; `email` parameter removed (no longer required for NCBI lookups). `NCBI_EMAIL` in config is now used only as the contact address for Unpaywall PDF requests.
+- `publications.resolve_batch`: signature changed from `(studies, email, api_key=None, delay=0.35)` to `(studies, api_key=None, email=None, delay=0.34, on_progress=None)`. `email` is now optional and only affects Unpaywall PDF lookups. `on_progress` is an optional callable invoked after each study to support progress reporting.
+- `wmw scan`: publication lookup no longer skips when `NCBI_EMAIL` is unset; it always runs (using unauthenticated NCBI rate limits if no token is configured). When stdout is a TTY, publication resolution now shows a Rich progress bar ("Resolving publications · N/M studies · K resolved") matching the style of the ENA run-query bar.
+
+- `config.yaml`: new `STUDIES_COL_DETECTED_RUNS` and `STUDIES_COL_DETECTED_HOST_TAXA` field-ID keys; `wmw scan` now writes the run count and unique host-taxon count per study into those Airtable columns.
+
+### Changed
+
+- `airtable.upsert_studies`: existing study records are now **updated** (all fields refreshed) instead of skipped; return value changed from `(inserted, skipped)` to `(inserted, updated)`.
+- `wmw scan`: success message now reads "N inserted, N updated" instead of "N inserted, N already existed".
+
+### Fixed
+
+- `metadata.normalize_ena_run`, `normalize_sra_run`: `base_count` and `read_count` are now cast to `int` (or `None` when blank/invalid) instead of strings, matching Airtable's integer field type. `collection_date` and `first_public` are now validated as `YYYY-MM-DD` and set to `None` for partial or non-conforming values (e.g. `"2023-06"`, `"2023"`), matching Airtable's date field type. `airtable._enc` already omits `None` values, so no-data cases leave those columns empty rather than triggering a type error.
+- `airtable.upsert_studies()`: re-scanning an existing study no longer overwrites its `status` field. Updates now omit `status` so a study manually set to `approved` or `indexed` stays at that status after a subsequent scan.
+- `publications.find_pubmed_ids`: removed the `BioProject→SRA→PubMed` indirect elink path. SRA runs are often shared across studies, so this path was returning PMIDs for papers that cited the same runs in earlier publications (papers from 2001–2005 appearing for 2026 studies). The direct `BioProject→PubMed` elink, NCBI esearch, and Europe PMC strategies are sufficient and far more accurate.
+- `publications.resolve_batch`: added a year-plausibility guard — if a resolved paper's `pub_year` is more than 2 years before the study's `first_public` date, the publication result is discarded. This catches any residual false positives not eliminated by the elink fix above.
+- `publications.find_pubmed_ids`: with the SRA indirect path removed, strategies 2 (NCBI esearch) and 3 (Europe PMC) are now reliably reached when there is no direct BioProject→PubMed link, fixing cases where EuropePMC held the correct paper but was never queried (e.g. `PRJNA1337465`).
+- `publications._europe_pmc_search`: removed double-quotes wrapping the accession in the API query (`query="PRJNA1337465"` → `query=PRJNA1337465`). Both forms return the same results for BioProject accessions, but the bare form is more consistent with how the EuropePMC web interface queries.
+- `publications.resolve`: moved the year-plausibility guard (discard papers >2 years older than `first_public`) from `resolve_batch` into `resolve()` itself, where it can immediately retry via Europe PMC when an auto-discovered PMID points to an old paper. Previously the guard discarded the stale result but had no recovery path, so the correct EuropePMC paper was never fetched. The guard does not apply when `pubmed_id` is supplied directly by the caller.
+
+- `ena.resolve_taxonomy_name` and `get_lineage`: ENA Taxonomy REST API is tried first; NCBI Entrez (`esearch` + `efetch`) is now used as a fallback when ENA returns an error (currently returning 404 for all requests).
+- `airtable._enc`: `None` and empty-string values are now stripped from outgoing payloads before sending to Airtable, preventing 422 `INVALID_VALUE_FOR_COLUMN` errors (e.g. for `pub_year`) when a field has no value to send.
+- `publications.fetch_from_pubmed` and `fetch_from_crossref` now return `pub_year` as an `int` (or `None` when unavailable) instead of a string, fixing a 422 `INVALID_VALUE_FOR_COLUMN` error when upserting studies into an Airtable numeric "Year" field.
+- `ena._get`: 5xx server errors are now retried with exponential backoff (same behaviour as 429 rate-limit responses), making batch scans resilient to transient ENA server errors.
+- `wmw scan`: a failed run-query batch (e.g. ENA 500 error after all retries) no longer aborts the entire scan. The failing batch is warned and skipped; the scan continues with remaining batches and reports all skipped batch numbers at the end.
 ## [0.3.1] - 2026-05-06
 
 ### Changed

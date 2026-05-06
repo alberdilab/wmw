@@ -243,3 +243,43 @@ def test_search_studies_returns_list():
     with patch("wmw.ena.requests.get", return_value=_mock_response(fake)):
         result = ena.search_studies(date_from="2024-01-01", date_to="2024-12-31")
     assert result == fake
+
+
+# ---------------------------------------------------------------------------
+# _get retry behaviour
+# ---------------------------------------------------------------------------
+
+def _http_error(status_code: int):
+    """Return a requests.HTTPError with the given status code."""
+    import requests as _req
+    resp = MagicMock()
+    resp.status_code = status_code
+    err = _req.exceptions.HTTPError(response=resp)
+    return err
+
+
+def test_get_retries_on_500_then_succeeds():
+    """A transient 500 should be retried; success on second attempt is returned."""
+    import requests as _req
+    fake = [{"run_accession": "ERR001"}]
+    ok_resp = _mock_response(fake)
+    err_resp = MagicMock()
+    err_resp.raise_for_status.side_effect = _http_error(500)
+
+    with patch("wmw.ena.requests.get", side_effect=[err_resp, ok_resp]) as mock_get:
+        with patch("wmw.ena.time.sleep"):
+            result = ena.search_runs(date_from="2024-01-01", date_to="2024-12-31")
+    assert result == fake
+    assert mock_get.call_count == 2
+
+
+def test_get_raises_on_404():
+    """A 404 should not be retried and should propagate immediately."""
+    import requests as _req
+    err_resp = MagicMock()
+    err_resp.raise_for_status.side_effect = _http_error(404)
+
+    with patch("wmw.ena.requests.get", return_value=err_resp):
+        with patch("wmw.ena.time.sleep"):
+            with pytest.raises(_req.exceptions.HTTPError):
+                ena.search_runs(date_from="2024-01-01", date_to="2024-12-31")

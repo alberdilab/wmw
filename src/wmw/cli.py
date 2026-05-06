@@ -328,6 +328,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
                 _task_id = _pg.add_task("", total=len(study_list), summary="")
         except ImportError:
             pass
+        failed_batches: list[int] = []
         for i in range(0, len(study_list), run_batch):
             batch = study_list[i : i + run_batch]
             batch_num = i // run_batch + 1
@@ -342,10 +343,16 @@ def cmd_scan(args: argparse.Namespace) -> int:
                 )
                 raw_runs.extend(batch_runs)
             except Exception as exc:
+                failed_batches.append(batch_num)
+                if _pg is None:
+                    out.warn(f"ENA run query failed (batch {batch_num}): {exc} — skipping.")
+                n_studies = len({r.get('study_accession') for r in raw_runs if r.get('study_accession')})
                 if _pg is not None:
-                    _pg.stop()
-                _die(f"ENA run query failed (batch {batch_num}): {exc}")
-                return 1
+                    _pg.update(_task_id, advance=len(batch), summary=(
+                        f"{_pl(len(raw_runs), 'run')} across"
+                        f" {_pl(n_studies, 'study', 'studies')} [{len(failed_batches)} batch(es) skipped]"
+                    ))
+                continue
             n_studies = len({r.get('study_accession') for r in raw_runs if r.get('study_accession')})
             if _pg is not None:
                 _pg.update(
@@ -364,6 +371,12 @@ def cmd_scan(args: argparse.Namespace) -> int:
                 )
         if _pg is not None:
             _pg.stop()
+        if failed_batches:
+            out.warn(
+                f"{len(failed_batches)} batch(es) failed and were skipped"
+                f" (batch numbers: {', '.join(map(str, failed_batches))})."
+                " Results may be incomplete — consider re-running."
+            )
     else:
         out.info("Querying ENA Portal API for runs…")
         try:
@@ -432,16 +445,51 @@ def cmd_scan(args: argparse.Namespace) -> int:
         return 0
 
     if not args.no_publications:
-        email = cfg.get("NCBI_EMAIL", "").strip()
-        if not email:
-            out.warn("NCBI_EMAIL not set — skipping publication lookup (set it with wmw config --edit).")
-        else:
-            from wmw import publications
-            api_key = cfg.get("NCBI_API_KEY", "").strip() or None
-            out.info(f"Resolving publication metadata for {len(studies)} studies…")
-            publications.resolve_batch(studies, email=email, api_key=api_key)
-            found = sum(1 for s in studies if s.get("pub_title"))
-            out.success(f"Publications resolved: {found}/{len(studies)}.")
+        from wmw import publications
+        api_key = os.environ.get("NCBI_TOKEN", "").strip() or cfg.get("NCBI_API_KEY", "").strip() or None
+        email = cfg.get("NCBI_EMAIL", "").strip() or None
+        out.info(f"Resolving publication metadata for {len(studies)} studies…")
+        _pub_pg = None
+        _pub_task = None
+        try:
+            from rich.progress import (
+                BarColumn,
+                MofNCompleteColumn,
+                Progress,
+                SpinnerColumn,
+                TextColumn,
+            )
+            from rich.console import Console as _PubConsole
+            if sys.stdout.isatty():
+                _pub_pg = Progress(
+                    SpinnerColumn(style="#5f9ea0"),
+                    TextColumn("[#5f9ea0]Resolving publications"),
+                    BarColumn(bar_width=None, style="#b7c7d3", complete_style="#5f9ea0"),
+                    MofNCompleteColumn(),
+                    TextColumn("[#b7c7d3]studies  ·  [#e6edf3]{task.fields[summary]}"),
+                    console=_PubConsole(theme=out.WMW_THEME, highlight=False, soft_wrap=True),
+                    transient=False,
+                )
+                _pub_pg.start()
+                _pub_task = _pub_pg.add_task("", total=len(studies), summary="")
+        except ImportError:
+            pass
+        _pub_found = [0]
+
+        def _pub_progress(study: dict) -> None:
+            if study.get("pub_title"):
+                _pub_found[0] += 1
+            if _pub_pg is not None:
+                _pub_pg.update(
+                    _pub_task,
+                    advance=1,
+                    summary=f"{_pub_found[0]} resolved",
+                )
+
+        publications.resolve_batch(studies, api_key=api_key, email=email, on_progress=_pub_progress)
+        if _pub_pg is not None:
+            _pub_pg.stop()
+        out.success(f"Publications resolved: {_pub_found[0]}/{len(studies)}.")
 
     run_stats: dict[str, dict] = {}
     for run in raw_runs:
@@ -481,12 +529,36 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
     _print_scan_summary(studies_with_hosts, run_stats=final_run_stats)
 
+    for s in studies:
+        acc = s.get("study_accession", "")
+        stats = final_run_stats.get(acc, {})
+        if stats.get("runs"):
+            s["detected_runs"] = stats["runs"]
+        if stats.get("host_taxa"):
+            s["detected_host_taxa"] = stats["host_taxa"]
+
     if dry_run:
         out.info("Dry-run mode — no changes written to Airtable.")
         return 0
 
-    s_inserted, s_skipped = client.upsert_studies(studies_table, studies)
-    out.success(f"Studies: {s_inserted} inserted, {s_skipped} already existed.")
+    s_inserted, s_updated = client.upsert_studies(studies_table, studies)
+    out.success(f"Studies: {s_inserted} inserted, {s_updated} updated.")
+
+    species_table_id = str(cfg.get("SPECIES_TABLE") or "").strip()
+    taxid_field_id = str(cfg.get("SPECIES_TAXID_FIELD") or "").strip()
+    link_field_id = str(cfg.get("SPECIES_STUDIES_LINK_FIELD") or "").strip()
+    if species_table_id and taxid_field_id and link_field_id:
+        host_taxids_by_study = {
+            acc: d["host_taxids"]
+            for acc, d in run_stats.items()
+            if d["host_taxids"]
+        }
+        n_linked = client.link_studies_to_species(
+            studies_table, species_table_id, taxid_field_id, link_field_id, host_taxids_by_study,
+        )
+        if n_linked:
+            out.success(f"Linked {n_linked} species record(s) to studies.")
+
     return 0
 
 
@@ -510,11 +582,10 @@ def _scan_single_study(
     study = metadata.normalize_ena_study(study_record)
 
     if not args.no_publications:
-        email = cfg.get("NCBI_EMAIL", "").strip()
-        if email:
-            from wmw import publications
-            api_key = cfg.get("NCBI_API_KEY", "").strip() or None
-            publications.resolve_batch([study], email=email, api_key=api_key)
+        from wmw import publications
+        api_key = os.environ.get("NCBI_TOKEN", "").strip() or cfg.get("NCBI_API_KEY", "").strip() or None
+        email = cfg.get("NCBI_EMAIL", "").strip() or None
+        publications.resolve_batch([study], api_key=api_key, email=email)
 
     _print_scan_summary([study])
 
@@ -524,8 +595,8 @@ def _scan_single_study(
 
     if client is None:
         client = _require_airtable(args, studies_table)
-    s_inserted, s_skipped = client.upsert_studies(studies_table, [study])
-    out.success(f"Studies: {s_inserted} inserted, {s_skipped} already existed.")
+    s_inserted, s_updated = client.upsert_studies(studies_table, [study])
+    out.success(f"Studies: {s_inserted} inserted, {s_updated} updated.")
     return 0
 
 

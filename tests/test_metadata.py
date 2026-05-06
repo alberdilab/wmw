@@ -16,6 +16,12 @@ def test_normalize_ena_run(ena_run_record):
     assert result["fastq_url_2"].startswith("ftp://")
     assert "_1.fastq.gz" in result["fastq_url_1"]
     assert "_2.fastq.gz" in result["fastq_url_2"]
+    assert result["base_count"] == 15000000000
+    assert result["read_count"] == 100000000
+    assert isinstance(result["base_count"], int)
+    assert isinstance(result["read_count"], int)
+    assert result["collection_date"] == "2023-06-15"
+    assert result["first_public"] == "2024-01-10"
 
 
 def test_normalize_sra_run(sra_run_record):
@@ -24,6 +30,39 @@ def test_normalize_sra_run(sra_run_record):
     assert result["source"] == "SRA"
     assert result["status"] == "pending"
     assert result["fastq_url_1"] == ""
+    assert result["base_count"] == 12000000000
+    assert result["read_count"] == 80000000
+    assert isinstance(result["base_count"], int)
+    assert isinstance(result["read_count"], int)
+    assert result["collection_date"] is None  # empty string in fixture → None
+    assert result["first_public"] == "2024-02-20"
+
+
+# ---------------------------------------------------------------------------
+# _int / _date helpers
+# ---------------------------------------------------------------------------
+
+def test_int_valid():
+    assert metadata._int("15000000000") == 15000000000
+    assert metadata._int(42) == 42
+
+def test_int_blank():
+    assert metadata._int("") is None
+    assert metadata._int(None) is None
+
+def test_int_invalid():
+    assert metadata._int("n/a") is None
+
+def test_date_valid():
+    assert metadata._date("2023-06-15") == "2023-06-15"
+
+def test_date_partial():
+    assert metadata._date("2023-06") is None
+    assert metadata._date("2023") is None
+
+def test_date_blank():
+    assert metadata._date("") is None
+    assert metadata._date(None) is None
 
 
 def test_normalize_ena_study(ena_run_record):

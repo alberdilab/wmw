@@ -7,10 +7,13 @@ from typing import Any
 from urllib.parse import urlencode
 
 import requests
+from xml.etree import ElementTree as ET
 
 ENA_SEARCH_URL = "https://www.ebi.ac.uk/ena/portal/api/search"
 ENA_TAXONOMY_URL = "https://www.ebi.ac.uk/ena/taxonomy/rest/any-name"
 ENA_TAXONOMY_TAXID_URL = "https://www.ebi.ac.uk/ena/taxonomy/rest/tax-id"
+NCBI_ESEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+NCBI_EFETCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 
 DEBUG: bool = False
 
@@ -71,7 +74,8 @@ def _get(url: str, params: dict[str, Any], retries: int = 3) -> list[dict[str, A
             resp.raise_for_status()
             return resp.json()
         except requests.exceptions.HTTPError as exc:
-            if exc.response is not None and exc.response.status_code == 429:
+            status = exc.response.status_code if exc.response is not None else 0
+            if status == 429 or status >= 500:
                 time.sleep(2 ** attempt)
                 continue
             raise
@@ -83,39 +87,78 @@ def _get(url: str, params: dict[str, Any], retries: int = 3) -> list[dict[str, A
     return []
 
 
-def resolve_taxonomy_name(name: str) -> tuple[str, str]:
-    """Resolve a taxonomic name to (tax_id, scientific_name) via the ENA Taxonomy REST API.
-
-    Raises ValueError if the name cannot be resolved.
-    """
+def _ncbi_efetch_taxon(tax_id: str) -> ET.Element | None:
+    """Fetch a single <Taxon> XML element from NCBI Entrez for the given tax_id."""
     resp = requests.get(
-        f"{ENA_TAXONOMY_URL}/{requests.utils.quote(name, safe='')}",
+        NCBI_EFETCH_URL,
+        params={"db": "taxonomy", "id": tax_id, "retmode": "xml"},
         timeout=30,
     )
     resp.raise_for_status()
-    results = resp.json()
-    if not results:
-        raise ValueError(f"Taxonomy name not found in ENA: {name!r}")
-    first = results[0]
-    return str(first["taxId"]), first.get("scientificName", name)
+    root = ET.fromstring(resp.text)
+    return root.find("Taxon")
+
+
+def resolve_taxonomy_name(name: str) -> tuple[str, str]:
+    """Resolve a taxonomic name to (tax_id, scientific_name).
+
+    Tries ENA Taxonomy REST first; falls back to NCBI Entrez on failure.
+    Raises ValueError if neither source can resolve the name.
+    """
+    # ENA primary
+    try:
+        resp = requests.get(
+            f"{ENA_TAXONOMY_URL}/{requests.utils.quote(name, safe='')}",
+            timeout=30,
+        )
+        resp.raise_for_status()
+        results = resp.json()
+        if results:
+            first = results[0]
+            return str(first["taxId"]), first.get("scientificName", name)
+    except Exception:
+        pass
+
+    # NCBI Entrez fallback
+    search_resp = requests.get(
+        NCBI_ESEARCH_URL,
+        params={"db": "taxonomy", "term": name, "retmode": "json"},
+        timeout=30,
+    )
+    search_resp.raise_for_status()
+    ids = search_resp.json().get("esearchresult", {}).get("idlist", [])
+    if not ids:
+        raise ValueError(f"Taxonomy name not found: {name!r}")
+    taxon = _ncbi_efetch_taxon(ids[0])
+    if taxon is None:
+        raise ValueError(f"Could not fetch taxonomy record for {name!r} (id={ids[0]})")
+    return str(taxon.findtext("TaxId") or ids[0]), taxon.findtext("ScientificName") or name
 
 
 def get_lineage(tax_id: str) -> str:
-    """Return the semicolon-separated lineage string for a taxon (ancestor names).
+    """Return the semicolon-separated lineage string for a taxon.
 
+    Tries ENA Taxonomy REST first; falls back to NCBI Entrez on failure.
     Results are cached in-process. Returns empty string on error or blank input.
     """
     if not tax_id:
         return ""
     if tax_id in _lineage_cache:
         return _lineage_cache[tax_id]
+    lineage = ""
     try:
         resp = requests.get(f"{ENA_TAXONOMY_TAXID_URL}/{tax_id}", timeout=15)
         resp.raise_for_status()
         data = resp.json()
         lineage = data.get("lineage", "") if isinstance(data, dict) else ""
     except Exception:
-        lineage = ""
+        pass
+    if not lineage:
+        try:
+            taxon = _ncbi_efetch_taxon(tax_id)
+            lineage = taxon.findtext("Lineage") or "" if taxon is not None else ""
+        except Exception:
+            lineage = ""
     _lineage_cache[tax_id] = lineage
     return lineage
 

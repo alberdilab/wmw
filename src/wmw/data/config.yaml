@@ -6,6 +6,9 @@
 WMW_BASE: "appHz4Vc5NpVdfU3K"   # Airtable base ID, e.g. appXXXXXXXXXXXXXX
 STUDIES_TABLE: "tblBzrwZn1IVKUlfQ"        # Table name for study-level records
 SAMPLES_TABLE: "tblXdKvsFaLUgLtU5"        # Table name for run/sample-level records
+SPECIES_TABLE: "tblXZZUqf7tSr0Pxy"        # Table ID for host-species records (leave blank to skip species linking)
+SPECIES_TAXID_FIELD: "fldDgjVOwOItgthCI"   # Field ID for taxid column in Species table
+SPECIES_STUDIES_LINK_FIELD: "fld5hDsRm137pOAJD" # Field ID for the linked Studies field in Species table
 
 # --- Studies table column IDs ---
 # Airtable field IDs (fldXXXXXXXXXXXXXX) for each column in the Studies table.
@@ -20,6 +23,8 @@ STUDIES_COL_STUDY_DESCRIPTION: "fldetzxa7PkCgwwSL"
 STUDIES_COL_SOURCE: "fldX3JsT4ZaoMHVTW"
 STUDIES_COL_SCIENTIFIC_NAME: "fldGb7UaDPvrgDHvq"
 STUDIES_COL_TAX_ID: "fldXvyUwz2MHJ6FTU"
+STUDIES_COL_DETECTED_RUNS: "fldKcwLQ5uRwPUpww"
+STUDIES_COL_DETECTED_HOST_TAXA: "fld40R78DefshLmM0"
 STUDIES_COL_FIRST_PUBLIC: "fldi61UxzSOxbW52L"
 STUDIES_COL_CENTER_NAME: "fldTppFs69eUifRun"
 STUDIES_COL_PUBMED_ID: "fldEwRR39eXp20InM"
@@ -33,41 +38,42 @@ STUDIES_COL_PUB_AUTHORS: "fld32udFDIKAiW36P"
 # --- Samples table column IDs ---
 # Airtable field IDs (fldXXXXXXXXXXXXXX) for each column in the Samples table.
 # Leave blank to use field names instead.
-SAMPLES_COL_RUN_ACCESSION: ""
-SAMPLES_COL_STUDY_ACCESSION: ""
-SAMPLES_COL_SAMPLE_ACCESSION: ""
-SAMPLES_COL_EXPERIMENT_ACCESSION: ""
-SAMPLES_COL_SCIENTIFIC_NAME: ""
-SAMPLES_COL_TAX_ID: ""
-SAMPLES_COL_INSTRUMENT_PLATFORM: ""
-SAMPLES_COL_INSTRUMENT_MODEL: ""
-SAMPLES_COL_LIBRARY_STRATEGY: ""
-SAMPLES_COL_LIBRARY_SOURCE: ""
-SAMPLES_COL_LIBRARY_LAYOUT: ""
-SAMPLES_COL_BASE_COUNT: ""
-SAMPLES_COL_READ_COUNT: ""
-SAMPLES_COL_FASTQ_FTP: ""
-SAMPLES_COL_FASTQ_MD5: ""
-SAMPLES_COL_FASTQ_URL_1: ""
-SAMPLES_COL_FASTQ_URL_2: ""
-SAMPLES_COL_COLLECTION_DATE: ""
-SAMPLES_COL_FIRST_PUBLIC: ""
-SAMPLES_COL_GEO_LOC_NAME: ""
-SAMPLES_COL_HOST: ""
-SAMPLES_COL_HOST_TAX_ID: ""
-SAMPLES_COL_HOST_SCIENTIFIC_NAME: ""
-SAMPLES_COL_COUNTRY: ""
-SAMPLES_COL_CENTER_NAME: ""
-SAMPLES_COL_SOURCE: ""
-SAMPLES_COL_STATUS: ""
+SAMPLES_COL_RECORD_ID: "fldrNSX2PB4fsBDeD"
+SAMPLES_COL_RUN_ACCESSION: "fldo0JlGWR7V6ROR4"
+SAMPLES_COL_STUDY_ACCESSION: "fldAxDkxK5dPWZjL4"
+SAMPLES_COL_SAMPLE_ACCESSION: "fld65EdNPa6aepyTN"
+SAMPLES_COL_EXPERIMENT_ACCESSION: "fldGcWfZdIIp3WGiC"
+SAMPLES_COL_SCIENTIFIC_NAME: "fldTToGKRBTY93wOC"
+SAMPLES_COL_TAX_ID: "fldq32G1b0QUnTn0z"
+SAMPLES_COL_INSTRUMENT_PLATFORM: "fldyjyPdaW1fPlorX"
+SAMPLES_COL_INSTRUMENT_MODEL: "fldxKAu6hAiuVwkv0"
+SAMPLES_COL_LIBRARY_STRATEGY: "fldbP8qsp0qZSndKK"
+SAMPLES_COL_LIBRARY_SOURCE: "fld7HTb14PKiMe4Yg"
+SAMPLES_COL_LIBRARY_LAYOUT: "fldSxK9wx3milrYYf"
+SAMPLES_COL_BASE_COUNT: "fld8lTobbCw4znadW"
+SAMPLES_COL_READ_COUNT: "fldusev7rGm8rTLWL"
+SAMPLES_COL_FASTQ_FTP: "fld0J7DhdvQFF9kzY"
+SAMPLES_COL_FASTQ_MD5: fld1Tr9gP2NTPtulT"
+SAMPLES_COL_FASTQ_URL_1: "fldN9DkwlZMOC4yJ4"
+SAMPLES_COL_FASTQ_URL_2: "fldee5QwUOOha1U5S"
+SAMPLES_COL_COLLECTION_DATE: "fldj3Odnr7fjXq2Dr"
+SAMPLES_COL_FIRST_PUBLIC: "fldJSezKIuHrTF089"
+SAMPLES_COL_GEO_LOC_NAME: "fldXgqKZulYL49q7J"
+SAMPLES_COL_HOST: "fldZoIBJe8rjD6upv"
+SAMPLES_COL_HOST_TAX_ID: "fldiz8uFnUe58S9nh"
+SAMPLES_COL_HOST_SCIENTIFIC_NAME: "fldDM0JDvwRmMHnwZ"
+SAMPLES_COL_COUNTRY: "fld70QxUjVKrJoTo3"
+SAMPLES_COL_CENTER_NAME: "fld4VrTIfSBtkBTlE"
+SAMPLES_COL_SOURCE: "fldjkXKjxYeuLOLHO"
+SAMPLES_COL_STATUS: "fldESqeQUOUu9eLZp"
 
 # --- Drakkar ---
 DRAKKAR_CONDA_ENV: "/projects/alberdilab/data/environments/conda/drakkar" # Conda env name or path containing drakkar; leave blank to use $PATH
 DRAKKAR_OUTPUT_DIR: "/projects/alberdilab/data/wmw"                       # Root output directory for drakkar runs
 
 # --- NCBI / ENA ---
-NCBI_EMAIL: ""              # Required by NCBI Entrez (any valid email)
-NCBI_API_KEY: ""            # Optional NCBI API key for higher rate limits
+NCBI_EMAIL: ""              # Used as contact email for Unpaywall PDF lookup (optional)
+NCBI_API_KEY: ""            # Fallback NCBI API key; prefer: export NCBI_TOKEN="your_key"
 
 # --- Scan defaults ---
 # These are used when the corresponding CLI flag is not provided.

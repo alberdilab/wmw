@@ -31,23 +31,24 @@ class AirtableClient:
         self._studies_fm: dict[str, str] = studies_field_map or {}
         self._samples_fm: dict[str, str] = samples_field_map or {}
         self._api = Api(api_key, use_field_ids=False)
-        self._api_fid = (
-            Api(api_key, use_field_ids=True)
-            if (self._studies_fm or self._samples_fm)
-            else None
-        )
+        self._api_fid = Api(api_key, use_field_ids=True)
 
     def _tbl(self, table_name: str, field_map: dict[str, str]):
         """Return pyairtable Table, using field-ID API when a field map is present."""
         api = self._api_fid if field_map else self._api
         return api.table(self._base_id, table_name)
 
+    def _fid_tbl(self, table_id: str):
+        """Return a field-ID-mode pyairtable Table for a table accessed by raw table ID."""
+        return self._api_fid.table(self._base_id, table_id)
+
     @staticmethod
     def _enc(fields: dict[str, Any], fm: dict[str, str]) -> dict[str, Any]:
         """Translate python field names to Airtable field IDs in an outgoing payload."""
+        clean = {k: v for k, v in fields.items() if v is not None and v != ""}
         if not fm:
-            return fields
-        return {fm.get(k, k): v for k, v in fields.items()}
+            return clean
+        return {fm.get(k, k): v for k, v in clean.items()}
 
     @staticmethod
     def _dec(record: dict[str, Any], fm: dict[str, str]) -> dict[str, Any]:
@@ -118,32 +119,49 @@ class AirtableClient:
     # Studies table
     # ------------------------------------------------------------------
 
-    def existing_study_accessions(self, studies_table: str) -> set[str]:
-        """Return the set of study_accession values already in the Studies table."""
+    def _existing_study_map(self, studies_table: str) -> dict[str, str]:
+        """Return {study_accession: record_id} for all records in the Studies table."""
         tbl = self._tbl(studies_table, self._studies_fm)
         records = tbl.all()
         key = self._fld("study_accession", self._studies_fm)
         return {
-            r["fields"].get(key, "")
+            r["fields"][key]: r["id"]
             for r in records
             if r["fields"].get(key)
         }
+
+    def existing_study_accessions(self, studies_table: str) -> set[str]:
+        """Return the set of study_accession values already in the Studies table."""
+        return set(self._existing_study_map(studies_table).keys())
 
     def upsert_studies(
         self,
         studies_table: str,
         studies: list[dict[str, Any]],
     ) -> tuple[int, int]:
-        """Insert new studies; skip accessions that already exist.
+        """Insert new studies; update existing ones.
 
-        Returns (inserted, skipped).
+        Returns (inserted, updated).
         """
-        existing = self.existing_study_accessions(studies_table)
-        new = [s for s in studies if s.get("study_accession") not in existing]
+        existing_map = self._existing_study_map(studies_table)
+        new = [s for s in studies if s.get("study_accession") not in existing_map]
+        to_update = [s for s in studies if s.get("study_accession") in existing_map]
+        tbl = self._tbl(studies_table, self._studies_fm)
         if new:
-            tbl = self._tbl(studies_table, self._studies_fm)
             tbl.batch_create([self._enc(s, self._studies_fm) for s in new])
-        return len(new), len(studies) - len(new)
+        if to_update:
+            updates = [
+                {
+                    "id": existing_map[s["study_accession"]],
+                    "fields": self._enc(
+                        {k: v for k, v in s.items() if k != "status"},
+                        self._studies_fm,
+                    ),
+                }
+                for s in to_update
+            ]
+            tbl.batch_update(updates)
+        return len(new), len(to_update)
 
     # ------------------------------------------------------------------
     # Samples table
@@ -233,3 +251,65 @@ class AirtableClient:
         updates = [{"id": rid, "fields": {status_key: status}} for rid in record_ids]
         tbl = self._tbl(studies_table, self._studies_fm)
         tbl.batch_update(updates)
+
+    # ------------------------------------------------------------------
+    # Species table — link studies via host taxid
+    # ------------------------------------------------------------------
+
+    def link_studies_to_species(
+        self,
+        studies_table: str,
+        species_table_id: str,
+        taxid_field_id: str,
+        link_field_id: str,
+        host_taxids_by_study: dict[str, set[str]],
+    ) -> int:
+        """Append study record IDs to the Species table's linked-record field.
+
+        For each study accession in *host_taxids_by_study*, looks up every Species
+        record whose *taxid_field_id* value matches one of the study's host taxids,
+        then adds the study's Airtable record ID to *link_field_id* without
+        removing any existing links.
+
+        Returns the number of Species records that were updated.
+        """
+        if not host_taxids_by_study:
+            return 0
+
+        study_record_map = self._existing_study_map(studies_table)
+
+        species_tbl = self._fid_tbl(species_table_id)
+        species_records = species_tbl.all()
+
+        species_by_taxid: dict[str, dict] = {}
+        for rec in species_records:
+            taxid = str(rec["fields"].get(taxid_field_id, "") or "").strip()
+            if taxid:
+                species_by_taxid[taxid] = {
+                    "id": rec["id"],
+                    "links": set(rec["fields"].get(link_field_id, []) or []),
+                }
+
+        pending: dict[str, set[str]] = {}
+        for study_acc, host_taxids in host_taxids_by_study.items():
+            study_rec_id = study_record_map.get(study_acc)
+            if not study_rec_id:
+                continue
+            for taxid in host_taxids:
+                species = species_by_taxid.get(str(taxid))
+                if not species:
+                    continue
+                if study_rec_id not in species["links"]:
+                    if species["id"] not in pending:
+                        pending[species["id"]] = set(species["links"])
+                    pending[species["id"]].add(study_rec_id)
+
+        if not pending:
+            return 0
+
+        updates = [
+            {"id": rec_id, "fields": {link_field_id: list(links)}}
+            for rec_id, links in pending.items()
+        ]
+        species_tbl.batch_update(updates)
+        return len(pending)

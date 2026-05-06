@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 # ---------------------------------------------------------------------------
@@ -66,6 +69,23 @@ def _str(val: Any) -> str:
     return str(val).strip() if val is not None else ""
 
 
+def _int(val: Any) -> int | None:
+    """Convert to int, or None if blank/invalid."""
+    s = str(val).strip() if val is not None else ""
+    if not s:
+        return None
+    try:
+        return int(s)
+    except (ValueError, TypeError):
+        return None
+
+
+def _date(val: Any) -> str | None:
+    """Return val as YYYY-MM-DD string if valid, else None."""
+    s = str(val).strip() if val is not None else ""
+    return s if _DATE_RE.match(s) else None
+
+
 def _split_fastq_urls(fastq_ftp: str) -> tuple[str, str]:
     """Split a semicolon-delimited FTP string into (url1, url2).
 
@@ -103,14 +123,14 @@ def normalize_ena_run(record: dict[str, Any]) -> dict[str, Any]:
         "library_strategy":     _str(record.get("library_strategy")),
         "library_source":       _str(record.get("library_source")),
         "library_layout":       _str(record.get("library_layout")),
-        "base_count":           _str(record.get("base_count")),
-        "read_count":           _str(record.get("read_count")),
+        "base_count":           _int(record.get("base_count")),
+        "read_count":           _int(record.get("read_count")),
         "fastq_ftp":            fastq_ftp,
         "fastq_md5":            _str(record.get("fastq_md5")),
         "fastq_url_1":          url1,
         "fastq_url_2":          url2,
-        "collection_date":      _str(record.get("collection_date")),
-        "first_public":         _str(record.get("first_public")),
+        "collection_date":      _date(record.get("collection_date")),
+        "first_public":         _date(record.get("first_public")),
         "geo_loc_name":         _str(record.get("geo_loc_name")),
         "host":                 _str(record.get("host")),
         "host_tax_id":          _str(record.get("host_tax_id")),
@@ -165,14 +185,14 @@ def normalize_sra_run(record: dict[str, Any]) -> dict[str, Any]:
         "library_strategy":     _str(record.get("library_strategy")),
         "library_source":       _str(record.get("library_source")),
         "library_layout":       _str(record.get("library_layout")),
-        "base_count":           _str(record.get("base_count")),
-        "read_count":           _str(record.get("read_count")),
+        "base_count":           _int(record.get("base_count")),
+        "read_count":           _int(record.get("read_count")),
         "fastq_ftp":            fastq_ftp,
         "fastq_md5":            "",
         "fastq_url_1":          url1,
         "fastq_url_2":          url2,
-        "collection_date":      _str(record.get("collection_date")),
-        "first_public":         _str(record.get("first_public")),
+        "collection_date":      _date(record.get("collection_date")),
+        "first_public":         _date(record.get("first_public")),
         "geo_loc_name":         "",
         "host":                 "",
         "host_tax_id":          "",
