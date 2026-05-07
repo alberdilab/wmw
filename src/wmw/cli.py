@@ -867,11 +867,18 @@ def cmd_process(args: argparse.Namespace) -> int:
                 client.set_sample_status(samples_table, [r["id"] for r in non_discarded], "preprocessed")
                 out.success(f"{code}: {_pl(len(non_discarded), 'sample')} status → 'preprocessed'.")
                 stats = drakkar.parse_preprocessing_tsv(preprocessing_tsv)
-                if stats:
-                    n = client.update_sample_preprocessing_stats(samples_table, stats)
-                    out.success(f"{code}: uploaded preprocessing stats for {_pl(n, 'sample')}.")
-                else:
+                if not stats:
                     out.warn(f"{code}: preprocessing.tsv empty or unparseable — stats not uploaded.")
+                else:
+                    n = client.update_sample_preprocessing_stats(samples_table, stats)
+                    if n:
+                        out.success(f"{code}: uploaded preprocessing stats for {_pl(n, 'sample')}.")
+                    else:
+                        out.warn(
+                            f"{code}: preprocessing.tsv parsed ({len(stats)} sample(s)) but no matching "
+                            f"Airtable records found — stats not uploaded. "
+                            f"Check that the sample 'code' field values match the TSV."
+                        )
                 n_generated += 1
                 continue
 
@@ -956,12 +963,22 @@ def cmd_set_status(args: argparse.Namespace) -> int:
         output_dir_str = _conf(args, "output_dir", "DRAKKAR_OUTPUT_DIR")
         if output_dir_str:
             tsv_path = Path(output_dir_str).expanduser().resolve() / study_code / "preprocessing.tsv"
-            stats = drakkar.parse_preprocessing_tsv(tsv_path)
-            if stats:
-                n = client.update_sample_preprocessing_stats(samples_table, stats)
-                out.success(f"Uploaded preprocessing stats for {_pl(n, 'sample')}.")
-            else:
+            if not tsv_path.exists():
                 out.warn(f"preprocessing.tsv not found at {tsv_path} — stats not uploaded.")
+            else:
+                stats = drakkar.parse_preprocessing_tsv(tsv_path)
+                if not stats:
+                    out.warn(f"preprocessing.tsv at {tsv_path} could not be parsed — stats not uploaded.")
+                else:
+                    n = client.update_sample_preprocessing_stats(samples_table, stats)
+                    if n:
+                        out.success(f"Uploaded preprocessing stats for {_pl(n, 'sample')}.")
+                    else:
+                        out.warn(
+                            f"preprocessing.tsv parsed ({len(stats)} sample(s)) but no matching "
+                            f"Airtable records found — stats not uploaded. "
+                            f"Check that the sample 'code' field values match the TSV."
+                        )
 
     return 0
 

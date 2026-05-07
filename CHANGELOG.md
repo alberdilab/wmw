@@ -8,6 +8,13 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.3.8] - 2026-05-07
+
+### Fixed
+
+- `wmw set-status` / `wmw process` (resume): preprocessing stats from `preprocessing.tsv` are now looked up in Airtable by the sample `code` field (matching the `sample` column written by `build_input_tsv`) instead of `run_accession`. The previous behaviour silently updated 0 records when `code` ≠ `run_accession`.
+- `airtable.update_sample_preprocessing_stats`: OR formula lookups are now batched in groups of 50 to stay within Airtable's formula length limit for large studies.
+- `wmw set-status` / `wmw process` (resume): improved diagnostics — "file not found" and "no matching Airtable records" are now reported as separate warnings instead of a single misleading "not found" message.
 ## [0.3.7] - 2026-05-07
 
 ### Added

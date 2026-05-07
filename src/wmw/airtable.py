@@ -283,30 +283,36 @@ class AirtableClient:
         samples_table: str,
         stats_by_run: dict[str, dict[str, Any]],
     ) -> int:
-        """Write preprocessing stats to sample records, keyed by run_accession.
+        """Write preprocessing stats to sample records, keyed by the sample code.
 
-        stats_by_run: {run_accession: {airtable_field_id: value}}
+        stats_by_run: {code: {airtable_field_id: value}}
         Returns the number of records updated.
         """
         if not stats_by_run:
             return 0
 
-        run_key = self._fld("run_accession", self._samples_fm)
-        accessions = list(stats_by_run.keys())
-        if len(accessions) == 1:
-            formula = f'{{{run_key}}} = "{accessions[0]}"'
-        else:
-            parts = [f'{{{run_key}}} = "{a}"' for a in accessions]
-            formula = "OR(" + ", ".join(parts) + ")"
-
+        code_key = self._fld("code", self._samples_fm)
         tbl = self._tbl(samples_table, self._samples_fm)
-        records = tbl.all(formula=formula)
-        run_to_id = {r["fields"].get(run_key, ""): r["id"] for r in records}
+        code_to_id: dict[str, str] = {}
+
+        # Batch formula lookups to stay within Airtable's formula length limit.
+        all_codes = list(stats_by_run.keys())
+        for i in range(0, len(all_codes), 50):
+            batch = all_codes[i : i + 50]
+            if len(batch) == 1:
+                formula = f'{{{code_key}}} = "{batch[0]}"'
+            else:
+                parts = [f'{{{code_key}}} = "{c}"' for c in batch]
+                formula = "OR(" + ", ".join(parts) + ")"
+            for r in tbl.all(formula=formula):
+                code_val = r["fields"].get(code_key, "")
+                if code_val:
+                    code_to_id[code_val] = r["id"]
 
         updates = [
-            {"id": run_to_id[run_acc], "fields": fields}
-            for run_acc, fields in stats_by_run.items()
-            if run_acc in run_to_id
+            {"id": code_to_id[code], "fields": fields}
+            for code, fields in stats_by_run.items()
+            if code in code_to_id
         ]
         if updates:
             tbl.batch_update(updates)
