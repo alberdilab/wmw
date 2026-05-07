@@ -86,6 +86,7 @@ def _input_sample(
         "id": f"rec_{code}",
         "fields": {
             "code": code,
+            "status": "use",
             "fastq_url_1": r1,
             "fastq_url_2": r2,
             "reference_name": ref_name,
@@ -160,8 +161,11 @@ def test_generate_preprocessing_script_contains_key_elements(tmp_path):
     assert "PRJ001" in script
     assert "drakkar preprocessing" in script
     assert "wmw set-status --study PRJ001 --workflow preprocessing --status preprocessing" in script
-    assert "wmw set-status --study PRJ001 --workflow preprocessing --status completed" in script
+    assert "wmw set-status --study PRJ001 --workflow preprocessing --status preprocessed" in script
     assert "wmw set-status --study PRJ001 --workflow preprocessing --status error" in script
+    assert "wmw set-status --study PRJ001 --workflow cataloging --status cataloging" in script
+    assert "drakkar cataloging" in script
+    assert "wmw set-status --study PRJ001 --workflow cataloging --status cataloged" in script
     assert "trap _on_exit EXIT" in script
 
 

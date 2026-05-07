@@ -8,6 +8,14 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.3.9] - 2026-05-07
+
+### Added
+
+- `wmw process` (preprocessing): generated scripts now run `drakkar cataloging -f {tsv} --multicoverage` automatically after preprocessing completes and Airtable is updated with preprocessing stats. Status flow: `preprocessing` → `preprocessed` (after Airtable update) → `cataloging` (before cataloging) → `cataloged` (after cataloging).
+- `wmw set-status`: added `preprocessed`, `cataloging`, and `cataloged` as valid `--status` choices; added `cataloging` workflow mappings to the status map.
+- Sample status model simplified to three user-controlled values: `use` (included in TSV), `pending`, `ignore` (both excluded). Workflow progress (`wmw set-status`, `wmw process` resume) no longer modifies sample statuses — only study status changes during processing.
+- `build_input_tsv`: only rows with `status == "use"` are written to the Drakkar input TSV.
 ## [0.3.8] - 2026-05-07
 
 ### Fixed

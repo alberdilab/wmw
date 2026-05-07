@@ -97,7 +97,7 @@ def build_input_tsv(
     lines = ["\t".join(header_cols)]
     for rec in samples:
         fields = rec.get("fields", rec)
-        if fields.get("status") == "discarded":
+        if fields.get("status") != "use":
             continue
         row = [str(fields.get(fn, "") or "") for fn in field_names]
         lines.append("\t".join(row))
@@ -150,9 +150,17 @@ def generate_preprocessing_script(
     else:
         wmw_cmd = "wmw"
 
+    cataloging_flags = f"-f {tsv_path} --multicoverage"
+    if slurm:
+        cataloging_flags += " -p slurm"
+    if conda_env:
+        cataloging_cmd = f"conda run {c_flag} {conda_env} drakkar cataloging {cataloging_flags}"
+    else:
+        cataloging_cmd = f"drakkar cataloging {cataloging_flags}"
+
     lines = [
         "#!/usr/bin/env bash",
-        f"# wmw-generated script — batch {code} (preprocessing)",
+        f"# wmw-generated script — batch {code} (preprocessing → cataloging)",
         "# Do not edit manually; re-run wmw process to regenerate.",
         "# AIRTABLE_TOKEN must be exported in the environment before launching.",
         "",
@@ -173,8 +181,12 @@ def generate_preprocessing_script(
         "",
         f"{wmw_cmd} set-status --study {code} --workflow preprocessing --status preprocessing",
         drakkar_cmd,
-        f"{wmw_cmd} set-status --study {code} --workflow preprocessing --status completed",
+        f"{wmw_cmd} set-status --study {code} --workflow preprocessing --status preprocessed",
         "_WMW_SUCCESS=1",
+        "",
+        f"{wmw_cmd} set-status --study {code} --workflow cataloging --status cataloging",
+        cataloging_cmd,
+        f"{wmw_cmd} set-status --study {code} --workflow cataloging --status cataloged",
         "",
     ]
     return "\n".join(lines)

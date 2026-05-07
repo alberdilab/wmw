@@ -839,33 +839,25 @@ def cmd_process(args: argparse.Namespace) -> int:
             if work_dir.exists():
                 shutil.rmtree(work_dir)
                 out.info(f"{code}: wiped local directory for rerun.")
-            samples = client.fetch_samples_for_study(samples_table, study_accession)
-        elif study_status == "resume":
-            # Fetch all non-discarded samples; discarded ones are filtered in build_input_tsv.
-            samples = client.fetch_samples_for_study(samples_table, study_accession)
-        else:
-            samples = client.fetch_samples_for_study(samples_table, study_accession, status="ready")
+        samples = client.fetch_samples_for_study(samples_table, study_accession)
+        use_samples = [r for r in samples if r.get("fields", r).get("status") == "use"]
 
-        if not samples:
-            label = "ready samples" if study_status == "ready" else "samples"
-            out.warn(f"{code}: no {label} — skipping.")
+        if not use_samples:
+            out.warn(f"{code}: no samples with status 'use' — skipping.")
             continue
 
-        out.info(f"{code}: {_pl(len(samples), 'sample')} to process (status={study_status!r}).")
+        out.info(f"{code}: {_pl(len(use_samples), 'sample')} with status 'use' to process.")
 
         work_dir.mkdir(parents=True, exist_ok=True)
 
         # Resume shortcut: if the preprocessing output already exists, finalise
-        # (upload stats + update statuses) without relaunching Drakkar.
+        # (upload stats + update study status) without relaunching Drakkar.
         if study_status == "resume" and workflow == "preprocessing":
             preprocessing_tsv = work_dir / "preprocessing.tsv"
             if preprocessing_tsv.exists():
                 out.info(f"{code}: preprocessing.tsv found — finalising without relaunch.")
                 client.set_study_status(studies_table, [study["id"]], "preprocessed")
                 out.success(f"{code}: study status → 'preprocessed'.")
-                non_discarded = [r for r in samples if r.get("fields", r).get("status") != "discarded"]
-                client.set_sample_status(samples_table, [r["id"] for r in non_discarded], "preprocessed")
-                out.success(f"{code}: {_pl(len(non_discarded), 'sample')} status → 'preprocessed'.")
                 stats = drakkar.parse_preprocessing_tsv(preprocessing_tsv)
                 if not stats:
                     out.warn(f"{code}: preprocessing.tsv empty or unparseable — stats not uploaded.")
@@ -926,8 +918,12 @@ def cmd_process(args: argparse.Namespace) -> int:
 _PROCESS_STATUS_MAP: dict[tuple[str, str], str] = {
     ("preprocessing", "preprocessing"): "preprocessing",
     ("preprocessing", "running"):       "preprocessing",  # legacy compat
-    ("preprocessing", "completed"):     "preprocessed",
+    ("preprocessing", "completed"):     "preprocessed",   # legacy compat
+    ("preprocessing", "preprocessed"):  "preprocessed",
     ("preprocessing", "error"):         "error",
+    ("cataloging",    "cataloging"):    "cataloging",
+    ("cataloging",    "cataloged"):     "cataloged",
+    ("cataloging",    "error"):         "error",
 }
 
 
@@ -948,17 +944,10 @@ def cmd_set_status(args: argparse.Namespace) -> int:
         _die(f"No study with code {study_code!r} found in Airtable.")
     assert study_record is not None
 
-    study_accession = study_record["fields"].get("study_accession", "")
     client.set_study_status(studies_table, [study_record["id"]], airtable_status)
     out.success(f"Study {study_code} status → {airtable_status!r}.")
 
-    if study_accession:
-        samples = client.fetch_samples_for_study(samples_table, study_accession)
-        if samples:
-            client.set_sample_status(samples_table, [r["id"] for r in samples], airtable_status)
-            out.success(f"{_pl(len(samples), 'sample')} status → {airtable_status!r}.")
-
-    if workflow == "preprocessing" and status == "completed":
+    if workflow == "preprocessing" and status in ("completed", "preprocessed"):
         from wmw import drakkar
         output_dir_str = _conf(args, "output_dir", "DRAKKAR_OUTPUT_DIR")
         if output_dir_str:
@@ -1392,7 +1381,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--status",
         metavar="STATUS",
         required=True,
-        choices=["preprocessing", "running", "completed", "error"],
+        choices=["preprocessing", "running", "completed", "preprocessed", "cataloging", "cataloged", "error"],
         help="New status to set.",
     )
     p_setstatus.add_argument(
