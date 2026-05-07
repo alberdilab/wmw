@@ -8,6 +8,11 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.3.4] - 2026-05-07
+
+### Changed
+
+- `wmw update`: now installs directly from GitHub (`https://github.com/alberdilab/wmw.git`) using `pip install --force-reinstall git+<repo>` instead of upgrading from PyPI. Prints the current version before updating. Accepts `--repo URL` to override the source repository.
 ## [0.3.3] - 2026-05-07
 
 ### Added

@@ -955,16 +955,17 @@ def cmd_config(args: argparse.Namespace) -> int:
 
 def cmd_update(args: argparse.Namespace) -> int:
     import subprocess as sp
-    out.info("Upgrading wmw via pip…")
+    out.info(f"Current version: wmw {__version__}")
+    out.info(f"Installing latest from {args.repo} …")
     result = sp.run(
-        [sys.executable, "-m", "pip", "install", "--upgrade", "wmw"],
+        [sys.executable, "-m", "pip", "install", "--force-reinstall", f"git+{args.repo}"],
         check=False,
     )
-    if result.returncode == 0:
-        out.success("wmw updated successfully.")
-    else:
-        out.error("pip upgrade failed.")
-    return result.returncode
+    if result.returncode != 0:
+        out.error("Update failed. Check the output above for details.")
+        return result.returncode
+    out.success("Update complete. Run 'wmw --version' to confirm the new version.")
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -1367,7 +1368,14 @@ def _build_parser() -> argparse.ArgumentParser:
     # ---- update ----
     p_update = sub.add_parser(
         "update",
-        help="Upgrade wmw to the latest PyPI release.",
+        help="Update wmw to the latest version from GitHub.",
+        description="Reinstalls wmw from the main branch on GitHub using pip.",
+    )
+    p_update.add_argument(
+        "--repo",
+        default="https://github.com/alberdilab/wmw.git",
+        metavar="URL",
+        help="Git repository URL to install from (default: GitHub main branch).",
     )
     p_update.set_defaults(func=cmd_update)
 
