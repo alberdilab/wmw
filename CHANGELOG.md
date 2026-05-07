@@ -8,6 +8,20 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.3.3] - 2026-05-07
+
+### Added
+
+- `wmw process`: completely redesigned. Instead of running Drakkar inline, it now generates a working directory (`DRAKKAR_OUTPUT_DIR/<code>/`) for each study with `status=ready`, writes a `<code>.tsv` input file with columns `sample`, `rawreads1`, `rawreads2`, `reference_name`, `reference_path`, and optionally `assembly` and `coverage` (included only when at least one row is non-empty), and writes a `<code>.sh` bash launch script that runs `drakkar preprocessing`, logs stdout/stderr, and calls back into `wmw set-status` to track progress in Airtable. Use `--batch CODE` to generate for a single study, `--slurm` to add the Drakkar slurm flag.
+- `wmw set-status`: new subcommand called by generated launch scripts. Updates study and all its samples in Airtable. `--study CODE --workflow preprocessing --status running|completed|error` maps to Airtable status values `preprocessing`, `preprocessed`, or `error`.
+- `drakkar.build_input_tsv()`: new function writing the Drakkar-format input TSV from decoded Airtable sample records; replaces the old `build_manifest` for the process workflow.
+- `drakkar.generate_preprocessing_script()`: generates a self-contained bash script that activates conda, runs `drakkar preprocessing`, and calls `wmw set-status` on start, completion, and error via a shell trap.
+- `airtable.AirtableClient.fetch_study_by_code()`: find a study record by its `code` field (STUDIES_COL_CODE).
+- `airtable.AirtableClient.fetch_samples_for_study()`: fetch decoded sample records for a given study accession, with optional `status` filter.
+- `config.yaml`: four new `SAMPLES_COL_*` field-ID keys — `SAMPLES_COL_REFERENCE_NAME`, `SAMPLES_COL_REFERENCE_PATH`, `SAMPLES_COL_ASSEMBLY`, `SAMPLES_COL_COVERAGE` — used in the new `wmw process` input TSV.
+
+- `wmw fetch`: each inserted sample now has its `parent_study` linked-record field set to the Airtable record ID of the parent study, enabling direct record links from Samples to Studies in Airtable. Works in both batch mode (studies from status filter) and single-study mode (`--study ACC`).
+- `airtable.AirtableClient.fetch_study_record_id()`: new method for targeted lookup of a study's Airtable record ID by accession (avoids fetching all records in single-study mode).
 ## [0.3.2] - 2026-05-06
 
 ### Added

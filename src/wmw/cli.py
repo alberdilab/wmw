@@ -662,6 +662,10 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     if args.study:
         out.info(f"Single-study mode: {args.study}")
         studies_to_fetch = [args.study]
+        if client is not None:
+            rec_id = client.fetch_study_record_id(studies_table, args.study)
+            if rec_id:
+                record_id_map = {args.study: rec_id}
     else:
         status_filter = args.status or "approved"
         out.info(f"Reading studies with status='{status_filter}' from Airtable…")
@@ -691,6 +695,10 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         try:
             runs = ena.search_study(acc)
             normalized = metadata.normalize_runs(runs, "ENA")
+            study_rec_id = record_id_map.get(acc)
+            if study_rec_id:
+                for run in normalized:
+                    run["parent_study"] = [study_rec_id]
             out.info(f"  {acc}: {_pl(len(normalized), 'run')}.")
             all_runs.extend(normalized)
             fetched_accessions.append(acc)
@@ -780,52 +788,117 @@ def _print_scan_summary(
 def cmd_process(args: argparse.Namespace) -> int:
     from wmw import drakkar
 
+    studies_table = _conf(args, "studies_table", "STUDIES_TABLE") or "Studies"
     samples_table = _conf(args, "samples_table", "SAMPLES_TABLE") or "Samples"
     output_dir_str = _conf(args, "output_dir", "DRAKKAR_OUTPUT_DIR", required=True)
     output_dir = Path(output_dir_str).expanduser().resolve()
-    batch = args.batch or None
+    batch_filter = (args.batch or "").strip()
     workflow = args.workflow
     slurm = args.slurm
+    conda_env = str(cfg.get("DRAKKAR_CONDA_ENV") or "").strip()
 
     out.section("WMW PROCESS")
-    out.info(f"Fetching samples from Airtable (batch={batch or 'all'}, status=pending)…")
+    client = _require_airtable(args, studies_table, samples_table)
 
-    client = _require_airtable(args, samples_table)
-    samples = client.fetch_samples_for_processing(samples_table, batch=batch)
+    out.info("Fetching studies with status 'ready' from Airtable…")
+    ready_studies = client.fetch_studies_by_status(studies_table, status="ready")
 
-    if not samples:
-        out.info("No pending samples found.")
+    if batch_filter:
+        ready_studies = [
+            s for s in ready_studies
+            if s["fields"].get("code", "") == batch_filter
+        ]
+
+    if not ready_studies:
+        label = f"code={batch_filter!r}" if batch_filter else "status='ready'"
+        out.info(f"No studies with {label} found.")
         return 0
 
-    out.success(f"{len(samples)} samples ready for processing.")
+    out.success(f"{_pl(len(ready_studies), 'study', 'studies')} to process.")
 
-    # Build manifest
-    batch_label = batch or "wmw"
-    manifest_path = output_dir / batch_label / "manifest.tsv"
-    drakkar.build_manifest(samples, manifest_path)
-    out.info(f"Manifest written: {manifest_path}")
+    n_generated = 0
+    for study in ready_studies:
+        fields = study["fields"]
+        code = fields.get("code", "")
+        study_accession = fields.get("study_accession", "")
+        if not code:
+            out.warn(f"Study {study['id']} has no code — skipping.")
+            continue
 
-    # Mark samples as running
-    record_ids = [r["id"] for r in samples]
-    client.set_sample_status(samples_table, record_ids, "running")
+        samples = client.fetch_samples_for_study(samples_table, study_accession, status="ready")
+        if not samples:
+            out.warn(f"{code}: no ready samples — skipping.")
+            continue
 
-    # Invoke drakkar
-    out.info(f"Launching drakkar {workflow}…")
-    run_output = output_dir / batch_label
-    rc = drakkar.run_workflow(
-        workflow=workflow,
-        manifest=manifest_path,
-        output_dir=run_output,
-        slurm=slurm,
-    )
+        out.info(f"{code}: {_pl(len(samples), 'sample')} ready.")
 
-    if rc == 0:
-        client.set_sample_status(samples_table, record_ids, "completed")
-        out.success("Drakkar workflow finished successfully.")
-    else:
-        client.set_sample_status(samples_table, record_ids, "failed")
-        out.error(f"Drakkar exited with code {rc}.")
-        return rc
+        work_dir = output_dir / code
+        work_dir.mkdir(parents=True, exist_ok=True)
+
+        tsv_path = work_dir / f"{code}.tsv"
+        drakkar.build_input_tsv(samples, tsv_path)
+        out.info(f"  Input TSV:     {tsv_path}")
+
+        script_path = work_dir / f"{code}.sh"
+        if workflow == "preprocessing":
+            script = drakkar.generate_preprocessing_script(
+                code=code,
+                tsv_path=tsv_path,
+                work_dir=work_dir,
+                conda_env=conda_env,
+                slurm=slurm,
+            )
+        else:
+            _die(f"Workflow {workflow!r} script generation is not yet implemented.")
+            return 1
+
+        script_path.write_text(script, encoding="utf-8")
+        script_path.chmod(0o755)
+        out.info(f"  Launch script: {script_path}")
+
+        n_generated += 1
+
+    out.success(f"Generated scripts for {_pl(n_generated, 'study', 'studies')}.")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# wmw set-status
+# ---------------------------------------------------------------------------
+
+_PROCESS_STATUS_MAP: dict[tuple[str, str], str] = {
+    ("preprocessing", "running"):   "preprocessing",
+    ("preprocessing", "completed"): "preprocessed",
+    ("preprocessing", "error"):     "error",
+}
+
+
+def cmd_set_status(args: argparse.Namespace) -> int:
+    studies_table = _conf(args, "studies_table", "STUDIES_TABLE") or "Studies"
+    samples_table = _conf(args, "samples_table", "SAMPLES_TABLE") or "Samples"
+    study_code = args.study
+    workflow = args.workflow
+    status = args.status
+
+    airtable_status = _PROCESS_STATUS_MAP.get((workflow, status), status)
+
+    out.info(f"Setting status for batch {study_code} ({workflow} → {airtable_status!r})…")
+    client = _require_airtable(args, studies_table, samples_table)
+
+    study_record = client.fetch_study_by_code(studies_table, study_code)
+    if not study_record:
+        _die(f"No study with code {study_code!r} found in Airtable.")
+    assert study_record is not None
+
+    study_accession = study_record["fields"].get("study_accession", "")
+    client.set_study_status(studies_table, [study_record["id"]], airtable_status)
+    out.success(f"Study {study_code} status → {airtable_status!r}.")
+
+    if study_accession:
+        samples = client.fetch_samples_for_study(samples_table, study_accession)
+        if samples:
+            client.set_sample_status(samples_table, [r["id"] for r in samples], airtable_status)
+            out.success(f"{_pl(len(samples), 'sample')} status → {airtable_status!r}.")
 
     return 0
 
@@ -909,8 +982,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "  2. Review studies in Airtable; set status = 'approved' to include.\n"
             "  3. wmw fetch\n"
             "       → Fetches run/sample data for approved studies; populates Samples.\n"
-            "  4. wmw process --batch BATCH_01 --workflow preprocessing\n"
-            "       → Runs Drakkar on pending samples.\n"
+            "  4. wmw process [--batch CODE]\n"
+            "       → Generates <CODE>.tsv and <CODE>.sh; run the script to launch Drakkar.\n"
             "\n"
             "Other examples:\n"
             "  wmw scan --study PRJEB12345\n"
@@ -1159,37 +1232,37 @@ def _build_parser() -> argparse.ArgumentParser:
     # ---- process ----
     p_process = sub.add_parser(
         "process",
-        help="Pull samples from Airtable and run the Drakkar metagenomics workflow.",
+        help="Generate Drakkar input files and launch scripts for ready studies.",
         description=(
-            "Fetch samples with status 'pending' from Airtable, build a Drakkar manifest, "
-            "invoke the chosen workflow stage, and update sample statuses on completion."
+            "For each study with status 'ready', fetch its ready samples from Airtable, "
+            "create a working directory under DRAKKAR_OUTPUT_DIR/<code>/, write a "
+            "<code>.tsv input file, and write a <code>.sh launch script that runs "
+            "Drakkar and logs progress back to Airtable."
         ),
     )
     _add_airtable_flags(p_process)
     p_process.add_argument(
         "--batch",
-        metavar="BATCH",
+        metavar="CODE",
         default="",
-        help="Filter samples by batch label. Processes all pending samples if omitted.",
+        help="Process only the study whose code matches CODE (default: all ready studies).",
     )
     p_process.add_argument(
         "--workflow",
         metavar="STAGE",
         default="preprocessing",
         choices=[
-            "complete",
             "preprocessing",
             "cataloging",
-            "profiling",
-            "dereplicating",
             "annotating",
+            "profiling",
         ],
-        help="Drakkar workflow stage to run (default: preprocessing).",
+        help="Drakkar workflow stage to generate a script for (default: preprocessing).",
     )
     p_process.add_argument(
         "--slurm",
         action="store_true",
-        help="Pass --slurm flag to Drakkar (for HPC cluster submission).",
+        help="Add the Drakkar --slurm flag to the generated script (HPC cluster submission).",
     )
     p_process.add_argument(
         "--output-dir",
@@ -1198,12 +1271,62 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Override DRAKKAR_OUTPUT_DIR from config.",
     )
     p_process.add_argument(
+        "--studies-table",
+        metavar="TABLE",
+        default="",
+        help="Override Studies table name from config.",
+    )
+    p_process.add_argument(
         "--samples-table",
         metavar="TABLE",
         default="",
         help="Override Samples table name from config.",
     )
     p_process.set_defaults(func=cmd_process)
+
+    # ---- set-status ----
+    p_setstatus = sub.add_parser(
+        "set-status",
+        help="Update study and sample statuses in Airtable (called by generated scripts).",
+        description=(
+            "Update the status of a study (and all its samples) in Airtable. "
+            "Intended for use inside wmw-generated launch scripts."
+        ),
+    )
+    _add_airtable_flags(p_setstatus)
+    p_setstatus.add_argument(
+        "--study",
+        metavar="CODE",
+        required=True,
+        help="Study code (batch label) to update.",
+    )
+    p_setstatus.add_argument(
+        "--workflow",
+        metavar="STAGE",
+        required=True,
+        choices=["preprocessing", "cataloging", "annotating", "profiling"],
+        help="Workflow stage that is reporting its status.",
+    )
+    p_setstatus.add_argument(
+        "--status",
+        metavar="STATUS",
+        required=True,
+        choices=["running", "completed", "error"],
+        help="New status to set.",
+    )
+    p_setstatus.add_argument(
+        "--studies-table",
+        metavar="TABLE",
+        default="",
+        help="Override Studies table name from config.",
+    )
+    p_setstatus.add_argument(
+        "--samples-table",
+        metavar="TABLE",
+        default="",
+        help="Override Samples table name from config.",
+    )
+    p_setstatus.set_defaults(func=cmd_set_status)
 
     # ---- status ----
     p_status = sub.add_parser(

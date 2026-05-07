@@ -83,6 +83,24 @@ def test_upsert_studies_all_new(mock_client):
     assert updated == 0
 
 
+def test_fetch_study_record_id_found(mock_client):
+    mock_table = MagicMock()
+    mock_table.all.return_value = [_make_record("rec42", {"study_accession": "PRJEB042"})]
+    mock_client._api.table.return_value = mock_table
+
+    result = mock_client.fetch_study_record_id("Studies", "PRJEB042")
+    assert result == "rec42"
+
+
+def test_fetch_study_record_id_not_found(mock_client):
+    mock_table = MagicMock()
+    mock_table.all.return_value = []
+    mock_client._api.table.return_value = mock_table
+
+    result = mock_client.fetch_study_record_id("Studies", "PRJEB999")
+    assert result is None
+
+
 def test_upsert_samples_skips_existing(mock_client):
     mock_table = MagicMock()
     mock_table.all.return_value = [
@@ -168,6 +186,55 @@ def test_link_studies_to_species(mock_client):
     updates = {u["id"]: set(u["fields"]["fldLINK"]) for u in species_table_mock.batch_update.call_args[0][0]}
     assert updates["recSp1"] == {"recStudy0", "recStudy1", "recStudy2"}
     assert updates["recSp2"] == {"recStudy2"}
+
+
+def test_fetch_study_by_code_found(mock_client):
+    mock_table = MagicMock()
+    mock_table.all.return_value = [_make_record("rec10", {"code": "PRJ001", "study_accession": "PRJEB001"})]
+    mock_client._api.table.return_value = mock_table
+
+    result = mock_client.fetch_study_by_code("Studies", "PRJ001")
+    assert result is not None
+    assert result["id"] == "rec10"
+    assert result["fields"]["code"] == "PRJ001"
+
+
+def test_fetch_study_by_code_not_found(mock_client):
+    mock_table = MagicMock()
+    mock_table.all.return_value = []
+    mock_client._api.table.return_value = mock_table
+
+    result = mock_client.fetch_study_by_code("Studies", "MISSING")
+    assert result is None
+
+
+def test_fetch_samples_for_study_with_status(mock_client):
+    mock_table = MagicMock()
+    mock_table.all.return_value = [
+        _make_record("recS1", {"run_accession": "ERR001", "study_accession": "PRJEB001", "status": "ready"}),
+    ]
+    mock_client._api.table.return_value = mock_table
+
+    result = mock_client.fetch_samples_for_study("Samples", "PRJEB001", status="ready")
+    assert len(result) == 1
+    call_kwargs = mock_table.all.call_args[1]
+    assert "PRJEB001" in call_kwargs["formula"]
+    assert "ready" in call_kwargs["formula"]
+
+
+def test_fetch_samples_for_study_no_status_filter(mock_client):
+    mock_table = MagicMock()
+    mock_table.all.return_value = [
+        _make_record("recS1", {"run_accession": "ERR001", "study_accession": "PRJEB001"}),
+        _make_record("recS2", {"run_accession": "ERR002", "study_accession": "PRJEB001"}),
+    ]
+    mock_client._api.table.return_value = mock_table
+
+    result = mock_client.fetch_samples_for_study("Samples", "PRJEB001")
+    assert len(result) == 2
+    call_kwargs = mock_table.all.call_args[1]
+    assert "ready" not in call_kwargs["formula"]
+    assert "PRJEB001" in call_kwargs["formula"]
 
 
 def test_link_studies_to_species_no_new_links(mock_client):

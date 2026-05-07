@@ -134,6 +134,14 @@ class AirtableClient:
         """Return the set of study_accession values already in the Studies table."""
         return set(self._existing_study_map(studies_table).keys())
 
+    def fetch_study_record_id(self, studies_table: str, study_accession: str) -> str | None:
+        """Return the Airtable record ID for *study_accession*, or None if not found."""
+        key = self._fld("study_accession", self._studies_fm)
+        formula = f'{{{key}}} = "{study_accession}"'
+        tbl = self._tbl(studies_table, self._studies_fm)
+        records = tbl.all(formula=formula, max_records=1)
+        return records[0]["id"] if records else None
+
     def upsert_studies(
         self,
         studies_table: str,
@@ -193,6 +201,35 @@ class AirtableClient:
             tbl = self._tbl(samples_table, self._samples_fm)
             tbl.batch_create([self._enc(s, self._samples_fm) for s in new])
         return len(new), len(samples) - len(new)
+
+    def fetch_study_by_code(
+        self,
+        studies_table: str,
+        code: str,
+    ) -> dict[str, Any] | None:
+        """Return the decoded study record whose CODE field equals *code*, or None."""
+        code_key = self._fld("code", self._studies_fm)
+        formula = f'{{{code_key}}} = "{code}"'
+        tbl = self._tbl(studies_table, self._studies_fm)
+        records = tbl.all(formula=formula, max_records=1)
+        return self._dec(records[0], self._studies_fm) if records else None
+
+    def fetch_samples_for_study(
+        self,
+        samples_table: str,
+        study_accession: str,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return decoded sample records for *study_accession*, optionally filtered by *status*."""
+        sa_key = self._fld("study_accession", self._samples_fm)
+        parts = [f'{{{sa_key}}} = "{study_accession}"']
+        if status:
+            status_key = self._fld("status", self._samples_fm)
+            parts.append(f'{{{status_key}}} = "{status}"')
+        formula = "AND(" + ", ".join(parts) + ")" if len(parts) > 1 else parts[0]
+        tbl = self._tbl(samples_table, self._samples_fm)
+        records = tbl.all(formula=formula)
+        return [self._dec(r, self._samples_fm) for r in records]
 
     def fetch_samples_for_processing(
         self,

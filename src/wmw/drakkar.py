@@ -54,6 +54,118 @@ def _second_url(fastq_ftp: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Drakkar input TSV (new format for wmw process)
+# ---------------------------------------------------------------------------
+
+_REQUIRED_COLS = [
+    ("sample",          "code"),
+    ("rawreads1",       "fastq_url_1"),
+    ("rawreads2",       "fastq_url_2"),
+    ("reference_name",  "reference_name"),
+    ("reference_path",  "reference_path"),
+]
+_OPTIONAL_COLS = [
+    ("assembly", "assembly"),
+    ("coverage", "coverage"),
+]
+
+
+def build_input_tsv(
+    samples: list[dict[str, Any]],
+    output_path: Path,
+) -> Path:
+    """Write the Drakkar input TSV for a batch of decoded Airtable sample records.
+
+    Required columns: sample, rawreads1, rawreads2, reference_name, reference_path.
+    Optional columns (assembly, coverage) are included only when at least one row
+    has a non-empty value.
+    """
+    include_optional: dict[str, bool] = {}
+    for col_name, field_name in _OPTIONAL_COLS:
+        include_optional[col_name] = any(
+            str(rec.get("fields", rec).get(field_name, "") or "").strip()
+            for rec in samples
+        )
+
+    header_cols = [c for c, _ in _REQUIRED_COLS] + [
+        c for c, _ in _OPTIONAL_COLS if include_optional.get(c)
+    ]
+    field_names = [f for _, f in _REQUIRED_COLS] + [
+        f for c, f in _OPTIONAL_COLS if include_optional.get(c)
+    ]
+
+    lines = ["\t".join(header_cols)]
+    for rec in samples:
+        fields = rec.get("fields", rec)
+        row = [str(fields.get(fn, "") or "") for fn in field_names]
+        lines.append("\t".join(row))
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return output_path
+
+
+# ---------------------------------------------------------------------------
+# Script generation
+# ---------------------------------------------------------------------------
+
+def generate_preprocessing_script(
+    code: str,
+    tsv_path: Path,
+    work_dir: Path,
+    conda_env: str,
+    slurm: bool = False,
+) -> str:
+    """Return a bash script that runs drakkar preprocessing for *code* and updates Airtable."""
+    drakkar_flags = f"-f {tsv_path} -o {work_dir}"
+    if slurm:
+        drakkar_flags += " -p slurm"
+
+    if conda_env:
+        c_flag = "-p" if str(conda_env).startswith(("/", "~", ".")) else "-n"
+        drakkar_cmd = f"conda run {c_flag} {conda_env} drakkar preprocessing {drakkar_flags}"
+        conda_lines = [
+            'if [ -f "$(conda info --base 2>/dev/null)/etc/profile.d/conda.sh" ]; then',
+            '    source "$(conda info --base)/etc/profile.d/conda.sh"',
+            f"    conda activate {conda_env}",
+            "fi",
+            "",
+        ]
+    else:
+        drakkar_cmd = f"drakkar preprocessing {drakkar_flags}"
+        conda_lines = []
+
+    lines = [
+        "#!/usr/bin/env bash",
+        f"# wmw-generated script — batch {code} (preprocessing)",
+        "# Do not edit manually; re-run wmw process to regenerate.",
+        "# AIRTABLE_TOKEN must be exported in the environment before launching.",
+        "",
+        "set -euo pipefail",
+        f"exec >> {work_dir}/{code}.out 2>> {work_dir}/{code}.err",
+        'echo ""',
+        "echo \"=== $(date '+%Y-%m-%d %H:%M:%S') ===\"",
+        "echo \"=== $(date '+%Y-%m-%d %H:%M:%S') ===\" >&2",
+        "",
+        *conda_lines,
+        "_WMW_SUCCESS=0",
+        "_on_exit() {",
+        '    if [ "$_WMW_SUCCESS" -ne 1 ]; then',
+        f"        wmw set-status --study {code} --workflow preprocessing --status error",
+        "    fi",
+        "}",
+        "trap _on_exit EXIT",
+        "",
+        f"wmw set-status --study {code} --workflow preprocessing --status running",
+        drakkar_cmd,
+        f"wmw set-status --study {code} --workflow preprocessing --status completed",
+        "_WMW_SUCCESS=1",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Drakkar invocation
 # ---------------------------------------------------------------------------
 
