@@ -115,6 +115,7 @@ def generate_preprocessing_script(
     work_dir: Path,
     conda_env: str,
     slurm: bool = False,
+    wmw_conda_env: str = "",
 ) -> str:
     """Return a bash script that runs drakkar preprocessing for *code* and updates Airtable."""
     drakkar_flags = f"-f {tsv_path} -o {work_dir} --fraction --nonpareil"
@@ -135,6 +136,12 @@ def generate_preprocessing_script(
         drakkar_cmd = f"drakkar preprocessing {drakkar_flags}"
         conda_lines = []
 
+    if wmw_conda_env:
+        w_flag = "-p" if str(wmw_conda_env).startswith(("/", "~", ".")) else "-n"
+        wmw_cmd = f"conda run {w_flag} {wmw_conda_env} wmw"
+    else:
+        wmw_cmd = "wmw"
+
     lines = [
         "#!/usr/bin/env bash",
         f"# wmw-generated script — batch {code} (preprocessing)",
@@ -151,14 +158,14 @@ def generate_preprocessing_script(
         "_WMW_SUCCESS=0",
         "_on_exit() {",
         '    if [ "$_WMW_SUCCESS" -ne 1 ]; then',
-        f"        wmw set-status --study {code} --workflow preprocessing --status error",
+        f"        {wmw_cmd} set-status --study {code} --workflow preprocessing --status error",
         "    fi",
         "}",
         "trap _on_exit EXIT",
         "",
-        f"wmw set-status --study {code} --workflow preprocessing --status preprocessing",
+        f"{wmw_cmd} set-status --study {code} --workflow preprocessing --status preprocessing",
         drakkar_cmd,
-        f"wmw set-status --study {code} --workflow preprocessing --status completed",
+        f"{wmw_cmd} set-status --study {code} --workflow preprocessing --status completed",
         "_WMW_SUCCESS=1",
         "",
     ]

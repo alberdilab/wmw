@@ -8,6 +8,11 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.3.6] - 2026-05-07
+
+### Fixed
+
+- `wmw process`: generated scripts now prefix all `wmw set-status` calls with `conda run` using the `WMW_CONDA_ENV` config key (path or name), so `wmw` is found when the script runs inside a screen session without an active conda environment.
 ## [0.3.5] - 2026-05-07
 
 ### Added

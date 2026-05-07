@@ -90,6 +90,7 @@ SAMPLES_COL_C: "fldP5nlgOC73EO3N0"
 SAMPLES_COL_LR: "fldlFRpLzktsmjso4"
 
 # --- Drakkar ---
+WMW_CONDA_ENV: "/projects/alberdilab/data/environments/conda/wdw" # Conda env name or path containing wmw; leave blank to use $PATH
 DRAKKAR_CONDA_ENV: "/projects/alberdilab/data/environments/conda/drakkar" # Conda env name or path containing drakkar; leave blank to use $PATH
 DRAKKAR_OUTPUT_DIR: "/projects/alberdilab/data/wmw"                       # Root output directory for drakkar runs
 

@@ -796,6 +796,7 @@ def cmd_process(args: argparse.Namespace) -> int:
     workflow = args.workflow
     slurm = args.slurm
     conda_env = str(cfg.get("DRAKKAR_CONDA_ENV") or "").strip()
+    wmw_conda_env = str(cfg.get("WMW_CONDA_ENV") or "").strip()
 
     out.section("WMW PROCESS")
     client = _require_airtable(args, studies_table, samples_table)
@@ -847,6 +848,7 @@ def cmd_process(args: argparse.Namespace) -> int:
                 work_dir=work_dir,
                 conda_env=conda_env,
                 slurm=slurm,
+                wmw_conda_env=wmw_conda_env,
             )
         else:
             _die(f"Workflow {workflow!r} script generation is not yet implemented.")

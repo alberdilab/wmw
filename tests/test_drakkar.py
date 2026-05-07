@@ -185,3 +185,15 @@ def test_generate_preprocessing_script_no_conda(tmp_path):
     )
     assert "conda run" not in script
     assert "drakkar preprocessing" in script
+
+
+def test_generate_preprocessing_script_wmw_conda_env(tmp_path):
+    script = drakkar.generate_preprocessing_script(
+        code="PRJ004",
+        tsv_path=tmp_path / "PRJ004.tsv",
+        work_dir=tmp_path,
+        conda_env="/envs/drakkar",
+        wmw_conda_env="/envs/wmw",
+    )
+    assert "conda run -p /envs/wmw wmw set-status" in script
+    assert "conda run -p /envs/drakkar drakkar preprocessing" in script
