@@ -278,6 +278,40 @@ class AirtableClient:
         records = tbl.all(formula=formula)
         return [self._dec(r, self._studies_fm) for r in records]
 
+    def update_sample_preprocessing_stats(
+        self,
+        samples_table: str,
+        stats_by_run: dict[str, dict[str, Any]],
+    ) -> int:
+        """Write preprocessing stats to sample records, keyed by run_accession.
+
+        stats_by_run: {run_accession: {airtable_field_id: value}}
+        Returns the number of records updated.
+        """
+        if not stats_by_run:
+            return 0
+
+        run_key = self._fld("run_accession", self._samples_fm)
+        accessions = list(stats_by_run.keys())
+        if len(accessions) == 1:
+            formula = f'{{{run_key}}} = "{accessions[0]}"'
+        else:
+            parts = [f'{{{run_key}}} = "{a}"' for a in accessions]
+            formula = "OR(" + ", ".join(parts) + ")"
+
+        tbl = self._tbl(samples_table, self._samples_fm)
+        records = tbl.all(formula=formula)
+        run_to_id = {r["fields"].get(run_key, ""): r["id"] for r in records}
+
+        updates = [
+            {"id": run_to_id[run_acc], "fields": fields}
+            for run_acc, fields in stats_by_run.items()
+            if run_acc in run_to_id
+        ]
+        if updates:
+            tbl.batch_update(updates)
+        return len(updates)
+
     def set_study_status(
         self,
         studies_table: str,

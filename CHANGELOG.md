@@ -8,11 +8,25 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.3.5] - 2026-05-07
+
+### Added
+
+- `wmw set-status --workflow preprocessing --status completed`: after updating Airtable statuses, now reads `<DRAKKAR_OUTPUT_DIR>/<code>/preprocessing.tsv` and uploads per-sample stats (reads/bases pre/post fastp, adapter-trimmed reads/bases, host reads/bases, metagenomic reads/bases, singleM fraction, nonpareil C and LR) to the corresponding Airtable sample fields using the field IDs from config.
+
+### Changed
+
+- `drakkar.generate_preprocessing_script()`: now always passes `--fraction` and `--nonpareil` to `drakkar preprocessing`.
+- `drakkar.generate_preprocessing_script()`: generated script now calls `wmw set-status --status preprocessing` (instead of `--status running`) when preprocessing starts, so Airtable shows `preprocessing` immediately.
+- `wmw set-status`: `--status` now accepts `preprocessing` as an explicit choice in addition to `running`, `completed`, and `error`.
+- `wmw process`: after writing the `<code>.sh` script, now launches it inside a detached `screen` session named after the batch code (`screen -dmS <code> bash <code>.sh`). If `screen` is not on PATH the script is still written but a warning is printed instead of launching.
+
 ## [0.3.4] - 2026-05-07
 
 ### Changed
 
 - `wmw update`: now installs directly from GitHub (`https://github.com/alberdilab/wmw.git`) using `pip install --force-reinstall git+<repo>` instead of upgrading from PyPI. Prints the current version before updating. Accepts `--repo URL` to override the source repository.
+
 ## [0.3.3] - 2026-05-07
 
 ### Added
@@ -27,6 +41,7 @@ All notable changes to wmw are documented here.
 
 - `wmw fetch`: each inserted sample now has its `parent_study` linked-record field set to the Airtable record ID of the parent study, enabling direct record links from Samples to Studies in Airtable. Works in both batch mode (studies from status filter) and single-study mode (`--study ACC`).
 - `airtable.AirtableClient.fetch_study_record_id()`: new method for targeted lookup of a study's Airtable record ID by accession (avoids fetching all records in single-study mode).
+
 ## [0.3.2] - 2026-05-06
 
 ### Added
@@ -66,6 +81,7 @@ All notable changes to wmw are documented here.
 - `publications.fetch_from_pubmed` and `fetch_from_crossref` now return `pub_year` as an `int` (or `None` when unavailable) instead of a string, fixing a 422 `INVALID_VALUE_FOR_COLUMN` error when upserting studies into an Airtable numeric "Year" field.
 - `ena._get`: 5xx server errors are now retried with exponential backoff (same behaviour as 429 rate-limit responses), making batch scans resilient to transient ENA server errors.
 - `wmw scan`: a failed run-query batch (e.g. ENA 500 error after all retries) no longer aborts the entire scan. The failing batch is warned and skipped; the scan continues with remaining batches and reports all skipped batch numbers at the end.
+
 ## [0.3.1] - 2026-05-06
 
 ### Changed
@@ -96,6 +112,7 @@ All notable changes to wmw are documented here.
   `--month March,June`). The flags can be combined — `--year 2025 --month March` resolves to
   `2025-03-01 → 2025-03-31`. When `--month` is used without `--year`, the current calendar
   year is assumed. Month names are full English names, case-insensitive.
+
 ## [0.3.0] - 2026-05-06
 
 ### Added

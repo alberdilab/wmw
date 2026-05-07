@@ -117,7 +117,7 @@ def generate_preprocessing_script(
     slurm: bool = False,
 ) -> str:
     """Return a bash script that runs drakkar preprocessing for *code* and updates Airtable."""
-    drakkar_flags = f"-f {tsv_path} -o {work_dir}"
+    drakkar_flags = f"-f {tsv_path} -o {work_dir} --fraction --nonpareil"
     if slurm:
         drakkar_flags += " -p slurm"
 
@@ -156,7 +156,7 @@ def generate_preprocessing_script(
         "}",
         "trap _on_exit EXIT",
         "",
-        f"wmw set-status --study {code} --workflow preprocessing --status running",
+        f"wmw set-status --study {code} --workflow preprocessing --status preprocessing",
         drakkar_cmd,
         f"wmw set-status --study {code} --workflow preprocessing --status completed",
         "_WMW_SUCCESS=1",
@@ -220,6 +220,68 @@ def get_drakkar_version() -> str:
 # ---------------------------------------------------------------------------
 # Output parsing
 # ---------------------------------------------------------------------------
+
+_PREPROCESSING_TSV_COLS: list[tuple[str, str, str]] = [
+    # (tsv_column,              config_key,                          type)
+    ("reads_pre_fastp",        "SAMPLES_COL_READS_PRE_FASTP",        "int"),
+    ("reads_post_fastp",       "SAMPLES_COL_READS_POST_FASTP",       "int"),
+    ("bases_pre_fastp",        "SAMPLES_COL_BASES_PRE_FASTP",        "int"),
+    ("bases_post_fastp",       "SAMPLES_COL_BASES_POST_FASTP",       "int"),
+    ("adapter_trimmed_reads",  "SAMPLES_COL_ADAPTER_TRIMMED_READS",  "int"),
+    ("adapter_trimmed_bases",  "SAMPLES_COL_ADAPTER_TRIMMED_BASES",  "int"),
+    ("host_reads",             "SAMPLES_COL_HOST_READS",             "int"),
+    ("host_bases",             "SAMPLES_COL_HOST_BASES",             "int"),
+    ("metagenomic_reads",      "SAMPLES_COL_METAGENOMIC_READS",      "int"),
+    ("metagenomic_bases",      "SAMPLES_COL_METAGENOMNIC_BASES",     "int"),
+    ("singlem_fraction",       "SAMPLES_COL_SINGLEM_FRACTION",       "float2"),
+    ("nonpareil_C",            "SAMPLES_COL_C",                      "float4"),
+    ("nonpareil_LR",           "SAMPLES_COL_LR",                     "float4"),
+]
+
+
+def parse_preprocessing_tsv(tsv_path: Path) -> dict[str, dict[str, Any]]:
+    """Parse drakkar's preprocessing.tsv; return {run_accession: {field_id: value}}.
+
+    Field IDs come from config. Returns empty dict if the file is absent.
+    """
+    if not tsv_path.exists():
+        return {}
+
+    col_map: list[tuple[str, str, str]] = []
+    for tsv_col, config_key, typ in _PREPROCESSING_TSV_COLS:
+        fid = str(cfg.get(config_key) or "").strip()
+        if fid:
+            col_map.append((tsv_col, fid, typ))
+
+    result: dict[str, dict[str, Any]] = {}
+    with tsv_path.open(encoding="utf-8") as fh:
+        header = fh.readline().rstrip("\n").split("\t")
+        for line in fh:
+            row = line.rstrip("\n").split("\t")
+            if not row or not row[0]:
+                continue
+            row_dict = dict(zip(header, row))
+            sample_id = row_dict.get("sample", "").strip()
+            if not sample_id:
+                continue
+            fields: dict[str, Any] = {}
+            for tsv_col, fid, typ in col_map:
+                raw = row_dict.get(tsv_col, "").strip()
+                if not raw:
+                    continue
+                try:
+                    if typ == "int":
+                        fields[fid] = int(float(raw))
+                    elif typ == "float2":
+                        fields[fid] = round(float(raw), 2)
+                    else:  # float4
+                        fields[fid] = round(float(raw), 4)
+                except ValueError:
+                    pass
+            if fields:
+                result[sample_id] = fields
+    return result
+
 
 def parse_preprocessing_stats(output_dir: Path, run_accession: str) -> dict[str, Any]:
     """Extract key QC metrics from drakkar preprocessing output for a given run.

@@ -856,6 +856,14 @@ def cmd_process(args: argparse.Namespace) -> int:
         script_path.chmod(0o755)
         out.info(f"  Launch script: {script_path}")
 
+        import shutil
+        import subprocess as sp
+        if shutil.which("screen") is None:
+            out.warn(f"  'screen' not found — script written but not launched.")
+        else:
+            sp.run(["screen", "-dmS", code, "bash", str(script_path)], check=True)
+            out.success(f"  Screen session '{code}' started.")
+
         n_generated += 1
 
     out.success(f"Generated scripts for {_pl(n_generated, 'study', 'studies')}.")
@@ -867,9 +875,10 @@ def cmd_process(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 _PROCESS_STATUS_MAP: dict[tuple[str, str], str] = {
-    ("preprocessing", "running"):   "preprocessing",
-    ("preprocessing", "completed"): "preprocessed",
-    ("preprocessing", "error"):     "error",
+    ("preprocessing", "preprocessing"): "preprocessing",
+    ("preprocessing", "running"):       "preprocessing",  # legacy compat
+    ("preprocessing", "completed"):     "preprocessed",
+    ("preprocessing", "error"):         "error",
 }
 
 
@@ -899,6 +908,18 @@ def cmd_set_status(args: argparse.Namespace) -> int:
         if samples:
             client.set_sample_status(samples_table, [r["id"] for r in samples], airtable_status)
             out.success(f"{_pl(len(samples), 'sample')} status → {airtable_status!r}.")
+
+    if workflow == "preprocessing" and status == "completed":
+        from wmw import drakkar
+        output_dir_str = _conf(args, "output_dir", "DRAKKAR_OUTPUT_DIR")
+        if output_dir_str:
+            tsv_path = Path(output_dir_str).expanduser().resolve() / study_code / "preprocessing.tsv"
+            stats = drakkar.parse_preprocessing_tsv(tsv_path)
+            if stats:
+                n = client.update_sample_preprocessing_stats(samples_table, stats)
+                out.success(f"Uploaded preprocessing stats for {_pl(n, 'sample')}.")
+            else:
+                out.warn(f"preprocessing.tsv not found at {tsv_path} — stats not uploaded.")
 
     return 0
 
@@ -1312,7 +1333,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--status",
         metavar="STATUS",
         required=True,
-        choices=["running", "completed", "error"],
+        choices=["preprocessing", "running", "completed", "error"],
         help="New status to set.",
     )
     p_setstatus.add_argument(

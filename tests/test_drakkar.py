@@ -159,7 +159,7 @@ def test_generate_preprocessing_script_contains_key_elements(tmp_path):
     assert "#!/usr/bin/env bash" in script
     assert "PRJ001" in script
     assert "drakkar preprocessing" in script
-    assert "wmw set-status --study PRJ001 --workflow preprocessing --status running" in script
+    assert "wmw set-status --study PRJ001 --workflow preprocessing --status preprocessing" in script
     assert "wmw set-status --study PRJ001 --workflow preprocessing --status completed" in script
     assert "wmw set-status --study PRJ001 --workflow preprocessing --status error" in script
     assert "trap _on_exit EXIT" in script
