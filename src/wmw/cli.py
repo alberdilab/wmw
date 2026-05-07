@@ -850,12 +850,13 @@ def cmd_process(args: argparse.Namespace) -> int:
 
         work_dir.mkdir(parents=True, exist_ok=True)
 
-        # Resume shortcut: if the preprocessing output already exists, finalise
-        # (upload stats + update study status) without relaunching Drakkar.
+        # Resume shortcut: if preprocessing output already exists, finalise stats
+        # and continue with the next missing step (cataloging) rather than relaunching
+        # Drakkar from scratch.
         if study_status == "resume" and workflow == "preprocessing":
             preprocessing_tsv = work_dir / "preprocessing.tsv"
             if preprocessing_tsv.exists():
-                out.info(f"{code}: preprocessing.tsv found — finalising without relaunch.")
+                out.info(f"{code}: preprocessing.tsv found — finalising preprocessing and launching cataloging.")
                 client.set_study_status(studies_table, [study["id"]], "preprocessed")
                 out.success(f"{code}: study status → 'preprocessed'.")
                 stats = drakkar.parse_preprocessing_tsv(preprocessing_tsv)
@@ -871,6 +872,26 @@ def cmd_process(args: argparse.Namespace) -> int:
                             f"Airtable records found — stats not uploaded. "
                             f"Check that the sample 'code' field values match the TSV."
                         )
+                input_tsv = work_dir / f"{code}.tsv"
+                drakkar.build_input_tsv(samples, input_tsv)
+                script_path = work_dir / f"{code}.sh"
+                script = drakkar.generate_cataloging_script(
+                    code=code,
+                    tsv_path=input_tsv,
+                    work_dir=work_dir,
+                    conda_env=conda_env,
+                    slurm=slurm,
+                    wmw_conda_env=wmw_conda_env,
+                )
+                script_path.write_text(script, encoding="utf-8")
+                script_path.chmod(0o755)
+                out.info(f"  Launch script: {script_path}")
+                if shutil.which("screen") is None:
+                    out.warn(f"  'screen' not found — script written but not launched.")
+                else:
+                    import subprocess as sp
+                    sp.run(["screen", "-dmS", code, "bash", str(script_path)], check=True)
+                    out.success(f"  Screen session '{code}' started.")
                 n_generated += 1
                 continue
 

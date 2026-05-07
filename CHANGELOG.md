@@ -8,6 +8,12 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.3.10] - 2026-05-07
+
+### Changed
+
+- `wmw process` resume behaviour: when a study has status `resume` and `preprocessing.tsv` already exists, preprocessing stats are finalised and a cataloging-only script is generated and launched — instead of stopping after finalising preprocessing. If `preprocessing.tsv` is absent, the full preprocessing → cataloging script is generated as before (Snakemake resumes from checkpoints).
+- Added `drakkar.generate_cataloging_script()` to support standalone cataloging script generation.
 ## [0.3.9] - 2026-05-07
 
 ### Added
@@ -16,6 +22,7 @@ All notable changes to wmw are documented here.
 - `wmw set-status`: added `preprocessed`, `cataloging`, and `cataloged` as valid `--status` choices; added `cataloging` workflow mappings to the status map.
 - Sample status model simplified to three user-controlled values: `use` (included in TSV), `pending`, `ignore` (both excluded). Workflow progress (`wmw set-status`, `wmw process` resume) no longer modifies sample statuses — only study status changes during processing.
 - `build_input_tsv`: only rows with `status == "use"` are written to the Drakkar input TSV.
+
 ## [0.3.8] - 2026-05-07
 
 ### Fixed
@@ -23,6 +30,7 @@ All notable changes to wmw are documented here.
 - `wmw set-status` / `wmw process` (resume): preprocessing stats from `preprocessing.tsv` are now looked up in Airtable by the sample `code` field (matching the `sample` column written by `build_input_tsv`) instead of `run_accession`. The previous behaviour silently updated 0 records when `code` ≠ `run_accession`.
 - `airtable.update_sample_preprocessing_stats`: OR formula lookups are now batched in groups of 50 to stay within Airtable's formula length limit for large studies.
 - `wmw set-status` / `wmw process` (resume): improved diagnostics — "file not found" and "no matching Airtable records" are now reported as separate warnings instead of a single misleading "not found" message.
+
 ## [0.3.7] - 2026-05-07
 
 ### Added
@@ -33,6 +41,7 @@ All notable changes to wmw are documented here.
 
 - `build_input_tsv`: samples with `status == "discarded"` are now skipped when writing the Drakkar input TSV, so discarded samples are never included in processing.
 - `wmw process`: now also picks up studies with status `"resume"` and `"rerun"` in addition to `"ready"`. `"rerun"` wipes the local output directory and reprocesses all non-discarded samples from scratch. `"resume"` fetches all non-discarded samples; if `preprocessing.tsv` already exists in the work directory it finalises the run (sets study + sample statuses to `"preprocessed"` and uploads stats) without relaunching Drakkar, otherwise it generates and launches the script as normal.
+
 ## [0.3.6] - 2026-05-07
 
 ### Fixed

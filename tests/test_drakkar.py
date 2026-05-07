@@ -201,3 +201,57 @@ def test_generate_preprocessing_script_wmw_conda_env(tmp_path):
     )
     assert "conda run -p /envs/wmw wmw set-status" in script
     assert "conda run -p /envs/drakkar drakkar preprocessing" in script
+
+
+# generate_cataloging_script
+# ---------------------------------------------------------------------------
+
+def test_generate_cataloging_script_contains_key_elements(tmp_path):
+    script = drakkar.generate_cataloging_script(
+        code="PRJ001",
+        tsv_path=tmp_path / "PRJ001.tsv",
+        work_dir=tmp_path,
+        conda_env="/envs/drakkar",
+    )
+    assert "#!/usr/bin/env bash" in script
+    assert "cataloging only" in script
+    assert "drakkar cataloging" in script
+    assert "wmw set-status --study PRJ001 --workflow cataloging --status cataloging" in script
+    assert "wmw set-status --study PRJ001 --workflow cataloging --status cataloged" in script
+    assert "wmw set-status --study PRJ001 --workflow cataloging --status error" in script
+    assert "trap _on_exit EXIT" in script
+    assert "drakkar preprocessing" not in script
+
+
+def test_generate_cataloging_script_slurm_flag(tmp_path):
+    script = drakkar.generate_cataloging_script(
+        code="PRJ002",
+        tsv_path=tmp_path / "PRJ002.tsv",
+        work_dir=tmp_path,
+        conda_env="/envs/drakkar",
+        slurm=True,
+    )
+    assert "-p slurm" in script
+
+
+def test_generate_cataloging_script_no_conda(tmp_path):
+    script = drakkar.generate_cataloging_script(
+        code="PRJ003",
+        tsv_path=tmp_path / "PRJ003.tsv",
+        work_dir=tmp_path,
+        conda_env="",
+    )
+    assert "conda run" not in script
+    assert "drakkar cataloging" in script
+
+
+def test_generate_cataloging_script_wmw_conda_env(tmp_path):
+    script = drakkar.generate_cataloging_script(
+        code="PRJ004",
+        tsv_path=tmp_path / "PRJ004.tsv",
+        work_dir=tmp_path,
+        conda_env="/envs/drakkar",
+        wmw_conda_env="/envs/wmw",
+    )
+    assert "conda run -p /envs/wmw wmw set-status" in script
+    assert "conda run -p /envs/drakkar drakkar cataloging" in script

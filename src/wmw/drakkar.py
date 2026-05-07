@@ -192,6 +192,69 @@ def generate_preprocessing_script(
     return "\n".join(lines)
 
 
+def generate_cataloging_script(
+    code: str,
+    tsv_path: Path,
+    work_dir: Path,
+    conda_env: str,
+    slurm: bool = False,
+    wmw_conda_env: str = "",
+) -> str:
+    """Return a bash script that runs drakkar cataloging only for *code* and updates Airtable."""
+    cataloging_flags = f"-f {tsv_path} --multicoverage"
+    if slurm:
+        cataloging_flags += " -p slurm"
+
+    if conda_env:
+        c_flag = "-p" if str(conda_env).startswith(("/", "~", ".")) else "-n"
+        cataloging_cmd = f"conda run {c_flag} {conda_env} drakkar cataloging {cataloging_flags}"
+        conda_lines = [
+            'if [ -f "$(conda info --base 2>/dev/null)/etc/profile.d/conda.sh" ]; then',
+            '    source "$(conda info --base)/etc/profile.d/conda.sh"',
+            f"    conda activate {conda_env}",
+            "fi",
+            "",
+        ]
+    else:
+        cataloging_cmd = f"drakkar cataloging {cataloging_flags}"
+        conda_lines = []
+
+    if wmw_conda_env:
+        w_flag = "-p" if str(wmw_conda_env).startswith(("/", "~", ".")) else "-n"
+        wmw_cmd = f"conda run {w_flag} {wmw_conda_env} wmw"
+    else:
+        wmw_cmd = "wmw"
+
+    lines = [
+        "#!/usr/bin/env bash",
+        f"# wmw-generated script — batch {code} (cataloging only)",
+        "# Do not edit manually; re-run wmw process to regenerate.",
+        "# AIRTABLE_TOKEN must be exported in the environment before launching.",
+        "",
+        "set -euo pipefail",
+        f"exec >> {work_dir}/{code}.out 2>> {work_dir}/{code}.err",
+        'echo ""',
+        "echo \"=== $(date '+%Y-%m-%d %H:%M:%S') ===\"",
+        "echo \"=== $(date '+%Y-%m-%d %H:%M:%S') ===\" >&2",
+        "",
+        *conda_lines,
+        "_WMW_SUCCESS=0",
+        "_on_exit() {",
+        '    if [ "$_WMW_SUCCESS" -ne 1 ]; then',
+        f"        {wmw_cmd} set-status --study {code} --workflow cataloging --status error",
+        "    fi",
+        "}",
+        "trap _on_exit EXIT",
+        "",
+        f"{wmw_cmd} set-status --study {code} --workflow cataloging --status cataloging",
+        cataloging_cmd,
+        f"{wmw_cmd} set-status --study {code} --workflow cataloging --status cataloged",
+        "_WMW_SUCCESS=1",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Drakkar invocation
 # ---------------------------------------------------------------------------
