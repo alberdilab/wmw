@@ -8,12 +8,19 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.3.11] - 2026-05-07
+
+### Fixed
+
+- `drakkar.generate_cataloging_script()` and the cataloging step in `generate_preprocessing_script()` now pass `-o {work_dir}` to `drakkar cataloging`, ensuring output is written to the study folder rather than the current working directory.
+
 ## [0.3.10] - 2026-05-07
 
 ### Changed
 
 - `wmw process` resume behaviour: when a study has status `resume` and `preprocessing.tsv` already exists, preprocessing stats are finalised and a cataloging-only script is generated and launched — instead of stopping after finalising preprocessing. If `preprocessing.tsv` is absent, the full preprocessing → cataloging script is generated as before (Snakemake resumes from checkpoints).
 - Added `drakkar.generate_cataloging_script()` to support standalone cataloging script generation.
+
 ## [0.3.9] - 2026-05-07
 
 ### Added

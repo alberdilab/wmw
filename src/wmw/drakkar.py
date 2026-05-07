@@ -150,7 +150,7 @@ def generate_preprocessing_script(
     else:
         wmw_cmd = "wmw"
 
-    cataloging_flags = f"-f {tsv_path} --multicoverage"
+    cataloging_flags = f"-f {tsv_path} -o {work_dir} --multicoverage"
     if slurm:
         cataloging_flags += " -p slurm"
     if conda_env:
@@ -201,7 +201,7 @@ def generate_cataloging_script(
     wmw_conda_env: str = "",
 ) -> str:
     """Return a bash script that runs drakkar cataloging only for *code* and updates Airtable."""
-    cataloging_flags = f"-f {tsv_path} --multicoverage"
+    cataloging_flags = f"-f {tsv_path} -o {work_dir} --multicoverage"
     if slurm:
         cataloging_flags += " -p slurm"
 
