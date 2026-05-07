@@ -801,54 +801,95 @@ def cmd_process(args: argparse.Namespace) -> int:
     out.section("WMW PROCESS")
     client = _require_airtable(args, studies_table, samples_table)
 
-    out.info("Fetching studies with status 'ready' from Airtable…")
-    ready_studies = client.fetch_studies_by_status(studies_table, status="ready")
+    import shutil
+
+    out.info("Fetching studies with status 'ready', 'resume', or 'rerun' from Airtable…")
+    actionable_studies: list[dict] = []
+    for status_val in ("ready", "resume", "rerun"):
+        actionable_studies.extend(
+            client.fetch_studies_by_status(studies_table, status=status_val)
+        )
 
     if batch_filter:
-        ready_studies = [
-            s for s in ready_studies
+        actionable_studies = [
+            s for s in actionable_studies
             if s["fields"].get("code", "") == batch_filter
         ]
 
-    if not ready_studies:
-        label = f"code={batch_filter!r}" if batch_filter else "status='ready'"
+    if not actionable_studies:
+        label = f"code={batch_filter!r}" if batch_filter else "status 'ready'/'resume'/'rerun'"
         out.info(f"No studies with {label} found.")
         return 0
 
-    out.success(f"{_pl(len(ready_studies), 'study', 'studies')} to process.")
+    out.success(f"{_pl(len(actionable_studies), 'study', 'studies')} to process.")
 
     n_generated = 0
-    for study in ready_studies:
+    for study in actionable_studies:
         fields = study["fields"]
         code = fields.get("code", "")
         study_accession = fields.get("study_accession", "")
+        study_status = fields.get("status", "ready")
         if not code:
             out.warn(f"Study {study['id']} has no code — skipping.")
             continue
 
-        samples = client.fetch_samples_for_study(samples_table, study_accession, status="ready")
+        work_dir = output_dir / code
+
+        if study_status == "rerun":
+            if work_dir.exists():
+                shutil.rmtree(work_dir)
+                out.info(f"{code}: wiped local directory for rerun.")
+            samples = client.fetch_samples_for_study(samples_table, study_accession)
+        elif study_status == "resume":
+            # Fetch all non-discarded samples; discarded ones are filtered in build_input_tsv.
+            samples = client.fetch_samples_for_study(samples_table, study_accession)
+        else:
+            samples = client.fetch_samples_for_study(samples_table, study_accession, status="ready")
+
         if not samples:
-            out.warn(f"{code}: no ready samples — skipping.")
+            label = "ready samples" if study_status == "ready" else "samples"
+            out.warn(f"{code}: no {label} — skipping.")
             continue
 
-        out.info(f"{code}: {_pl(len(samples), 'sample')} ready.")
+        out.info(f"{code}: {_pl(len(samples), 'sample')} to process (status={study_status!r}).")
 
-        work_dir = output_dir / code
         work_dir.mkdir(parents=True, exist_ok=True)
 
-        tsv_path = work_dir / f"{code}.tsv"
-        drakkar.build_input_tsv(samples, tsv_path)
-        out.info(f"  Input TSV:     {tsv_path}")
+        # Resume shortcut: if the preprocessing output already exists, finalise
+        # (upload stats + update statuses) without relaunching Drakkar.
+        if study_status == "resume" and workflow == "preprocessing":
+            preprocessing_tsv = work_dir / "preprocessing.tsv"
+            if preprocessing_tsv.exists():
+                out.info(f"{code}: preprocessing.tsv found — finalising without relaunch.")
+                client.set_study_status(studies_table, [study["id"]], "preprocessed")
+                out.success(f"{code}: study status → 'preprocessed'.")
+                non_discarded = [r for r in samples if r.get("fields", r).get("status") != "discarded"]
+                client.set_sample_status(samples_table, [r["id"] for r in non_discarded], "preprocessed")
+                out.success(f"{code}: {_pl(len(non_discarded), 'sample')} status → 'preprocessed'.")
+                stats = drakkar.parse_preprocessing_tsv(preprocessing_tsv)
+                if stats:
+                    n = client.update_sample_preprocessing_stats(samples_table, stats)
+                    out.success(f"{code}: uploaded preprocessing stats for {_pl(n, 'sample')}.")
+                else:
+                    out.warn(f"{code}: preprocessing.tsv empty or unparseable — stats not uploaded.")
+                n_generated += 1
+                continue
+
+        input_tsv = work_dir / f"{code}.tsv"
+        drakkar.build_input_tsv(samples, input_tsv)
+        out.info(f"  Input TSV:     {input_tsv}")
 
         script_path = work_dir / f"{code}.sh"
         if workflow == "preprocessing":
             script = drakkar.generate_preprocessing_script(
                 code=code,
-                tsv_path=tsv_path,
+                tsv_path=input_tsv,
                 work_dir=work_dir,
                 conda_env=conda_env,
                 slurm=slurm,
                 wmw_conda_env=wmw_conda_env,
+                memory_multiplier=fields.get("memory_boost") or None,
+                time_multiplier=fields.get("time_boost") or None,
             )
         else:
             _die(f"Workflow {workflow!r} script generation is not yet implemented.")
@@ -858,7 +899,6 @@ def cmd_process(args: argparse.Namespace) -> int:
         script_path.chmod(0o755)
         out.info(f"  Launch script: {script_path}")
 
-        import shutil
         import subprocess as sp
         if shutil.which("screen") is None:
             out.warn(f"  'screen' not found — script written but not launched.")

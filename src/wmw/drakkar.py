@@ -97,6 +97,8 @@ def build_input_tsv(
     lines = ["\t".join(header_cols)]
     for rec in samples:
         fields = rec.get("fields", rec)
+        if fields.get("status") == "discarded":
+            continue
         row = [str(fields.get(fn, "") or "") for fn in field_names]
         lines.append("\t".join(row))
 
@@ -116,11 +118,17 @@ def generate_preprocessing_script(
     conda_env: str,
     slurm: bool = False,
     wmw_conda_env: str = "",
+    memory_multiplier: str | float | None = None,
+    time_multiplier: str | float | None = None,
 ) -> str:
     """Return a bash script that runs drakkar preprocessing for *code* and updates Airtable."""
     drakkar_flags = f"-f {tsv_path} -o {work_dir} --fraction --nonpareil"
     if slurm:
         drakkar_flags += " -p slurm"
+    if memory_multiplier not in (None, "", "1", 1, 1.0):
+        drakkar_flags += f" --memory-multiplier {memory_multiplier}"
+    if time_multiplier not in (None, "", "1", 1, 1.0):
+        drakkar_flags += f" --time-multiplier {time_multiplier}"
 
     if conda_env:
         c_flag = "-p" if str(conda_env).startswith(("/", "~", ".")) else "-n"

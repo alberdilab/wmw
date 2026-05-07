@@ -8,6 +8,16 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.3.7] - 2026-05-07
+
+### Added
+
+- `wmw process`: generated preprocessing scripts now pass `--memory-multiplier` and `--time-multiplier` to `drakkar preprocessing` when the study's `memory_boost` / `time_boost` Airtable fields are set to a value other than 1.
+
+### Fixed
+
+- `build_input_tsv`: samples with `status == "discarded"` are now skipped when writing the Drakkar input TSV, so discarded samples are never included in processing.
+- `wmw process`: now also picks up studies with status `"resume"` and `"rerun"` in addition to `"ready"`. `"rerun"` wipes the local output directory and reprocesses all non-discarded samples from scratch. `"resume"` fetches all non-discarded samples; if `preprocessing.tsv` already exists in the work directory it finalises the run (sets study + sample statuses to `"preprocessed"` and uploads stats) without relaunching Drakkar, otherwise it generates and launches the script as normal.
 ## [0.3.6] - 2026-05-07
 
 ### Fixed

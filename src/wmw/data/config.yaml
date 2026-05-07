@@ -34,6 +34,8 @@ STUDIES_COL_PUB_TITLE: "fldZ9MVHAX6crmOV5"
 STUDIES_COL_PUB_YEAR: "fldhkgGV6F4sFeJEq"
 STUDIES_COL_PUB_JOURNAL: "fldCZI74qN2kUUrIU"
 STUDIES_COL_PUB_AUTHORS: "fld32udFDIKAiW36P"
+STUDIES_COL_MEMORY_BOOST: "fldqwSWgnQAQi6rwf"
+STUDIES_COL_TIME_BOOST: "fldb82HDmruCRWnJo"
 
 # --- Samples table column IDs ---
 # Airtable field IDs (fldXXXXXXXXXXXXXX) for each column in the Samples table.
@@ -90,7 +92,7 @@ SAMPLES_COL_C: "fldP5nlgOC73EO3N0"
 SAMPLES_COL_LR: "fldlFRpLzktsmjso4"
 
 # --- Drakkar ---
-WMW_CONDA_ENV: "/projects/alberdilab/data/environments/conda/wdw" # Conda env name or path containing wmw; leave blank to use $PATH
+WMW_CONDA_ENV: "/projects/alberdilab/data/environments/conda/wmw" # Conda env name or path containing wmw; leave blank to use $PATH
 DRAKKAR_CONDA_ENV: "/projects/alberdilab/data/environments/conda/drakkar" # Conda env name or path containing drakkar; leave blank to use $PATH
 DRAKKAR_OUTPUT_DIR: "/projects/alberdilab/data/wmw"                       # Root output directory for drakkar runs
 
