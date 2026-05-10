@@ -31,7 +31,7 @@ Single argparse module; all command logic lives here as `cmd_*()` functions.
 
 - `cmd_scan` / `_scan_single_study` — ENA study-level discovery; writes to Studies only.
 - `cmd_fetch` / `_resolve_fetch_params` — run-level fetch for approved studies; writes to Samples.
-- `cmd_process`, `cmd_status`, `cmd_config`, `cmd_update` — downstream pipeline commands.
+- `cmd_process`, `cmd_stop`, `cmd_status`, `cmd_config`, `cmd_update` — downstream pipeline commands.
 
 ### `config.py`
 Loads `src/wmw/data/config.yaml` on demand (no caching). Provides `get()`, `require()`,

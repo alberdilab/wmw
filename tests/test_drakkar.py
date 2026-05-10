@@ -163,10 +163,13 @@ def test_generate_preprocessing_script_contains_key_elements(tmp_path):
     assert "wmw set-status --study PRJ001 --workflow preprocessing --status preprocessing" in script
     assert "wmw set-status --study PRJ001 --workflow preprocessing --status preprocessed" in script
     assert "wmw set-status --study PRJ001 --workflow preprocessing --status error" in script
+    assert "wmw set-status --study PRJ001 --workflow preprocessing --status stopped" in script
     assert "wmw set-status --study PRJ001 --workflow cataloging --status cataloging" in script
     assert "drakkar cataloging" in script
     assert "wmw set-status --study PRJ001 --workflow cataloging --status cataloged" in script
-    assert "trap _on_exit EXIT" in script
+    assert "wmw set-status --study PRJ001 --workflow cataloging --status stopped" in script
+    assert "trap _on_exit_preprocessing EXIT" in script
+    assert "trap _on_exit_cataloging EXIT" in script
 
 
 def test_generate_preprocessing_script_slurm_flag(tmp_path):
@@ -219,6 +222,7 @@ def test_generate_cataloging_script_contains_key_elements(tmp_path):
     assert "wmw set-status --study PRJ001 --workflow cataloging --status cataloging" in script
     assert "wmw set-status --study PRJ001 --workflow cataloging --status cataloged" in script
     assert "wmw set-status --study PRJ001 --workflow cataloging --status error" in script
+    assert "wmw set-status --study PRJ001 --workflow cataloging --status stopped" in script
     assert "trap _on_exit EXIT" in script
     assert "drakkar preprocessing" not in script
 

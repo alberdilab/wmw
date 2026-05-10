@@ -8,6 +8,16 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.3.12] - 2026-05-10
+
+### Added
+
+- `wmw stop --batch CODE` / `--study CODE`: sets the matching Study status to `stopped`, stops the matching detached `screen` session, and best-effort cancels matching Slurm jobs. Slurm matching now inspects the job COMMENT field for Drakkar wildcards such as `rule_fastp_wildcards_SA000022`.
+
+### Changed
+
+- Generated Drakkar launch scripts now recognise a `.wmw-stop` marker in the study output directory and report `stopped` instead of `error` from their exit traps when stopped externally.
+
 ## [0.3.11] - 2026-05-07
 
 ### Fixed

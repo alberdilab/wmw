@@ -13,7 +13,8 @@ wmw scan   → discover studies → Airtable Studies table
                ↓  (user reviews; sets status = "approved")
 wmw fetch  → fetch run data for approved studies → Airtable Samples table
                ↓
-wmw process → run Drakkar workflow on pending samples
+wmw process → generate and launch Drakkar workflow scripts for ready studies
+wmw stop    → stop an ongoing processing run
 ```
 
 ---
@@ -112,24 +113,40 @@ wmw fetch [--status VALUE]               # default: "approved"
 
 ## wmw process
 
-Pull pending samples from Airtable and run a Drakkar workflow.
+Pull ready studies from Airtable and launch a Drakkar workflow in detached `screen` sessions.
 
 ```
 wmw process [--batch BATCH]
-            [--workflow {complete,preprocessing,cataloging,profiling,
-                         dereplicating,annotating}]   # default: preprocessing
+            [--workflow {preprocessing,cataloging,profiling,annotating}]   # default: preprocessing
             [--slurm]
             [--output-dir DIR]   # or config DRAKKAR_OUTPUT_DIR
-            [--samples-table TABLE]
+            [--studies-table TABLE] [--samples-table TABLE]
             [--airtable-token TOKEN] [--base-id BASE_ID]
 ```
 
 **Execution order:**
-1. Fetch samples where `status = "pending"` (filtered by `--batch` if given)
-2. Write TSV manifest to `{output_dir}/{batch}/manifest.tsv`
-3. Set sample `status = "running"` in Airtable
-4. Invoke `drakkar <workflow> --manifest ... --output ...`
-5. Set `status = "completed"` or `"failed"` based on exit code
+1. Fetch studies where `status` is `"ready"`, `"resume"`, or `"rerun"` (filtered by `--batch` if given)
+2. Fetch the study's samples and write `{output_dir}/{code}/{code}.tsv` with samples whose status is `"use"`
+3. Write `{output_dir}/{code}/{code}.sh`
+4. Launch the script in a detached `screen` session named `{code}`
+5. Generated scripts update the Study status through `preprocessing`, `preprocessed`, `cataloging`, `cataloged`, `error`, or `stopped`
+
+## wmw stop
+
+Stop an ongoing `wmw process` run for one study code.
+
+```
+wmw stop --batch CODE                 # --study CODE is an alias
+         [--output-dir DIR]           # or config DRAKKAR_OUTPUT_DIR
+         [--studies-table TABLE] [--samples-table TABLE]
+         [--airtable-token TOKEN] [--base-id BASE_ID]
+```
+
+**Execution order:**
+1. Look up the Study by its `code` field and set Study `status = "stopped"`
+2. Write `{output_dir}/{code}/.wmw-stop` so generated script traps report `stopped`
+3. Stop the detached `screen` session named `{code}`
+4. Best-effort cancel matching Slurm jobs. Matches include the study output path and Drakkar COMMENT values like `rule_fastp_wildcards_SA000022`, where `SA000022` is a sample `code` in that study.
 
 ---
 

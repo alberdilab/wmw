@@ -933,6 +933,229 @@ def cmd_process(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# wmw stop
+# ---------------------------------------------------------------------------
+
+def _screen_session_name(session: str) -> str:
+    """Return the user-provided screen name from a `screen -ls` session token."""
+    prefix, sep, suffix = session.partition(".")
+    if sep and prefix.isdigit():
+        return suffix
+    return session
+
+
+def _screen_sessions_for_code(screen_ls_output: str, code: str) -> list[str]:
+    sessions: list[str] = []
+    for line in screen_ls_output.splitlines():
+        parts = line.strip().split()
+        if not parts:
+            continue
+        token = parts[0]
+        if _screen_session_name(token) == code:
+            sessions.append(token)
+    return sessions
+
+
+def _stop_screen_sessions(code: str) -> tuple[int, str]:
+    import shutil
+    import subprocess as sp
+
+    if shutil.which("screen") is None:
+        return 0, "'screen' not found on PATH."
+
+    listed = sp.run(
+        ["screen", "-ls"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    sessions = _screen_sessions_for_code(
+        (listed.stdout or "") + "\n" + (listed.stderr or ""),
+        code,
+    )
+    if not sessions:
+        return 0, f"No screen session named {code!r} found."
+
+    stopped = 0
+    errors: list[str] = []
+    for session in sessions:
+        res = sp.run(
+            ["screen", "-S", session, "-X", "quit"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if res.returncode == 0:
+            stopped += 1
+        else:
+            detail = (res.stderr or res.stdout or "").strip()
+            errors.append(f"{session}: {detail or 'screen quit failed'}")
+
+    return stopped, "; ".join(errors)
+
+
+def _parse_squeue_jobs(stdout: str) -> list[dict[str, str]]:
+    jobs: list[dict[str, str]] = []
+    for line in stdout.splitlines():
+        if not line.strip():
+            continue
+        parts = line.rstrip("\n").split("|", 4)
+        if len(parts) < 2:
+            continue
+        jobs.append(
+            {
+                "id": parts[0].strip(),
+                "name": parts[1].strip(),
+                "workdir": parts[2].strip() if len(parts) > 2 else "",
+                "command": parts[3].strip() if len(parts) > 3 else "",
+                "comment": parts[4].strip() if len(parts) > 4 else "",
+            }
+        )
+    return jobs
+
+
+def _slurm_job_matches(
+    code: str,
+    work_dir: Path | None,
+    sample_codes: set[str],
+    job: dict[str, str],
+) -> bool:
+    name = job.get("name", "")
+    if name == code or name.startswith((f"{code}.", f"{code}_", f"{code}-")):
+        return True
+
+    comment = job.get("comment", "")
+    if comment:
+        for sample_code in sample_codes:
+            if f"_wildcards_{sample_code}" in comment:
+                return True
+
+    markers: list[str] = []
+    if work_dir is not None:
+        markers.append(str(work_dir))
+    markers.extend([f"/{code}/", f"/{code}.tsv", f"/{code}.sh"])
+
+    haystacks = [job.get("workdir", ""), job.get("command", "")]
+    return any(marker and marker in haystack for marker in markers for haystack in haystacks)
+
+
+def _query_slurm_jobs() -> tuple[list[dict[str, str]], str]:
+    import getpass
+    import shutil
+    import subprocess as sp
+
+    if shutil.which("squeue") is None:
+        return [], "'squeue' not found on PATH."
+
+    formats = ["%i|%j|%Z|%o|%k", "%i|%j|%Z|%o", "%i|%j"]
+    last_error = ""
+    for fmt in formats:
+        res = sp.run(
+            ["squeue", "--noheader", "--user", getpass.getuser(), f"--format={fmt}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if res.returncode == 0:
+            return _parse_squeue_jobs(res.stdout or ""), ""
+        last_error = (res.stderr or res.stdout or "").strip()
+    return [], last_error or "Could not query Slurm jobs with squeue."
+
+
+def _cancel_slurm_jobs(
+    code: str,
+    work_dir: Path | None,
+    sample_codes: set[str],
+) -> tuple[list[str], str]:
+    import shutil
+    import subprocess as sp
+
+    if shutil.which("scancel") is None:
+        return [], "'scancel' not found on PATH."
+
+    jobs, warning = _query_slurm_jobs()
+    if warning:
+        return [], warning
+
+    job_ids = [
+        job["id"]
+        for job in jobs
+        if job.get("id") and _slurm_job_matches(code, work_dir, sample_codes, job)
+    ]
+    if not job_ids:
+        return [], ""
+
+    res = sp.run(
+        ["scancel", *job_ids],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if res.returncode != 0:
+        detail = (res.stderr or res.stdout or "").strip()
+        return [], detail or "scancel failed."
+    return job_ids, ""
+
+
+def _write_stop_marker(work_dir: Path | None) -> None:
+    if work_dir is None or not work_dir.exists():
+        return
+    marker = work_dir / ".wmw-stop"
+    marker.write_text("stopped\n", encoding="utf-8")
+
+
+def cmd_stop(args: argparse.Namespace) -> int:
+    studies_table = _conf(args, "studies_table", "STUDIES_TABLE") or "Studies"
+    samples_table = _conf(args, "samples_table", "SAMPLES_TABLE") or "Samples"
+    output_dir_str = _conf(args, "output_dir", "DRAKKAR_OUTPUT_DIR")
+    output_dir = Path(output_dir_str).expanduser().resolve() if output_dir_str else None
+    study_code = (args.batch or "").strip()
+    if not study_code:
+        _die("--batch is required.")
+
+    work_dir = output_dir / study_code if output_dir is not None else None
+
+    out.section("WMW STOP")
+    client = _require_airtable(args, studies_table, samples_table)
+
+    study_record = client.fetch_study_by_code(studies_table, study_code)
+    if not study_record:
+        _die(f"No study with code {study_code!r} found in Airtable.")
+    assert study_record is not None
+    study_fields = study_record.get("fields", {})
+    study_accession = study_fields.get("study_accession", "")
+    samples = client.fetch_samples_for_study(samples_table, study_accession) if study_accession else []
+    sample_codes = {
+        str(rec.get("fields", rec).get("code", "") or "").strip()
+        for rec in samples
+        if str(rec.get("fields", rec).get("code", "") or "").strip()
+    }
+
+    _write_stop_marker(work_dir)
+    client.set_study_status(studies_table, [study_record["id"]], "stopped")
+    out.success(f"Study {study_code} status → 'stopped'.")
+
+    stopped_screens, screen_warning = _stop_screen_sessions(study_code)
+    if stopped_screens:
+        out.success(f"Stopped {_pl(stopped_screens, 'screen session')}.")
+    if screen_warning:
+        out.warn(screen_warning)
+
+    cancelled_jobs, slurm_warning = _cancel_slurm_jobs(study_code, work_dir, sample_codes)
+    if cancelled_jobs:
+        out.success(f"Cancelled Slurm {_pl(len(cancelled_jobs), 'job')}: {', '.join(cancelled_jobs)}.")
+    elif slurm_warning:
+        out.warn(slurm_warning)
+    else:
+        out.info("No matching Slurm jobs found.")
+
+    # A running generated script may execute its EXIT trap while screen is being torn down.
+    # Re-assert the requested terminal state after local and Slurm cancellation attempts.
+    client.set_study_status(studies_table, [study_record["id"]], "stopped")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # wmw set-status
 # ---------------------------------------------------------------------------
 
@@ -941,9 +1164,11 @@ _PROCESS_STATUS_MAP: dict[tuple[str, str], str] = {
     ("preprocessing", "running"):       "preprocessing",  # legacy compat
     ("preprocessing", "completed"):     "preprocessed",   # legacy compat
     ("preprocessing", "preprocessed"):  "preprocessed",
+    ("preprocessing", "stopped"):       "stopped",
     ("preprocessing", "error"):         "error",
     ("cataloging",    "cataloging"):    "cataloging",
     ("cataloging",    "cataloged"):     "cataloged",
+    ("cataloging",    "stopped"):       "stopped",
     ("cataloging",    "error"):         "error",
 }
 
@@ -1079,6 +1304,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "Other examples:\n"
             "  wmw scan --study PRJEB12345\n"
             "  wmw fetch --study PRJEB12345\n"
+            "  wmw stop --batch BATCH_01\n"
             "  wmw status --batch BATCH_01\n"
             "  wmw config --edit\n"
         ),
@@ -1375,12 +1601,55 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_process.set_defaults(func=cmd_process)
 
+    # ---- stop ----
+    p_stop = sub.add_parser(
+        "stop",
+        help="Stop an ongoing wmw processing run.",
+        description=(
+            "Set the study status to 'stopped', stop the matching screen session, "
+            "and best-effort cancel matching Slurm jobs launched by Drakkar."
+        ),
+    )
+    _add_airtable_flags(p_stop)
+    stop_target = p_stop.add_mutually_exclusive_group(required=True)
+    stop_target.add_argument(
+        "--batch",
+        dest="batch",
+        metavar="CODE",
+        help="Study code / screen session name to stop.",
+    )
+    stop_target.add_argument(
+        "--study",
+        dest="batch",
+        metavar="CODE",
+        help="Alias for --batch.",
+    )
+    p_stop.add_argument(
+        "--output-dir",
+        metavar="DIR",
+        default="",
+        help="Override DRAKKAR_OUTPUT_DIR from config.",
+    )
+    p_stop.add_argument(
+        "--studies-table",
+        metavar="TABLE",
+        default="",
+        help="Override Studies table name from config.",
+    )
+    p_stop.add_argument(
+        "--samples-table",
+        metavar="TABLE",
+        default="",
+        help="Override Samples table name from config.",
+    )
+    p_stop.set_defaults(func=cmd_stop)
+
     # ---- set-status ----
     p_setstatus = sub.add_parser(
         "set-status",
-        help="Update study and sample statuses in Airtable (called by generated scripts).",
+        help="Update study status in Airtable (called by generated scripts).",
         description=(
-            "Update the status of a study (and all its samples) in Airtable. "
+            "Update the status of a study in Airtable. "
             "Intended for use inside wmw-generated launch scripts."
         ),
     )
@@ -1402,7 +1671,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--status",
         metavar="STATUS",
         required=True,
-        choices=["preprocessing", "running", "completed", "preprocessed", "cataloging", "cataloged", "error"],
+        choices=[
+            "preprocessing",
+            "running",
+            "completed",
+            "preprocessed",
+            "cataloging",
+            "cataloged",
+            "stopped",
+            "error",
+        ],
         help="New status to set.",
     )
     p_setstatus.add_argument(

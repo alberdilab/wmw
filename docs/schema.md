@@ -16,7 +16,7 @@ linked to Studies by `study_accession`).
 | `tax_id` | text | ENA + SRA | NCBI taxon ID of the metagenome |
 | `first_public` | text | ENA + SRA | ISO date |
 | `center_name` | text | ENA + SRA | Submitting institution |
-| `status` | text | derived | Default `"new"` |
+| `status` | text | derived | Default `"new"`; processing states include `ready`, `preprocessing`, `preprocessed`, `cataloging`, `cataloged`, `error`, and `stopped` |
 | `pubmed_id` | text | ENA | From ENA study record; used to seed PubMed lookup |
 | `pub_doi` | text | PubMed / CrossRef | |
 | `pub_url` | text | resolved | `https://doi.org/{doi}` or PubMed URL |
@@ -56,13 +56,13 @@ linked to Studies by `study_accession`).
 | `country` | text | ENA only | Standardised country name |
 | `center_name` | text | ENA + SRA | Submitting institution |
 | `source` | text | derived | `"ENA"` or `"SRA"` |
-| `status` | text | derived | Default `"pending"`; updated by `wmw process` |
+| `status` | text | derived | Default `"pending"`; user-controlled processing inclusion uses `use`, `pending`, or `ignore` |
 
 ## Status lifecycle
 
-**Studies:** `new` → (manual review) → any custom value
+**Studies:** `new` → (manual review) → `approved` → `indexed` → `ready` → `preprocessing` → `preprocessed` → `cataloging` → `cataloged`. Failed or externally cancelled runs use `error` or `stopped`.
 
-**Samples:** `pending` → `running` (set when `wmw process` starts) → `completed` or `failed`
+**Samples:** `use` rows are included in Drakkar input TSVs. `pending` and `ignore` rows are excluded.
 
 ## Notes on SRA gaps
 

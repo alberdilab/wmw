@@ -158,6 +158,8 @@ def generate_preprocessing_script(
     else:
         cataloging_cmd = f"drakkar cataloging {cataloging_flags}"
 
+    stop_file = shlex.quote(str(work_dir / ".wmw-stop"))
+
     lines = [
         "#!/usr/bin/env bash",
         f"# wmw-generated script — batch {code} (preprocessing → cataloging)",
@@ -171,22 +173,40 @@ def generate_preprocessing_script(
         "echo \"=== $(date '+%Y-%m-%d %H:%M:%S') ===\" >&2",
         "",
         *conda_lines,
+        f"_WMW_STOP_FILE={stop_file}",
+        'rm -f "$_WMW_STOP_FILE"',
         "_WMW_SUCCESS=0",
-        "_on_exit() {",
+        "_on_exit_preprocessing() {",
         '    if [ "$_WMW_SUCCESS" -ne 1 ]; then',
-        f"        {wmw_cmd} set-status --study {code} --workflow preprocessing --status error",
+        '        if [ -f "$_WMW_STOP_FILE" ]; then',
+        f"            {wmw_cmd} set-status --study {code} --workflow preprocessing --status stopped",
+        "        else",
+        f"            {wmw_cmd} set-status --study {code} --workflow preprocessing --status error",
+        "        fi",
         "    fi",
         "}",
-        "trap _on_exit EXIT",
+        "trap _on_exit_preprocessing EXIT",
         "",
         f"{wmw_cmd} set-status --study {code} --workflow preprocessing --status preprocessing",
         drakkar_cmd,
         f"{wmw_cmd} set-status --study {code} --workflow preprocessing --status preprocessed",
         "_WMW_SUCCESS=1",
         "",
+        "_WMW_SUCCESS=0",
+        "_on_exit_cataloging() {",
+        '    if [ "$_WMW_SUCCESS" -ne 1 ]; then',
+        '        if [ -f "$_WMW_STOP_FILE" ]; then',
+        f"            {wmw_cmd} set-status --study {code} --workflow cataloging --status stopped",
+        "        else",
+        f"            {wmw_cmd} set-status --study {code} --workflow cataloging --status error",
+        "        fi",
+        "    fi",
+        "}",
+        "trap _on_exit_cataloging EXIT",
         f"{wmw_cmd} set-status --study {code} --workflow cataloging --status cataloging",
         cataloging_cmd,
         f"{wmw_cmd} set-status --study {code} --workflow cataloging --status cataloged",
+        "_WMW_SUCCESS=1",
         "",
     ]
     return "\n".join(lines)
@@ -225,6 +245,8 @@ def generate_cataloging_script(
     else:
         wmw_cmd = "wmw"
 
+    stop_file = shlex.quote(str(work_dir / ".wmw-stop"))
+
     lines = [
         "#!/usr/bin/env bash",
         f"# wmw-generated script — batch {code} (cataloging only)",
@@ -238,10 +260,16 @@ def generate_cataloging_script(
         "echo \"=== $(date '+%Y-%m-%d %H:%M:%S') ===\" >&2",
         "",
         *conda_lines,
+        f"_WMW_STOP_FILE={stop_file}",
+        'rm -f "$_WMW_STOP_FILE"',
         "_WMW_SUCCESS=0",
         "_on_exit() {",
         '    if [ "$_WMW_SUCCESS" -ne 1 ]; then',
-        f"        {wmw_cmd} set-status --study {code} --workflow cataloging --status error",
+        '        if [ -f "$_WMW_STOP_FILE" ]; then',
+        f"            {wmw_cmd} set-status --study {code} --workflow cataloging --status stopped",
+        "        else",
+        f"            {wmw_cmd} set-status --study {code} --workflow cataloging --status error",
+        "        fi",
         "    fi",
         "}",
         "trap _on_exit EXIT",
