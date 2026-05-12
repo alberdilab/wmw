@@ -301,6 +301,82 @@ def generate_profiling_script(
     return "\n".join(lines)
 
 
+def generate_annotation_script(
+    code: str,
+    work_dir: Path,
+    conda_env: str,
+    slurm: bool = False,
+    wmw_conda_env: str = "",
+) -> str:
+    """Return a bash script that runs drakkar profiling (annotation mode) for *code* and updates Airtable."""
+    bin_paths = shlex.quote(str(work_dir / "cataloging" / "final" / "all_bin_paths.txt"))
+    bin_metadata = shlex.quote(str(work_dir / "cataloging" / "final" / "all_bin_metadata.csv"))
+    out_dir = shlex.quote(str(work_dir))
+
+    annotation_flags = f"-B {bin_paths} -q {bin_metadata} -o {out_dir}"
+    if slurm:
+        annotation_flags += " -p slurm"
+
+    if conda_env:
+        c_flag = "-p" if str(conda_env).startswith(("/", "~", ".")) else "-n"
+        annotation_cmd = f"conda run {c_flag} {conda_env} drakkar profiling {annotation_flags}"
+        conda_lines = [
+            'if [ -f "$(conda info --base 2>/dev/null)/etc/profile.d/conda.sh" ]; then',
+            '    source "$(conda info --base)/etc/profile.d/conda.sh"',
+            f"    conda activate {conda_env}",
+            "fi",
+            "",
+        ]
+    else:
+        annotation_cmd = f"drakkar profiling {annotation_flags}"
+        conda_lines = []
+
+    if wmw_conda_env:
+        w_flag = "-p" if str(wmw_conda_env).startswith(("/", "~", ".")) else "-n"
+        wmw_cmd = f"conda run {w_flag} {wmw_conda_env} wmw"
+    else:
+        wmw_cmd = "wmw"
+
+    stop_file = shlex.quote(str(work_dir / ".wmw-stop"))
+    output_dir_arg = f" --output-dir {shlex.quote(str(work_dir.parent))}"
+
+    lines = [
+        "#!/usr/bin/env bash",
+        f"# wmw-generated script — batch {code} (annotation only)",
+        "# Do not edit manually; re-run wmw process to regenerate.",
+        "# AIRTABLE_TOKEN must be exported in the environment before launching.",
+        "",
+        "set -euo pipefail",
+        f"exec >> {work_dir}/{code}.out 2>> {work_dir}/{code}.err",
+        'echo ""',
+        "echo \"=== $(date '+%Y-%m-%d %H:%M:%S') ===\"",
+        "echo \"=== $(date '+%Y-%m-%d %H:%M:%S') ===\" >&2",
+        "",
+        *conda_lines,
+        f"_WMW_STOP_FILE={stop_file}",
+        'rm -f "$_WMW_STOP_FILE"',
+        "_WMW_SUCCESS=0",
+        "_on_exit() {",
+        '    if [ "$_WMW_SUCCESS" -ne 1 ]; then',
+        '        if [ -f "$_WMW_STOP_FILE" ]; then',
+        f"            {wmw_cmd} set-status --study {code} --workflow annotating --status stopped{output_dir_arg}",
+        "        else",
+        f"            {wmw_cmd} set-status --study {code} --workflow annotating --status error{output_dir_arg}",
+        "        fi",
+        "    fi",
+        "}",
+        "trap _on_exit EXIT",
+        "",
+        f"cd {shlex.quote(str(work_dir))}",
+        f"{wmw_cmd} set-status --study {code} --workflow annotating --status annotating{output_dir_arg}",
+        annotation_cmd,
+        f"{wmw_cmd} set-status --study {code} --workflow annotating --status completed{output_dir_arg}",
+        "_WMW_SUCCESS=1",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def generate_cataloging_script(
     code: str,
     tsv_path: Path,
@@ -448,6 +524,11 @@ _PREPROCESSING_TSV_COLS: list[tuple[str, str, str]] = [
 ]
 
 
+_PROFILING_TSV_COLS: list[tuple[str, str, str]] = [
+    # (tsv_column,           config_key,                    type)
+    ("mapping_percentage",   "SAMPLES_COL_MAGS_MAPPING_RATE", "float2"),
+]
+
 _CATALOGING_TSV_COLS: list[tuple[str, tuple[str, ...], str]] = [
     # (tsv_column,              config_key(s),                              type)
     ("assembly_contigs",        ("SAMPLES_COL_ASSEMBLY_CONTIGS",),          "int"),
@@ -511,6 +592,43 @@ def parse_preprocessing_tsv(tsv_path: Path) -> dict[str, dict[str, Any]]:
 
     col_map: list[tuple[str, str, str]] = []
     for tsv_col, config_key, typ in _PREPROCESSING_TSV_COLS:
+        fid = str(cfg.get(config_key) or "").strip()
+        if fid:
+            col_map.append((tsv_col, fid, typ))
+
+    result: dict[str, dict[str, Any]] = {}
+    with tsv_path.open(encoding="utf-8") as fh:
+        header = fh.readline().rstrip("\n").split("\t")
+        for line in fh:
+            row = line.rstrip("\n").split("\t")
+            if not row or not row[0]:
+                continue
+            row_dict = dict(zip(header, row))
+            sample_id = row_dict.get("sample", "").strip()
+            if not sample_id:
+                continue
+            fields: dict[str, Any] = {}
+            for tsv_col, fid, typ in col_map:
+                raw = row_dict.get(tsv_col, "").strip()
+                value = _coerce_stat(raw, typ)
+                if value is None:
+                    continue
+                fields[fid] = value
+            if fields:
+                result[sample_id] = fields
+    return result
+
+
+def parse_profiling_tsv(tsv_path: Path) -> dict[str, dict[str, Any]]:
+    """Parse drakkar's profiling_genomes.tsv; return {sample_code: {field_id: value}}.
+
+    Field IDs come from config. Returns empty dict if the file is absent.
+    """
+    if not tsv_path.exists():
+        return {}
+
+    col_map: list[tuple[str, str, str]] = []
+    for tsv_col, config_key, typ in _PROFILING_TSV_COLS:
         fid = str(cfg.get(config_key) or "").strip()
         if fid:
             col_map.append((tsv_col, fid, typ))

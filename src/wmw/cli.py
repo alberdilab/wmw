@@ -909,12 +909,38 @@ def cmd_process(args: argparse.Namespace) -> int:
                     prefix=code,
                     screen_args=args,
                 ) or finalized_this_study
+
+            has_profiling = (work_dir / "profiling_genomes.tsv").exists()
+            has_annotation = (work_dir / "annotating" / "gene_annotations.tsv.xz").exists()
+
+            if has_profiling:
+                finalized_this_study = _finalize_profiling_outputs(
+                    client,
+                    studies_table,
+                    samples_table,
+                    study,
+                    output_dir,
+                    prefix=code,
+                ) or finalized_this_study
+
             if finalized_this_study:
                 n_finalized += 1
 
-            has_profiling = (work_dir / "profiling_genomes.tsv").exists()
+            if has_cataloging and has_profiling and has_annotation:
+                continue
 
-            if has_cataloging and has_profiling:
+            if has_cataloging and has_profiling and not has_annotation:
+                out.info(f"{code}: profiling done, annotation output absent — launching annotation task.")
+                script_path = work_dir / f"{code}.sh"
+                script = drakkar.generate_annotation_script(
+                    code=code,
+                    work_dir=work_dir,
+                    conda_env=conda_env,
+                    slurm=slurm,
+                    wmw_conda_env=wmw_conda_env,
+                )
+                _write_and_maybe_launch_script(code, script_path, script)
+                n_generated += 1
                 continue
 
             if has_cataloging and not has_profiling:
@@ -1003,6 +1029,14 @@ def cmd_process(args: argparse.Namespace) -> int:
             )
         elif workflow == "profiling":
             script = drakkar.generate_profiling_script(
+                code=code,
+                work_dir=work_dir,
+                conda_env=conda_env,
+                slurm=slurm,
+                wmw_conda_env=wmw_conda_env,
+            )
+        elif workflow == "annotating":
+            script = drakkar.generate_annotation_script(
                 code=code,
                 work_dir=work_dir,
                 conda_env=conda_env,
@@ -1275,6 +1309,10 @@ _PROCESS_STATUS_MAP: dict[tuple[str, str], str] = {
     ("profiling",     "quantified"):    "quantified",
     ("profiling",     "stopped"):       "stopped",
     ("profiling",     "error"):         "error",
+    ("annotating",   "annotating"):    "annotating",
+    ("annotating",   "completed"):     "completed",
+    ("annotating",   "stopped"):       "stopped",
+    ("annotating",   "error"):         "error",
 }
 
 
@@ -1742,6 +1780,77 @@ def _populate_genome_records_from_outputs(
     return True
 
 
+def _finalize_profiling_outputs(
+    client: Any,
+    studies_table: str,
+    samples_table: str,
+    study_record: dict[str, Any],
+    output_root: Path,
+    *,
+    prefix: str = "",
+) -> bool:
+    """Upload profiling outputs and sample MAG mapping rates when present."""
+    from wmw import drakkar
+
+    fields = study_record.get("fields", {}) or {}
+    study_code = str(fields.get("code", "") or "").strip()
+    work_dir = output_root / study_code
+    tsv_path = work_dir / "profiling_genomes.tsv"
+    bases_path = work_dir / "profiling_genomes" / "final" / "bases.tsv"
+    counts_path = work_dir / "profiling_genomes" / "final" / "counts.tsv"
+    label = f"{prefix}: " if prefix else ""
+
+    if not tsv_path.exists():
+        out.warn(
+            f"{label}profiling_genomes.tsv not found at {tsv_path} — "
+            f"file and stats not uploaded."
+        )
+        return False
+
+    _upload_study_tsv_attachment(
+        client,
+        studies_table,
+        study_record["id"],
+        "file_quantifying",
+        tsv_path,
+        prefix=prefix,
+        study_fields=fields,
+    )
+
+    stats = drakkar.parse_profiling_tsv(tsv_path)
+    if not stats:
+        out.warn(f"{label}profiling_genomes.tsv could not be parsed — mapping rates not uploaded.")
+    else:
+        n = client.update_sample_profiling_stats(samples_table, stats)
+        if n:
+            out.success(f"{label}uploaded profiling mapping rates for {_pl(n, 'sample')}.")
+        else:
+            out.warn(
+                f"{label}profiling_genomes.tsv parsed ({len(stats)} sample(s)) but no matching "
+                f"Airtable records found — mapping rates not uploaded. "
+                f"Check that the sample 'code' field values match the TSV."
+            )
+
+    for path, field_name in [
+        (bases_path, "file_bases"),
+        (counts_path, "file_counts"),
+    ]:
+        if not path.exists():
+            out.warn(f"{label}{path.name} not found at {path} — file not uploaded.")
+        else:
+            _upload_study_tsv_attachment(
+                client,
+                studies_table,
+                study_record["id"],
+                field_name,
+                path,
+                prefix=prefix,
+                study_fields=fields,
+            )
+
+    return True
+
+
 def _finalize_cataloging_outputs(
     client: Any,
     studies_table: str,
@@ -1859,6 +1968,17 @@ def cmd_set_status(args: argparse.Namespace) -> int:
                 study_record,
                 Path(output_dir_str).expanduser().resolve(),
                 screen_args=args,
+            )
+
+    if workflow == "profiling" and status == "quantified":
+        output_dir_str = _conf(args, "output_dir", "DRAKKAR_OUTPUT_DIR")
+        if output_dir_str:
+            _finalize_profiling_outputs(
+                client,
+                studies_table,
+                samples_table,
+                study_record,
+                Path(output_dir_str).expanduser().resolve(),
             )
 
     return 0
@@ -2358,6 +2478,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "cataloged",
             "quantifying",
             "quantified",
+            "annotating",
+            "annotated",
             "stopped",
             "error",
         ],

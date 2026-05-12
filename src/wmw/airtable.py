@@ -324,6 +324,14 @@ class AirtableClient:
         """Write cataloging assembly stats to sample records, keyed by sample code."""
         return self._update_sample_stats_by_code(samples_table, stats_by_assembly)
 
+    def update_sample_profiling_stats(
+        self,
+        samples_table: str,
+        stats_by_sample: dict[str, dict[str, Any]],
+    ) -> int:
+        """Write profiling stats to sample records, keyed by sample code."""
+        return self._update_sample_stats_by_code(samples_table, stats_by_sample)
+
     def fetch_sample_record_ids_by_code(
         self,
         samples_table: str,

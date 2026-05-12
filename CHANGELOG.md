@@ -8,6 +8,27 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.4.5] - 2026-05-12
+
+### Added
+
+- New `annotating` workflow: `wmw process --workflow annotating` generates a script that runs
+  `drakkar profiling -B <bin_paths> -q <bin_metadata> -o <work_dir>` (genome annotation mode,
+  without reads mapping). Study status transitions: `annotating` while running → `completed`
+  on success.
+- `annotating` and `completed` are now valid `--status` values for `wmw set-status`.
+- `wmw process` resume path now finalizes profiling outputs (uploads `profiling_genomes.tsv`
+  and sample mapping rates) when `profiling_genomes.tsv` is present.
+- `wmw process` resume path now detects when profiling is complete but annotation is absent
+  (`annotating/gene_annotations.tsv.xz` missing) and automatically launches the annotation
+  script.
+
+- After the profiling workflow completes (`wmw set-status --workflow profiling --status quantified`),
+  wmw now parses `profiling_genomes.tsv` and writes each sample's `mapping_percentage` to
+  `SAMPLES_COL_MAGS_MAPPING_RATE` in Airtable.
+- `profiling_genomes.tsv` is uploaded to the study's `STUDIES_COL_FILE_QUANTIFYING` attachment field.
+- `profiling_genomes/final/bases.tsv` and `profiling_genomes/final/counts.tsv` are uploaded to
+  `STUDIES_COL_FILE_BASES` and `STUDIES_COL_FILE_COUNTS` respectively.
 ## [0.4.4] - 2026-05-12
 
 ### Fixed

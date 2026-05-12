@@ -425,6 +425,9 @@ def test_cmd_process_resume_finalizes_airtable_without_launching_drakkar(tmp_pat
         "genome\tcoverage\nSA000022_bin_339957\t10.5\n",
         encoding="utf-8",
     )
+    annotation_dir = work_dir / "annotating"
+    annotation_dir.mkdir()
+    (annotation_dir / "gene_annotations.tsv.xz").write_bytes(b"")
 
     args = argparse.Namespace(
         batch="",
@@ -481,7 +484,7 @@ def test_cmd_process_resume_finalizes_airtable_without_launching_drakkar(tmp_pat
             call("Studies", ["recStudy"], "cataloged"),
         ]
     )
-    assert client.upload_study_file.call_count == 2
+    assert client.upload_study_file.call_count == 3
     client.update_sample_preprocessing_stats.assert_called_once()
     client.update_sample_cataloging_stats.assert_called_once()
     client.create_genome_records_with_response.assert_called_once()
