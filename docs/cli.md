@@ -132,6 +132,11 @@ wmw process [--batch BATCH]
 5. Write `{output_dir}/{code}/{code}.sh`
 6. Launch the script in a detached `screen` session named `{code}`
 7. Generated scripts update the Study status through `preprocessing`, `preprocessed`, `cataloging`, `cataloged`, `error`, or `stopped`
+8. Genome FASTA attachment uploads are detached into a `{code}-genome-upload`
+   `screen` session when finalization is run outside an existing `screen`; if
+   `screen` is unavailable, upload falls back to the current process
+9. Genomes are only created/updated and uploaded when completeness is above 50
+   and contamination is below 10
 
 ## wmw stop
 
@@ -147,8 +152,25 @@ wmw stop --batch CODE                 # --study CODE is an alias
 **Execution order:**
 1. Look up the Study by its `code` field and set Study `status = "stopped"`
 2. Write `{output_dir}/{code}/.wmw-stop` so generated script traps report `stopped`
-3. Stop the detached `screen` session named `{code}`
+3. Stop the detached `screen` session named `{code}` and any
+   `{code}-genome-upload` attachment-upload session
 4. Best-effort cancel matching Slurm jobs. Matches include the study output path and Drakkar COMMENT values like `rule_fastp_wildcards_SA000022`, where `SA000022` is a sample `code` in that study.
+
+---
+
+## wmw upload-genome-files
+
+Upload generated genome FASTA attachments for one study. This is normally
+launched automatically in a detached `{code}-genome-upload` `screen` session
+when cataloging finalization finds FASTA files to attach. Genomes below the
+quality thresholds (`completeness <= 50` or `contamination >= 10`) are skipped.
+
+```
+wmw upload-genome-files --study CODE
+                        [--output-dir DIR]
+                        [--samples-table TABLE] [--genomes-table TABLE]
+                        [--airtable-token TOKEN] [--base-id BASE_ID]
+```
 
 ---
 

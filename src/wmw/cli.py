@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import calendar
 import os
+import shlex
 import sys
 from collections.abc import Sequence
 from datetime import date
@@ -32,6 +33,10 @@ except ImportError:
 from wmw import __version__
 from wmw import config as cfg
 from wmw import output as out
+
+_GENOME_UPLOAD_SCREEN_SUFFIX = "-genome-upload"
+_GENOME_MIN_COMPLETENESS = 50.0
+_GENOME_MAX_CONTAMINATION = 10.0
 
 
 class _WmwParser(argparse.ArgumentParser):
@@ -902,11 +907,28 @@ def cmd_process(args: argparse.Namespace) -> int:
                     set_status=True,
                     skip_existing_attachments=True,
                     prefix=code,
+                    screen_args=args,
                 ) or finalized_this_study
             if finalized_this_study:
                 n_finalized += 1
 
-            if has_cataloging:
+            has_profiling = (work_dir / "profiling_genomes.tsv").exists()
+
+            if has_cataloging and has_profiling:
+                continue
+
+            if has_cataloging and not has_profiling:
+                out.info(f"{code}: cataloging done, profiling output absent — launching profiling task.")
+                script_path = work_dir / f"{code}.sh"
+                script = drakkar.generate_profiling_script(
+                    code=code,
+                    work_dir=work_dir,
+                    conda_env=conda_env,
+                    slurm=slurm,
+                    wmw_conda_env=wmw_conda_env,
+                )
+                _write_and_maybe_launch_script(code, script_path, script)
+                n_generated += 1
                 continue
 
             samples = client.fetch_samples_for_study(samples_table, study_accession)
@@ -979,6 +1001,14 @@ def cmd_process(args: argparse.Namespace) -> int:
                 memory_multiplier=fields.get("memory_boost") or None,
                 time_multiplier=fields.get("time_boost") or None,
             )
+        elif workflow == "profiling":
+            script = drakkar.generate_profiling_script(
+                code=code,
+                work_dir=work_dir,
+                conda_env=conda_env,
+                slurm=slurm,
+                wmw_conda_env=wmw_conda_env,
+            )
         else:
             _die(f"Workflow {workflow!r} script generation is not yet implemented.")
             return 1
@@ -1007,6 +1037,14 @@ def _screen_session_name(session: str) -> str:
     return session
 
 
+def _genome_upload_screen_name(code: str) -> str:
+    return f"{code}{_GENOME_UPLOAD_SCREEN_SUFFIX}"
+
+
+def _screen_session_matches_code(session_name: str, code: str) -> bool:
+    return session_name in {code, _genome_upload_screen_name(code)}
+
+
 def _screen_sessions_for_code(screen_ls_output: str, code: str) -> list[str]:
     sessions: list[str] = []
     for line in screen_ls_output.splitlines():
@@ -1014,7 +1052,7 @@ def _screen_sessions_for_code(screen_ls_output: str, code: str) -> list[str]:
         if not parts:
             continue
         token = parts[0]
-        if _screen_session_name(token) == code:
+        if _screen_session_matches_code(_screen_session_name(token), code):
             sessions.append(token)
     return sessions
 
@@ -1233,6 +1271,10 @@ _PROCESS_STATUS_MAP: dict[tuple[str, str], str] = {
     ("cataloging",    "cataloged"):     "cataloged",
     ("cataloging",    "stopped"):       "stopped",
     ("cataloging",    "error"):         "error",
+    ("profiling",     "quantifying"):   "quantifying",
+    ("profiling",     "quantified"):    "quantified",
+    ("profiling",     "stopped"):       "stopped",
+    ("profiling",     "error"):         "error",
 }
 
 
@@ -1280,6 +1322,31 @@ def _created_genome_record_ids(
         if genome_name:
             record_ids[genome_name] = record_id
     return record_ids
+
+
+def _as_float(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _genome_passes_quality_filter(
+    genome: dict[str, Any],
+    completeness_fid: str,
+    contamination_fid: str,
+) -> bool:
+    fields = genome.get("fields", {}) or {}
+    completeness = _as_float(fields.get(completeness_fid)) if completeness_fid else None
+    contamination = _as_float(fields.get(contamination_fid)) if contamination_fid else None
+    return (
+        completeness is not None
+        and contamination is not None
+        and completeness > _GENOME_MIN_COMPLETENESS
+        and contamination < _GENOME_MAX_CONTAMINATION
+    )
 
 
 def _upload_genome_bin_attachments(
@@ -1332,6 +1399,101 @@ def _upload_genome_bin_attachments(
         suffix = "…" if len(failed) > 5 else "."
         out.warn(f"Could not upload genome FASTA files for {_pl(len(failed), 'genome')}: {preview}{suffix}")
     return uploaded
+
+
+def _launch_genome_file_upload_screen(
+    args: argparse.Namespace,
+    study_code: str,
+    output_root: Path,
+    samples_table: str,
+    genomes_table: str,
+    *,
+    prefix: str = "",
+) -> bool:
+    """Launch the slow genome FASTA attachment upload in a detached screen session."""
+    label = f"{prefix}: " if prefix else ""
+    if os.environ.get("STY"):
+        return False
+
+    import shutil
+    import subprocess as sp
+
+    if shutil.which("screen") is None:
+        out.warn(f"{label}'screen' not found — uploading genome FASTA files inline.")
+        return False
+
+    work_dir = output_root / study_code
+    work_dir.mkdir(parents=True, exist_ok=True)
+    session_name = _genome_upload_screen_name(study_code)
+    script_path = work_dir / f"{study_code}_upload_genomes.sh"
+    stdout_path = work_dir / f"{study_code}_upload_genomes.out"
+    stderr_path = work_dir / f"{study_code}_upload_genomes.err"
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "wmw",
+        "upload-genome-files",
+        "--study",
+        study_code,
+        "--output-dir",
+        str(output_root),
+        "--samples-table",
+        samples_table,
+        "--genomes-table",
+        genomes_table,
+    ]
+    base_id = str(getattr(args, "base_id", "") or "").strip()
+    if base_id:
+        cmd.extend(["--base-id", base_id])
+
+    script = "\n".join(
+        [
+            "#!/usr/bin/env bash",
+            f"# wmw-generated script — batch {study_code} genome FASTA upload",
+            "# Do not edit manually; re-run wmw process or wmw set-status to regenerate.",
+            "",
+            "set -euo pipefail",
+            f"cd {shlex.quote(str(Path.cwd()))}",
+            f"exec >> {shlex.quote(str(stdout_path))} 2>> {shlex.quote(str(stderr_path))}",
+            'echo ""',
+            "echo \"=== $(date '+%Y-%m-%d %H:%M:%S') ===\"",
+            "echo \"=== $(date '+%Y-%m-%d %H:%M:%S') ===\" >&2",
+            shlex.join(cmd),
+            "",
+        ]
+    )
+    try:
+        script_path.write_text(script, encoding="utf-8")
+        script_path.chmod(0o755)
+    except OSError as exc:
+        out.warn(
+            f"{label}could not write genome upload screen script at {script_path}: {exc}. "
+            "Uploading inline."
+        )
+        return False
+
+    env = os.environ.copy()
+    token = str(getattr(args, "airtable_token", "") or "").strip()
+    if token:
+        env["AIRTABLE_TOKEN"] = token
+
+    try:
+        sp.run(
+            ["screen", "-dmS", session_name, "bash", str(script_path)],
+            check=True,
+            env=env,
+        )
+    except Exception as exc:
+        out.warn(
+            f"{label}could not start genome upload screen session {session_name!r}: {exc}. "
+            "Uploading inline."
+        )
+        return False
+
+    out.success(f"{label}genome FASTA upload started in screen session '{session_name}'.")
+    out.info(f"{label}upload logs: {stdout_path} and {stderr_path}")
+    return True
 
 
 def _finalize_preprocessing_outputs(
@@ -1398,6 +1560,10 @@ def _populate_genome_records_from_outputs(
     bin_paths_path: Path,
     *,
     prefix: str = "",
+    upload_files_in_screen: bool = False,
+    screen_args: argparse.Namespace | None = None,
+    study_code: str = "",
+    output_root: Path | None = None,
 ) -> bool:
     """Create/update Genomes rows and upload bin FASTA attachments from cataloging output."""
     from wmw import drakkar
@@ -1423,6 +1589,8 @@ def _populate_genome_records_from_outputs(
 
     name_fid = str(cfg.get("GENOMES_COL_NAME") or "").strip()
     sample_link_fid = str(cfg.get("GENOMES_COL_SAMPLE_ID") or "").strip()
+    completeness_fid = str(cfg.get("GENOMES_COL_COMPLETENESS") or "").strip()
+    contamination_fid = str(cfg.get("GENOMES_COL_CONTAMINATION") or "").strip()
     if not name_fid:
         out.warn(f"{label}GENOMES_COL_NAME is not configured — genome metadata not uploaded.")
         return True
@@ -1430,6 +1598,37 @@ def _populate_genome_records_from_outputs(
         out.warn(
             f"{label}GENOMES_COL_SAMPLE_ID is not configured — "
             f"genome metadata not uploaded."
+        )
+        return True
+    if not completeness_fid or not contamination_fid:
+        out.warn(
+            f"{label}GENOMES_COL_COMPLETENESS and GENOMES_COL_CONTAMINATION are required "
+            f"for genome quality filtering — genome metadata and files not uploaded."
+        )
+        return True
+
+    skipped_quality = [
+        str(genome.get("genome_name", "") or "").strip() or str(genome.get("sample_code", "") or "").strip()
+        for genome in genomes
+        if not _genome_passes_quality_filter(genome, completeness_fid, contamination_fid)
+    ]
+    if skipped_quality:
+        preview = ", ".join(skipped_quality[:10])
+        suffix = "…" if len(skipped_quality) > 10 else "."
+        out.warn(
+            f"{label}skipped {_pl(len(skipped_quality), 'genome')} below quality thresholds "
+            f"(completeness > {_GENOME_MIN_COMPLETENESS:g}, "
+            f"contamination < {_GENOME_MAX_CONTAMINATION:g}): {preview}{suffix}"
+        )
+    genomes = [
+        genome
+        for genome in genomes
+        if _genome_passes_quality_filter(genome, completeness_fid, contamination_fid)
+    ]
+    if not genomes:
+        out.warn(
+            f"{label}no genomes passed quality thresholds — "
+            f"genome metadata and files not uploaded."
         )
         return True
 
@@ -1516,13 +1715,29 @@ def _populate_genome_records_from_outputs(
             f"genome files not uploaded."
         )
     else:
-        _upload_genome_bin_attachments(
-            client,
-            genomes_table,
-            genome_record_ids,
-            bin_paths,
-            existing_records_by_name=existing_records,
-        )
+        launched = False
+        if (
+            upload_files_in_screen
+            and screen_args is not None
+            and study_code
+            and output_root is not None
+        ):
+            launched = _launch_genome_file_upload_screen(
+                screen_args,
+                study_code,
+                output_root,
+                samples_table,
+                genomes_table,
+                prefix=prefix,
+            )
+        if not launched:
+            _upload_genome_bin_attachments(
+                client,
+                genomes_table,
+                genome_record_ids,
+                bin_paths,
+                existing_records_by_name=existing_records,
+            )
 
     return True
 
@@ -1538,6 +1753,7 @@ def _finalize_cataloging_outputs(
     set_status: bool = False,
     skip_existing_attachments: bool = False,
     prefix: str = "",
+    screen_args: argparse.Namespace | None = None,
 ) -> bool:
     """Upload cataloging outputs, sample assembly stats, and Genomes rows/files."""
     from wmw import drakkar
@@ -1592,6 +1808,10 @@ def _finalize_cataloging_outputs(
         bin_metadata_path,
         bin_paths_path,
         prefix=prefix,
+        upload_files_in_screen=screen_args is not None,
+        screen_args=screen_args,
+        study_code=study_code,
+        output_root=output_root,
     )
     return has_cataloging_output or genomes_processed
 
@@ -1638,9 +1858,34 @@ def cmd_set_status(args: argparse.Namespace) -> int:
                 genomes_table,
                 study_record,
                 Path(output_dir_str).expanduser().resolve(),
+                screen_args=args,
             )
 
     return 0
+
+
+def cmd_upload_genome_files(args: argparse.Namespace) -> int:
+    samples_table = _conf(args, "samples_table", "SAMPLES_TABLE") or "Samples"
+    genomes_table = _conf(args, "genomes_table", "GENOMES_TABLE")
+    output_dir_str = _conf(args, "output_dir", "DRAKKAR_OUTPUT_DIR", required=True)
+    study_code = args.study
+
+    out.section("WMW GENOME FASTA UPLOAD")
+    if not genomes_table:
+        _die("GENOMES_TABLE is not configured — genome files not uploaded.")
+
+    client = _require_airtable(args, samples_table, genomes_table)
+    output_root = Path(output_dir_str).expanduser().resolve()
+    final_dir = output_root / study_code / "cataloging" / "final"
+    processed = _populate_genome_records_from_outputs(
+        client,
+        samples_table,
+        genomes_table,
+        final_dir / "all_bin_metadata.csv",
+        final_dir / "all_bin_paths.txt",
+        prefix=study_code,
+    )
+    return 0 if processed else 1
 
 
 # ---------------------------------------------------------------------------
@@ -2141,6 +2386,39 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Override DRAKKAR_OUTPUT_DIR from config.",
     )
     p_setstatus.set_defaults(func=cmd_set_status)
+
+    # ---- upload-genome-files (internal) ----
+    p_upload_genomes = sub.add_parser(
+        "upload-genome-files",
+        help="Upload generated genome FASTA attachments for one study.",
+        description="Upload generated genome FASTA attachments for one study.",
+    )
+    _add_airtable_flags(p_upload_genomes)
+    p_upload_genomes.add_argument(
+        "--study",
+        metavar="CODE",
+        required=True,
+        help="Study code (batch label) whose genome FASTA files should be uploaded.",
+    )
+    p_upload_genomes.add_argument(
+        "--output-dir",
+        metavar="DIR",
+        default="",
+        help="Override DRAKKAR_OUTPUT_DIR from config.",
+    )
+    p_upload_genomes.add_argument(
+        "--samples-table",
+        metavar="TABLE",
+        default="",
+        help="Override Samples table name from config.",
+    )
+    p_upload_genomes.add_argument(
+        "--genomes-table",
+        metavar="TABLE",
+        default="",
+        help="Override Genomes table name from config.",
+    )
+    p_upload_genomes.set_defaults(func=cmd_upload_genome_files)
 
     # ---- status ----
     p_status = sub.add_parser(

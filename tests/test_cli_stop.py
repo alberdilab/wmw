@@ -48,6 +48,17 @@ def test_stop_parser_accepts_study_alias():
     assert args.func is cli.cmd_stop
 
 
+def test_screen_sessions_for_code_includes_genome_upload_session():
+    sessions = cli._screen_sessions_for_code(
+        "\t123.ST001\t(Detached)\n"
+        "\t124.ST001-genome-upload\t(Detached)\n"
+        "\t125.ST001-other\t(Detached)\n",
+        "ST001",
+    )
+
+    assert sessions == ["123.ST001", "124.ST001-genome-upload"]
+
+
 def test_cmd_stop_sets_status_stops_screen_and_cancels_matching_slurm_jobs(tmp_path):
     work_dir = tmp_path / "ST001"
     work_dir.mkdir()
@@ -209,7 +220,10 @@ def test_cmd_set_status_cataloged_uploads_genome_metadata(tmp_path):
         {"id": "recGenome", "fields": {name_fid: "SA000022_bin_339957"}}
     ]
 
-    with patch("wmw.cli._require_airtable", return_value=client) as require_airtable:
+    with (
+        patch("wmw.cli._require_airtable", return_value=client) as require_airtable,
+        patch("shutil.which", return_value=None),
+    ):
         assert cli.cmd_set_status(args) == 0
 
     require_airtable.assert_called_once_with(args, "Studies", "Samples")
@@ -247,6 +261,142 @@ def test_cmd_set_status_cataloged_uploads_genome_metadata(tmp_path):
     )
 
 
+def test_cmd_set_status_cataloged_launches_genome_upload_screen(tmp_path):
+    work_dir = tmp_path / "ST001"
+    final_dir = work_dir / "cataloging" / "final"
+    final_dir.mkdir(parents=True)
+    cataloging_tsv = work_dir / "ST001_cataloging.tsv"
+    cataloging_tsv.write_text(
+        "assembly\tassembly_N50\nSA000022\t12345\n",
+        encoding="utf-8",
+    )
+    (final_dir / "all_bin_metadata.csv").write_text(
+        "genome,completeness,contamination,score,size,N50,contig_count\n"
+        "SA000022_bin_339957.fa,99.984,0.054,99.88,2585871,91721,50\n",
+        encoding="utf-8",
+    )
+    bin_path = final_dir / "SA000022" / "SA000022_bin_339957.fa"
+    bin_path.parent.mkdir()
+    bin_path.write_text(">contig1\nACGT\n", encoding="utf-8")
+    (final_dir / "all_bin_paths.txt").write_text(
+        "cataloging/final/SA000022/SA000022_bin_339957.fa\n",
+        encoding="utf-8",
+    )
+    args = argparse.Namespace(
+        study="ST001",
+        workflow="cataloging",
+        status="cataloged",
+        output_dir=str(tmp_path),
+        studies_table="Studies",
+        samples_table="Samples",
+        genomes_table="Genomes",
+        airtable_token="secret-token",
+        base_id="appBase",
+    )
+
+    client = MagicMock()
+    client.fetch_study_by_code.return_value = {"id": "recStudy", "fields": {"code": "ST001"}}
+    client.update_sample_cataloging_stats.return_value = 1
+    client.fetch_sample_record_ids_by_code.return_value = {"SA000022": "recSample"}
+    client.fetch_genome_records_by_name.return_value = {}
+    client.update_genome_records.return_value = 0
+    name_fid = str(cfg.get("GENOMES_COL_NAME"))
+    client.create_genome_records_with_response.return_value = [
+        {"id": "recGenome", "fields": {name_fid: "SA000022_bin_339957"}}
+    ]
+
+    with (
+        patch("wmw.cli._require_airtable", return_value=client),
+        patch("shutil.which", return_value="/usr/bin/screen"),
+        patch("subprocess.run") as run,
+    ):
+        assert cli.cmd_set_status(args) == 0
+
+    script_path = work_dir / "ST001_upload_genomes.sh"
+    assert script_path.exists()
+    script_text = script_path.read_text(encoding="utf-8")
+    assert "upload-genome-files" in script_text
+    assert "secret-token" not in script_text
+    assert "--base-id appBase" in script_text
+
+    client.create_genome_records_with_response.assert_called_once()
+    client.upload_genome_file.assert_not_called()
+    assert not bin_path.with_suffix(".fa.gz").exists()
+    run.assert_called_once()
+    assert run.call_args[0][0] == [
+        "screen",
+        "-dmS",
+        "ST001-genome-upload",
+        "bash",
+        str(script_path),
+    ]
+    assert run.call_args.kwargs["check"] is True
+    assert run.call_args.kwargs["env"]["AIRTABLE_TOKEN"] == "secret-token"
+
+
+def test_populate_genomes_skips_records_and_files_below_quality_thresholds(tmp_path):
+    final_dir = tmp_path / "ST001" / "cataloging" / "final"
+    final_dir.mkdir(parents=True)
+    (final_dir / "all_bin_metadata.csv").write_text(
+        "genome,completeness,contamination,score,size,N50,contig_count\n"
+        "SA000022_bin_good.fa,50.01,9.99,99.88,2585871,91721,50\n"
+        "SA000023_bin_low_completeness.fa,50,0.05,99.88,2585871,91721,50\n"
+        "SA000024_bin_high_contamination.fa,99.98,10,99.88,2585871,91721,50\n",
+        encoding="utf-8",
+    )
+    good_bin = final_dir / "SA000022" / "SA000022_bin_good.fa"
+    low_bin = final_dir / "SA000023" / "SA000023_bin_low_completeness.fa"
+    high_bin = final_dir / "SA000024" / "SA000024_bin_high_contamination.fa"
+    for bin_path in (good_bin, low_bin, high_bin):
+        bin_path.parent.mkdir()
+        bin_path.write_text(">contig1\nACGT\n", encoding="utf-8")
+    (final_dir / "all_bin_paths.txt").write_text(
+        "cataloging/final/SA000022/SA000022_bin_good.fa\n"
+        "cataloging/final/SA000023/SA000023_bin_low_completeness.fa\n"
+        "cataloging/final/SA000024/SA000024_bin_high_contamination.fa\n",
+        encoding="utf-8",
+    )
+
+    client = MagicMock()
+    client.fetch_sample_record_ids_by_code.return_value = {"SA000022": "recSample"}
+    client.fetch_genome_records_by_name.return_value = {}
+    client.update_genome_records.return_value = 0
+    name_fid = str(cfg.get("GENOMES_COL_NAME"))
+    client.create_genome_records_with_response.return_value = [
+        {"id": "recGenome", "fields": {name_fid: "SA000022_bin_good"}}
+    ]
+
+    assert cli._populate_genome_records_from_outputs(
+        client,
+        "Samples",
+        "Genomes",
+        final_dir / "all_bin_metadata.csv",
+        final_dir / "all_bin_paths.txt",
+    )
+
+    client.fetch_sample_record_ids_by_code.assert_called_once_with("Samples", {"SA000022"})
+    client.fetch_genome_records_by_name.assert_called_once_with(
+        "Genomes",
+        ["SA000022_bin_good"],
+        name_fid,
+    )
+    client.create_genome_records_with_response.assert_called_once()
+    _, records = client.create_genome_records_with_response.call_args[0]
+    assert len(records) == 1
+    assert records[0][name_fid] == "SA000022_bin_good"
+
+    good_gz = good_bin.with_suffix(".fa.gz")
+    assert good_gz.exists()
+    assert not low_bin.with_suffix(".fa.gz").exists()
+    assert not high_bin.with_suffix(".fa.gz").exists()
+    client.upload_genome_file.assert_called_once_with(
+        "Genomes",
+        "recGenome",
+        str(cfg.get("GENOMES_COL_FILE_GENOME")),
+        good_gz,
+    )
+
+
 def test_cmd_process_resume_finalizes_airtable_without_launching_drakkar(tmp_path):
     work_dir = tmp_path / "ST001"
     final_dir = work_dir / "cataloging" / "final"
@@ -269,6 +419,10 @@ def test_cmd_process_resume_finalizes_airtable_without_launching_drakkar(tmp_pat
     bin_path.write_text(">contig1\nACGT\n", encoding="utf-8")
     (final_dir / "all_bin_paths.txt").write_text(
         "cataloging/final/SA000022/SA000022_bin_339957.fa\n",
+        encoding="utf-8",
+    )
+    (work_dir / "profiling_genomes.tsv").write_text(
+        "genome\tcoverage\nSA000022_bin_339957\t10.5\n",
         encoding="utf-8",
     )
 
@@ -311,6 +465,7 @@ def test_cmd_process_resume_finalizes_airtable_without_launching_drakkar(tmp_pat
     with (
         patch("wmw.cli._require_airtable", return_value=client) as require_airtable,
         patch("wmw.drakkar.build_input_tsv") as build_input_tsv,
+        patch("shutil.which", return_value=None),
         patch("subprocess.run") as run,
     ):
         assert cli.cmd_process(args) == 0
@@ -331,6 +486,78 @@ def test_cmd_process_resume_finalizes_airtable_without_launching_drakkar(tmp_pat
     client.update_sample_cataloging_stats.assert_called_once()
     client.create_genome_records_with_response.assert_called_once()
     client.upload_genome_file.assert_called_once()
+
+
+def test_cmd_process_resume_launches_profiling_when_cataloging_done(tmp_path):
+    """Resume with cataloging done but no profiling_genomes.tsv → generate profiling script."""
+    work_dir = tmp_path / "ST001"
+    final_dir = work_dir / "cataloging" / "final"
+    final_dir.mkdir(parents=True)
+    (work_dir / "ST001_preprocessing.tsv").write_text(
+        "sample\treads_pre_fastp\nSA000022\t1000\n", encoding="utf-8"
+    )
+    (work_dir / "ST001_cataloging.tsv").write_text(
+        "assembly\tassembly_N50\nSA000022\t12345\n", encoding="utf-8"
+    )
+    (final_dir / "all_bin_metadata.csv").write_text(
+        "genome,completeness,contamination,score,size,N50,contig_count\n"
+        "SA000022_bin_1.fa,99.0,0.5,98.5,2500000,80000,45\n",
+        encoding="utf-8",
+    )
+    bin_path = final_dir / "SA000022" / "SA000022_bin_1.fa"
+    bin_path.parent.mkdir()
+    bin_path.write_text(">contig1\nACGT\n", encoding="utf-8")
+    (final_dir / "all_bin_paths.txt").write_text(
+        "cataloging/final/SA000022/SA000022_bin_1.fa\n", encoding="utf-8"
+    )
+    # profiling_genomes.tsv is intentionally absent
+
+    args = argparse.Namespace(
+        batch="",
+        workflow="preprocessing",
+        slurm=False,
+        output_dir=str(tmp_path),
+        studies_table="Studies",
+        samples_table="Samples",
+        genomes_table="Genomes",
+        airtable_token="",
+        base_id="",
+    )
+
+    client = MagicMock()
+    resume_study = {
+        "id": "recStudy",
+        "fields": {"code": "ST001", "study_accession": "PRJEB001", "status": "resume"},
+    }
+
+    def fetch_by_status(_table, status):
+        return [resume_study] if status == "resume" else []
+
+    client.fetch_studies_by_status.side_effect = fetch_by_status
+    client.update_sample_preprocessing_stats.return_value = 1
+    client.update_sample_cataloging_stats.return_value = 1
+    client.fetch_sample_record_ids_by_code.return_value = {"SA000022": "recSample"}
+    client.fetch_genome_records_by_name.return_value = {}
+    client.update_genome_records.return_value = 0
+    name_fid = str(cfg.get("GENOMES_COL_NAME"))
+    client.create_genome_records_with_response.return_value = [
+        {"id": "recGenome", "fields": {name_fid: "SA000022_bin_1"}}
+    ]
+
+    with (
+        patch("wmw.cli._require_airtable", return_value=client),
+        patch("shutil.which", return_value=None),
+        patch("subprocess.run") as run,
+    ):
+        assert cli.cmd_process(args) == 0
+
+    script_path = work_dir / "ST001.sh"
+    assert script_path.exists(), "profiling script should have been written"
+    script_text = script_path.read_text()
+    assert "drakkar profiling" in script_text
+    assert "all_bin_paths.txt" in script_text
+    assert "preprocessing/final" in script_text
+    run.assert_not_called()  # screen not available, script written but not launched
 
 
 def test_cmd_process_resume_without_outputs_launches_preprocessing(tmp_path):

@@ -8,6 +8,29 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.4.2] - 2026-05-12
+
+### Added
+
+- `wmw process --workflow profiling` now generates a bash script that runs
+  `drakkar profiling` for a study, using the cataloging bin paths/metadata and
+  preprocessing reads as inputs (`-B`, `-r`, `-q`, `-a 0.98`, `-t genomes`).
+  Airtable study status transitions: `quantifying` while running, `quantified`
+  on success, `error`/`stopped` on failure.
+- Added `profiling` workflow entries to `_PROCESS_STATUS_MAP`
+  (`quantifying`, `quantified`, `stopped`, `error`).
+- `wmw process` resume mode now automatically launches a profiling script when
+  cataloging outputs exist but `profiling_genomes.tsv` is absent; if
+  `profiling_genomes.tsv` already exists the study is skipped as fully done.
+
+### Changed
+
+- Genome FASTA attachment uploads now detach into a per-study
+  `<code>-genome-upload` `screen` session when cataloging outputs are finalized
+  outside an existing `screen`; if `screen` is unavailable, uploads fall back to
+  the current process.
+- Genomes are only created/updated in Airtable and uploaded as attachments when
+  completeness is above 50 and contamination is below 10.
 ## [0.4.1] - 2026-05-12
 
 ### Added

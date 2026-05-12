@@ -224,6 +224,82 @@ def generate_preprocessing_script(
     return "\n".join(lines)
 
 
+def generate_profiling_script(
+    code: str,
+    work_dir: Path,
+    conda_env: str,
+    slurm: bool = False,
+    wmw_conda_env: str = "",
+) -> str:
+    """Return a bash script that runs drakkar profiling for *code* and updates Airtable."""
+    bin_paths = shlex.quote(str(work_dir / "cataloging" / "final" / "all_bin_paths.txt"))
+    reads_dir = shlex.quote(str(work_dir / "preprocessing" / "final"))
+    bin_metadata = shlex.quote(str(work_dir / "cataloging" / "final" / "all_bin_metadata.csv"))
+    out_dir = shlex.quote(str(work_dir))
+
+    profiling_flags = f"-B {bin_paths} -r {reads_dir} -a 0.98 -t genomes -q {bin_metadata} -o {out_dir}"
+    if slurm:
+        profiling_flags += " -p slurm"
+
+    if conda_env:
+        c_flag = "-p" if str(conda_env).startswith(("/", "~", ".")) else "-n"
+        profiling_cmd = f"conda run {c_flag} {conda_env} drakkar profiling {profiling_flags}"
+        conda_lines = [
+            'if [ -f "$(conda info --base 2>/dev/null)/etc/profile.d/conda.sh" ]; then',
+            '    source "$(conda info --base)/etc/profile.d/conda.sh"',
+            f"    conda activate {conda_env}",
+            "fi",
+            "",
+        ]
+    else:
+        profiling_cmd = f"drakkar profiling {profiling_flags}"
+        conda_lines = []
+
+    if wmw_conda_env:
+        w_flag = "-p" if str(wmw_conda_env).startswith(("/", "~", ".")) else "-n"
+        wmw_cmd = f"conda run {w_flag} {wmw_conda_env} wmw"
+    else:
+        wmw_cmd = "wmw"
+
+    stop_file = shlex.quote(str(work_dir / ".wmw-stop"))
+    output_dir_arg = f" --output-dir {shlex.quote(str(work_dir.parent))}"
+
+    lines = [
+        "#!/usr/bin/env bash",
+        f"# wmw-generated script — batch {code} (profiling only)",
+        "# Do not edit manually; re-run wmw process to regenerate.",
+        "# AIRTABLE_TOKEN must be exported in the environment before launching.",
+        "",
+        "set -euo pipefail",
+        f"exec >> {work_dir}/{code}.out 2>> {work_dir}/{code}.err",
+        'echo ""',
+        "echo \"=== $(date '+%Y-%m-%d %H:%M:%S') ===\"",
+        "echo \"=== $(date '+%Y-%m-%d %H:%M:%S') ===\" >&2",
+        "",
+        *conda_lines,
+        f"_WMW_STOP_FILE={stop_file}",
+        'rm -f "$_WMW_STOP_FILE"',
+        "_WMW_SUCCESS=0",
+        "_on_exit() {",
+        '    if [ "$_WMW_SUCCESS" -ne 1 ]; then',
+        '        if [ -f "$_WMW_STOP_FILE" ]; then',
+        f"            {wmw_cmd} set-status --study {code} --workflow profiling --status stopped{output_dir_arg}",
+        "        else",
+        f"            {wmw_cmd} set-status --study {code} --workflow profiling --status error{output_dir_arg}",
+        "        fi",
+        "    fi",
+        "}",
+        "trap _on_exit EXIT",
+        "",
+        f"{wmw_cmd} set-status --study {code} --workflow profiling --status quantifying{output_dir_arg}",
+        profiling_cmd,
+        f"{wmw_cmd} set-status --study {code} --workflow profiling --status quantified{output_dir_arg}",
+        "_WMW_SUCCESS=1",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def generate_cataloging_script(
     code: str,
     tsv_path: Path,
