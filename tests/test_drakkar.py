@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import gzip
 from pathlib import Path
 
 import pytest
+from wmw import config as cfg
 from wmw import drakkar
 
 
@@ -170,6 +172,7 @@ def test_generate_preprocessing_script_contains_key_elements(tmp_path):
     assert "wmw set-status --study PRJ001 --workflow cataloging --status stopped" in script
     assert "trap _on_exit_preprocessing EXIT" in script
     assert "trap _on_exit_cataloging EXIT" in script
+    assert f"--output-dir {tmp_path.parent}" in script
 
 
 def test_generate_preprocessing_script_slurm_flag(tmp_path):
@@ -225,6 +228,7 @@ def test_generate_cataloging_script_contains_key_elements(tmp_path):
     assert "wmw set-status --study PRJ001 --workflow cataloging --status stopped" in script
     assert "trap _on_exit EXIT" in script
     assert "drakkar preprocessing" not in script
+    assert f"--output-dir {tmp_path.parent}" in script
 
 
 def test_generate_cataloging_script_slurm_flag(tmp_path):
@@ -259,3 +263,139 @@ def test_generate_cataloging_script_wmw_conda_env(tmp_path):
     )
     assert "conda run -p /envs/wmw wmw set-status" in script
     assert "conda run -p /envs/drakkar drakkar cataloging" in script
+
+
+# parse_cataloging_tsv
+# ---------------------------------------------------------------------------
+
+def test_parse_cataloging_tsv_extracts_assembly_stats_and_focal_mapping(tmp_path):
+    path = tmp_path / "cataloging.tsv"
+    path.write_text(
+        "\t".join(
+            [
+                "assembly",
+                "samples",
+                "assembly_contigs",
+                "assembly_total_length",
+                "assembly_largest_contig",
+                "assembly_gc_percent",
+                "assembly_N50",
+                "assembly_L50",
+                "mapping_rate_percent",
+                "sample_mapping_rates",
+            ]
+        )
+        + "\n"
+        + "\t".join(
+            [
+                "SA000004",
+                "SA000004",
+                "6228",
+                "47624249",
+                "231296",
+                "41.694",
+                "21438",
+                "472",
+                "60.81750890370336",
+                "SA000004:91.03;SA000005:47.65",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    stats = drakkar.parse_cataloging_tsv(path)
+    fields = stats["SA000004"]
+    l50_fid = str(
+        cfg.get("SAMPLES_COL_ASSEMBLY_L50")
+        or cfg.get("SAMPLES_COL_ASSEMBLTY_L50")
+    )
+
+    assert fields[str(cfg.get("SAMPLES_COL_ASSEMBLY_CONTIGS"))] == 6228
+    assert fields[str(cfg.get("SAMPLES_COL_ASSEMBLY_LENGTH"))] == 47624249
+    assert fields[str(cfg.get("SAMPLES_COL_ASSEMBLY_LARGEST_CONTIG"))] == 231296
+    assert fields[str(cfg.get("SAMPLES_COL_ASSEMBLY_N50"))] == 21438
+    assert fields[l50_fid] == 472
+    assert fields[str(cfg.get("SAMPLES_COL_ASSEMBLY_GC"))] == 41.69
+    assert fields[str(cfg.get("SAMPLES_COL_ASSEMBLY_MAPPING_RATE_ALL"))] == 60.82
+    assert fields[str(cfg.get("SAMPLES_COL_ASSEMBLY_MAPPING_RATE_FOCAL"))] == 91.03
+
+
+def test_parse_cataloging_tsv_skips_na_values_and_missing_focal_mapping(tmp_path):
+    path = tmp_path / "cataloging.tsv"
+    path.write_text(
+        "assembly\tassembly_N50\tassembly_L50\tsample_mapping_rates\n"
+        "SA000004\tNA\t472\tSA000005:47.65\n",
+        encoding="utf-8",
+    )
+
+    fields = drakkar.parse_cataloging_tsv(path)["SA000004"]
+
+    assert str(cfg.get("SAMPLES_COL_ASSEMBLY_N50")) not in fields
+    assert str(cfg.get("SAMPLES_COL_ASSEMBLY_MAPPING_RATE_FOCAL")) not in fields
+
+
+# parse_bin_metadata_csv
+# ---------------------------------------------------------------------------
+
+def test_parse_bin_metadata_csv_extracts_genome_fields(tmp_path):
+    path = tmp_path / "all_bin_metadata.csv"
+    path.write_text(
+        "genome,completeness,contamination,score,size,N50,contig_count\n"
+        "SA000022_bin_339957.fa,99.984,0.054,99.88,2585871,91721,50\n",
+        encoding="utf-8",
+    )
+
+    genomes = drakkar.parse_bin_metadata_csv(path)
+
+    assert len(genomes) == 1
+    assert genomes[0]["sample_code"] == "SA000022"
+    fields = genomes[0]["fields"]
+    assert fields[str(cfg.get("GENOMES_COL_NAME"))] == "SA000022_bin_339957"
+    assert fields[str(cfg.get("GENOMES_COL_COMPLETENESS"))] == 99.98
+    assert fields[str(cfg.get("GENOMES_COL_CONTAMINATION"))] == 0.05
+    assert fields[str(cfg.get("GENOMES_COL_LENGTH"))] == 2585871
+    assert fields[str(cfg.get("GENOMES_COL_N50"))] == 91721
+    assert fields[str(cfg.get("GENOMES_COL_CONTIGS"))] == 50
+    assert "score" not in fields
+
+
+def test_parse_bin_metadata_csv_includes_genome_name(tmp_path):
+    path = tmp_path / "all_bin_metadata.csv"
+    path.write_text(
+        "genome,completeness,contamination,score,size,N50,contig_count\n"
+        "SA000022_bin_339957.fa,99.984,0.054,99.88,2585871,91721,50\n",
+        encoding="utf-8",
+    )
+
+    genomes = drakkar.parse_bin_metadata_csv(path)
+
+    assert genomes[0]["genome_name"] == "SA000022_bin_339957"
+
+
+def test_parse_bin_paths_txt_resolves_study_relative_paths(tmp_path):
+    study_dir = tmp_path / "ST001"
+    final_dir = study_dir / "cataloging" / "final"
+    bin_path = final_dir / "SA000022" / "SA000022_bin_339957.fa"
+    bin_path.parent.mkdir(parents=True)
+    bin_path.write_text(">contig1\nACGT\n", encoding="utf-8")
+    paths_file = final_dir / "all_bin_paths.txt"
+    paths_file.write_text(
+        "cataloging/final/SA000022/SA000022_bin_339957.fa\n",
+        encoding="utf-8",
+    )
+
+    paths = drakkar.parse_bin_paths_txt(paths_file)
+
+    assert paths == {"SA000022_bin_339957": bin_path}
+
+
+def test_gzip_fasta_writes_fa_gz(tmp_path):
+    fasta_path = tmp_path / "SA000022_bin_339957.fa"
+    fasta_path.write_text(">contig1\nACGT\n", encoding="utf-8")
+
+    gz_path = drakkar.gzip_fasta(fasta_path)
+
+    assert gz_path.name == "SA000022_bin_339957.fa.gz"
+    with gzip.open(gz_path, "rt", encoding="utf-8") as fh:
+        assert fh.read() == ">contig1\nACGT\n"

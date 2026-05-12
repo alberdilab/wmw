@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Iterable
+from pathlib import Path
 from typing import Any
 
 try:
@@ -278,45 +280,157 @@ class AirtableClient:
         records = tbl.all(formula=formula)
         return [self._dec(r, self._studies_fm) for r in records]
 
-    def update_sample_preprocessing_stats(
+    def _update_sample_stats_by_code(
         self,
         samples_table: str,
-        stats_by_run: dict[str, dict[str, Any]],
+        stats_by_code: dict[str, dict[str, Any]],
     ) -> int:
-        """Write preprocessing stats to sample records, keyed by the sample code.
+        """Write stats to sample records, keyed by the sample code.
 
-        stats_by_run: {code: {airtable_field_id: value}}
+        stats_by_code: {code: {airtable_field_id: value}}
         Returns the number of records updated.
         """
-        if not stats_by_run:
+        if not stats_by_code:
             return 0
 
-        code_key = self._fld("code", self._samples_fm)
+        code_to_id = self.fetch_sample_record_ids_by_code(
+            samples_table,
+            stats_by_code.keys(),
+        )
         tbl = self._tbl(samples_table, self._samples_fm)
-        code_to_id: dict[str, str] = {}
-
-        # Batch formula lookups to stay within Airtable's formula length limit.
-        all_codes = list(stats_by_run.keys())
-        for i in range(0, len(all_codes), 50):
-            batch = all_codes[i : i + 50]
-            if len(batch) == 1:
-                formula = f'{{{code_key}}} = "{batch[0]}"'
-            else:
-                parts = [f'{{{code_key}}} = "{c}"' for c in batch]
-                formula = "OR(" + ", ".join(parts) + ")"
-            for r in tbl.all(formula=formula):
-                code_val = r["fields"].get(code_key, "")
-                if code_val:
-                    code_to_id[code_val] = r["id"]
 
         updates = [
             {"id": code_to_id[code], "fields": fields}
-            for code, fields in stats_by_run.items()
+            for code, fields in stats_by_code.items()
             if code in code_to_id
         ]
         if updates:
             tbl.batch_update(updates)
         return len(updates)
+
+    def update_sample_preprocessing_stats(
+        self,
+        samples_table: str,
+        stats_by_run: dict[str, dict[str, Any]],
+    ) -> int:
+        """Write preprocessing stats to sample records, keyed by the sample code."""
+        return self._update_sample_stats_by_code(samples_table, stats_by_run)
+
+    def update_sample_cataloging_stats(
+        self,
+        samples_table: str,
+        stats_by_assembly: dict[str, dict[str, Any]],
+    ) -> int:
+        """Write cataloging assembly stats to sample records, keyed by sample code."""
+        return self._update_sample_stats_by_code(samples_table, stats_by_assembly)
+
+    def fetch_sample_record_ids_by_code(
+        self,
+        samples_table: str,
+        sample_codes: Iterable[Any],
+    ) -> dict[str, str]:
+        """Return {sample_code: Airtable record ID} for matching sample code values."""
+        codes = list(
+            dict.fromkeys(str(c).strip() for c in sample_codes if str(c).strip())
+        )
+        if not codes:
+            return {}
+
+        code_key = self._fld("code", self._samples_fm)
+        record_id_key = self._fld("record_id", self._samples_fm)
+        tbl = self._tbl(samples_table, self._samples_fm)
+        code_to_id: dict[str, str] = {}
+
+        # Batch formula lookups to stay within Airtable's formula length limit.
+        for i in range(0, len(codes), 50):
+            batch = codes[i : i + 50]
+            if len(batch) == 1:
+                formula = f'{{{code_key}}} = "{batch[0]}"'
+            else:
+                parts = [f'{{{code_key}}} = "{c}"' for c in batch]
+                formula = "OR(" + ", ".join(parts) + ")"
+            for record in tbl.all(formula=formula):
+                code_val = record["fields"].get(code_key, "")
+                if code_val:
+                    code_to_id[code_val] = str(
+                        record["fields"].get(record_id_key) or record["id"]
+                    )
+        return code_to_id
+
+    def create_genome_records(
+        self,
+        genomes_table: str,
+        fields_list: list[dict[str, Any]],
+    ) -> int:
+        """Create genome records using field-ID payloads."""
+        return len(self.create_genome_records_with_response(genomes_table, fields_list))
+
+    def create_genome_records_with_response(
+        self,
+        genomes_table: str,
+        fields_list: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Create genome records using field-ID payloads and return created rows."""
+        if not fields_list:
+            return []
+        tbl = self._fid_tbl(genomes_table)
+        return tbl.batch_create(fields_list)
+
+    def fetch_genome_records_by_name(
+        self,
+        genomes_table: str,
+        genome_names: Iterable[Any],
+        name_field_id: str,
+    ) -> dict[str, dict[str, Any]]:
+        """Return existing Genomes-table records keyed by genome name."""
+        names = list(
+            dict.fromkeys(str(name).strip() for name in genome_names if str(name).strip())
+        )
+        if not names or not name_field_id:
+            return {}
+
+        tbl = self._fid_tbl(genomes_table)
+        records_by_name: dict[str, dict[str, Any]] = {}
+        for i in range(0, len(names), 50):
+            batch = names[i : i + 50]
+            if len(batch) == 1:
+                formula = f'{{{name_field_id}}} = "{batch[0]}"'
+            else:
+                parts = [f'{{{name_field_id}}} = "{name}"' for name in batch]
+                formula = "OR(" + ", ".join(parts) + ")"
+            for record in tbl.all(formula=formula):
+                genome_name = str(record.get("fields", {}).get(name_field_id) or "").strip()
+                if genome_name:
+                    records_by_name[genome_name] = record
+        return records_by_name
+
+    def update_genome_records(
+        self,
+        genomes_table: str,
+        updates: list[dict[str, Any]],
+    ) -> int:
+        """Update existing genome records using field-ID payloads."""
+        if not updates:
+            return 0
+        tbl = self._fid_tbl(genomes_table)
+        tbl.batch_update(updates)
+        return len(updates)
+
+    def upload_genome_file(
+        self,
+        genomes_table: str,
+        record_id: str,
+        field_id: str,
+        file_path: str | Path,
+    ) -> dict[str, Any]:
+        """Upload a local genome FASTA archive to a Genomes-table attachment field."""
+        tbl = self._fid_tbl(genomes_table)
+        return tbl.upload_attachment(
+            record_id,
+            field_id,
+            Path(file_path),
+            content_type="application/gzip",
+        )
 
     def set_study_status(
         self,
@@ -328,6 +442,23 @@ class AirtableClient:
         updates = [{"id": rid, "fields": {status_key: status}} for rid in record_ids]
         tbl = self._tbl(studies_table, self._studies_fm)
         tbl.batch_update(updates)
+
+    def upload_study_file(
+        self,
+        studies_table: str,
+        record_id: str,
+        field_name: str,
+        file_path: str | Path,
+    ) -> dict[str, Any]:
+        """Upload a local file to a Studies-table attachment field."""
+        field = self._fld(field_name, self._studies_fm)
+        tbl = self._tbl(studies_table, self._studies_fm)
+        return tbl.upload_attachment(
+            record_id,
+            field,
+            Path(file_path),
+            content_type="text/tab-separated-values",
+        )
 
     # ------------------------------------------------------------------
     # Species table — link studies via host taxid

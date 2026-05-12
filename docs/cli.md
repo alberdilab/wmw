@@ -120,16 +120,18 @@ wmw process [--batch BATCH]
             [--workflow {preprocessing,cataloging,profiling,annotating}]   # default: preprocessing
             [--slurm]
             [--output-dir DIR]   # or config DRAKKAR_OUTPUT_DIR
-            [--studies-table TABLE] [--samples-table TABLE]
+            [--studies-table TABLE] [--samples-table TABLE] [--genomes-table TABLE]
             [--airtable-token TOKEN] [--base-id BASE_ID]
 ```
 
 **Execution order:**
 1. Fetch studies where `status` is `"ready"`, `"resume"`, or `"rerun"` (filtered by `--batch` if given)
-2. Fetch the study's samples and write `{output_dir}/{code}/{code}.tsv` with samples whose status is `"use"`
-3. Write `{output_dir}/{code}/{code}.sh`
-4. Launch the script in a detached `screen` session named `{code}`
-5. Generated scripts update the Study status through `preprocessing`, `preprocessed`, `cataloging`, `cataloged`, `error`, or `stopped`
+2. For `status="resume"`, upload any existing preprocessing/cataloging outputs to Airtable
+3. If resume still has a pending Drakkar task, launch only the earliest missing task whose dependencies are satisfied
+4. For `status="ready"` or `"rerun"`, fetch the study's samples and write `{output_dir}/{code}/{code}.tsv` with samples whose status is `"use"`
+5. Write `{output_dir}/{code}/{code}.sh`
+6. Launch the script in a detached `screen` session named `{code}`
+7. Generated scripts update the Study status through `preprocessing`, `preprocessed`, `cataloging`, `cataloged`, `error`, or `stopped`
 
 ## wmw stop
 

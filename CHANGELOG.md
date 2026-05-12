@@ -8,6 +8,30 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.4.0] - 2026-05-12
+
+### Added
+
+- `wmw set-status --workflow cataloging --status cataloged`: now reads
+  `<DRAKKAR_OUTPUT_DIR>/<code>/cataloging.tsv` and uploads assembly cataloging
+  stats to Samples, including focal/all mapping rates rounded to 2 decimals.
+- `wmw set-status --workflow cataloging --status cataloged`: now reads
+  `<DRAKKAR_OUTPUT_DIR>/<code>/cataloging/final/all_bin_metadata.csv` and creates
+  linked Genomes records with bin name, completeness, contamination, length, N50,
+  and contig count.
+- `wmw set-status --workflow cataloging --status cataloged`: now reads
+  `<DRAKKAR_OUTPUT_DIR>/<code>/cataloging/final/all_bin_paths.txt`, compresses
+  matched bin FASTA files to `.fa.gz`, and uploads them to the corresponding
+  Genomes attachment field.
+
+### Changed
+
+- Generated Drakkar launch scripts now pass their output root to `wmw set-status`,
+  so stats uploads still work when `wmw process --output-dir` is used.
+- `wmw process` now treats Studies with status `resume` as pending-task
+  recovery: it first uploads any existing preprocessing/cataloging outputs and
+  fills missing sample stats and Genomes records/files, then launches only the
+  earliest missing Drakkar task whose dependencies are satisfied.
 ## [0.3.12] - 2026-05-10
 
 ### Added

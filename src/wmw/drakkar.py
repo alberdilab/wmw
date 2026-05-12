@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import csv
+import gzip
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -159,6 +162,7 @@ def generate_preprocessing_script(
         cataloging_cmd = f"drakkar cataloging {cataloging_flags}"
 
     stop_file = shlex.quote(str(work_dir / ".wmw-stop"))
+    output_dir_arg = f" --output-dir {shlex.quote(str(work_dir.parent))}"
 
     lines = [
         "#!/usr/bin/env bash",
@@ -179,33 +183,33 @@ def generate_preprocessing_script(
         "_on_exit_preprocessing() {",
         '    if [ "$_WMW_SUCCESS" -ne 1 ]; then',
         '        if [ -f "$_WMW_STOP_FILE" ]; then',
-        f"            {wmw_cmd} set-status --study {code} --workflow preprocessing --status stopped",
+        f"            {wmw_cmd} set-status --study {code} --workflow preprocessing --status stopped{output_dir_arg}",
         "        else",
-        f"            {wmw_cmd} set-status --study {code} --workflow preprocessing --status error",
+        f"            {wmw_cmd} set-status --study {code} --workflow preprocessing --status error{output_dir_arg}",
         "        fi",
         "    fi",
         "}",
         "trap _on_exit_preprocessing EXIT",
         "",
-        f"{wmw_cmd} set-status --study {code} --workflow preprocessing --status preprocessing",
+        f"{wmw_cmd} set-status --study {code} --workflow preprocessing --status preprocessing{output_dir_arg}",
         drakkar_cmd,
-        f"{wmw_cmd} set-status --study {code} --workflow preprocessing --status preprocessed",
+        f"{wmw_cmd} set-status --study {code} --workflow preprocessing --status preprocessed{output_dir_arg}",
         "_WMW_SUCCESS=1",
         "",
         "_WMW_SUCCESS=0",
         "_on_exit_cataloging() {",
         '    if [ "$_WMW_SUCCESS" -ne 1 ]; then',
         '        if [ -f "$_WMW_STOP_FILE" ]; then',
-        f"            {wmw_cmd} set-status --study {code} --workflow cataloging --status stopped",
+        f"            {wmw_cmd} set-status --study {code} --workflow cataloging --status stopped{output_dir_arg}",
         "        else",
-        f"            {wmw_cmd} set-status --study {code} --workflow cataloging --status error",
+        f"            {wmw_cmd} set-status --study {code} --workflow cataloging --status error{output_dir_arg}",
         "        fi",
         "    fi",
         "}",
         "trap _on_exit_cataloging EXIT",
-        f"{wmw_cmd} set-status --study {code} --workflow cataloging --status cataloging",
+        f"{wmw_cmd} set-status --study {code} --workflow cataloging --status cataloging{output_dir_arg}",
         cataloging_cmd,
-        f"{wmw_cmd} set-status --study {code} --workflow cataloging --status cataloged",
+        f"{wmw_cmd} set-status --study {code} --workflow cataloging --status cataloged{output_dir_arg}",
         "_WMW_SUCCESS=1",
         "",
     ]
@@ -246,6 +250,7 @@ def generate_cataloging_script(
         wmw_cmd = "wmw"
 
     stop_file = shlex.quote(str(work_dir / ".wmw-stop"))
+    output_dir_arg = f" --output-dir {shlex.quote(str(work_dir.parent))}"
 
     lines = [
         "#!/usr/bin/env bash",
@@ -266,17 +271,17 @@ def generate_cataloging_script(
         "_on_exit() {",
         '    if [ "$_WMW_SUCCESS" -ne 1 ]; then',
         '        if [ -f "$_WMW_STOP_FILE" ]; then',
-        f"            {wmw_cmd} set-status --study {code} --workflow cataloging --status stopped",
+        f"            {wmw_cmd} set-status --study {code} --workflow cataloging --status stopped{output_dir_arg}",
         "        else",
-        f"            {wmw_cmd} set-status --study {code} --workflow cataloging --status error",
+        f"            {wmw_cmd} set-status --study {code} --workflow cataloging --status error{output_dir_arg}",
         "        fi",
         "    fi",
         "}",
         "trap _on_exit EXIT",
         "",
-        f"{wmw_cmd} set-status --study {code} --workflow cataloging --status cataloging",
+        f"{wmw_cmd} set-status --study {code} --workflow cataloging --status cataloging{output_dir_arg}",
         cataloging_cmd,
-        f"{wmw_cmd} set-status --study {code} --workflow cataloging --status cataloged",
+        f"{wmw_cmd} set-status --study {code} --workflow cataloging --status cataloged{output_dir_arg}",
         "_WMW_SUCCESS=1",
         "",
     ]
@@ -357,6 +362,59 @@ _PREPROCESSING_TSV_COLS: list[tuple[str, str, str]] = [
 ]
 
 
+_CATALOGING_TSV_COLS: list[tuple[str, tuple[str, ...], str]] = [
+    # (tsv_column,              config_key(s),                              type)
+    ("assembly_contigs",        ("SAMPLES_COL_ASSEMBLY_CONTIGS",),          "int"),
+    ("assembly_total_length",   ("SAMPLES_COL_ASSEMBLY_LENGTH",),           "int"),
+    ("assembly_largest_contig", ("SAMPLES_COL_ASSEMBLY_LARGEST_CONTIG",),   "int"),
+    ("assembly_N50",            ("SAMPLES_COL_ASSEMBLY_N50",),              "int"),
+    (
+        "assembly_L50",
+        ("SAMPLES_COL_ASSEMBLY_L50", "SAMPLES_COL_ASSEMBLTY_L50"),
+        "int",
+    ),
+    ("assembly_gc_percent",     ("SAMPLES_COL_ASSEMBLY_GC",),               "float2"),
+    ("mapping_rate_percent",    ("SAMPLES_COL_ASSEMBLY_MAPPING_RATE_ALL",), "float2"),
+]
+
+_BIN_METADATA_CSV_COLS: list[tuple[str, str, str]] = [
+    # (csv_column,     config_key,                   type)
+    ("completeness",  "GENOMES_COL_COMPLETENESS",   "float2"),
+    ("contamination", "GENOMES_COL_CONTAMINATION",  "float2"),
+    ("size",          "GENOMES_COL_LENGTH",         "int"),
+    ("N50",           "GENOMES_COL_N50",            "int"),
+    ("contig_count",  "GENOMES_COL_CONTIGS",        "int"),
+]
+
+_MISSING_VALUES = {"", "NA", "N/A", "NONE", "NULL", "NAN"}
+
+
+def _is_missing(raw: str) -> bool:
+    return raw.strip().upper() in _MISSING_VALUES
+
+
+def _coerce_stat(raw: str, typ: str) -> Any | None:
+    raw = raw.strip()
+    if _is_missing(raw):
+        return None
+    try:
+        if typ == "int":
+            return int(float(raw))
+        if typ == "float2":
+            return round(float(raw), 2)
+        return round(float(raw), 4)
+    except ValueError:
+        return None
+
+
+def _config_field_id(*keys: str) -> str:
+    for key in keys:
+        fid = str(cfg.get(key) or "").strip()
+        if fid:
+            return fid
+    return ""
+
+
 def parse_preprocessing_tsv(tsv_path: Path) -> dict[str, dict[str, Any]]:
     """Parse drakkar's preprocessing.tsv; return {run_accession: {field_id: value}}.
 
@@ -385,19 +443,202 @@ def parse_preprocessing_tsv(tsv_path: Path) -> dict[str, dict[str, Any]]:
             fields: dict[str, Any] = {}
             for tsv_col, fid, typ in col_map:
                 raw = row_dict.get(tsv_col, "").strip()
-                if not raw:
+                value = _coerce_stat(raw, typ)
+                if value is None:
                     continue
-                try:
-                    if typ == "int":
-                        fields[fid] = int(float(raw))
-                    elif typ == "float2":
-                        fields[fid] = round(float(raw), 2)
-                    else:  # float4
-                        fields[fid] = round(float(raw), 4)
-                except ValueError:
-                    pass
+                fields[fid] = value
             if fields:
                 result[sample_id] = fields
+    return result
+
+
+def _parse_sample_mapping_rates(raw: str) -> dict[str, float]:
+    rates: dict[str, float] = {}
+    for part in raw.split(";"):
+        if ":" not in part:
+            continue
+        sample, value_raw = part.split(":", 1)
+        sample = sample.strip()
+        value = _coerce_stat(value_raw, "float2")
+        if sample and value is not None:
+            rates[sample] = value
+    return rates
+
+
+def parse_cataloging_tsv(tsv_path: Path) -> dict[str, dict[str, Any]]:
+    """Parse drakkar's cataloging.tsv; return {sample_code: {field_id: value}}.
+
+    Assembly rows are keyed by the ``assembly`` column, which matches the wmw
+    sample code for focal assemblies. The focal mapping rate is extracted from
+    ``sample_mapping_rates`` by selecting the entry whose sample name equals the
+    assembly name.
+    """
+    if not tsv_path.exists():
+        return {}
+
+    col_map: list[tuple[str, str, str]] = []
+    for tsv_col, config_keys, typ in _CATALOGING_TSV_COLS:
+        fid = _config_field_id(*config_keys)
+        if fid:
+            col_map.append((tsv_col, fid, typ))
+
+    focal_mapping_fid = _config_field_id("SAMPLES_COL_ASSEMBLY_MAPPING_RATE_FOCAL")
+
+    result: dict[str, dict[str, Any]] = {}
+    with tsv_path.open(encoding="utf-8", newline="") as fh:
+        reader = csv.DictReader(fh, delimiter="\t")
+        for row_dict in reader:
+            assembly = (row_dict.get("assembly") or "").strip()
+            if not assembly:
+                continue
+
+            fields: dict[str, Any] = {}
+            for tsv_col, fid, typ in col_map:
+                value = _coerce_stat(row_dict.get(tsv_col, ""), typ)
+                if value is not None:
+                    fields[fid] = value
+
+            if focal_mapping_fid:
+                rates = _parse_sample_mapping_rates(row_dict.get("sample_mapping_rates", ""))
+                focal_mapping_rate = rates.get(assembly)
+                if focal_mapping_rate is not None:
+                    fields[focal_mapping_fid] = focal_mapping_rate
+
+            if fields:
+                result[assembly] = fields
+    return result
+
+
+def _strip_fasta_suffix(raw: str) -> str:
+    name = Path(raw.strip()).name
+    lower = name.lower()
+    for suffix in (".fasta.gz", ".fna.gz", ".fa.gz", ".fasta", ".fna", ".fa"):
+        if lower.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
+
+
+def _resolve_bin_path(raw: str, paths_file: Path) -> Path:
+    path = Path(raw).expanduser()
+    if path.is_absolute():
+        return path
+
+    candidates: list[Path] = []
+    if len(paths_file.parents) >= 3:
+        candidates.append(paths_file.parents[2] / path)
+    candidates.append(paths_file.parent / path)
+    candidates.append(paths_file.parent.parent / path)
+
+    seen: set[str] = set()
+    unique_candidates: list[Path] = []
+    for candidate in candidates:
+        key = str(candidate)
+        if key not in seen:
+            seen.add(key)
+            unique_candidates.append(candidate)
+
+    for candidate in unique_candidates:
+        if candidate.exists():
+            return candidate
+    return unique_candidates[0] if unique_candidates else path
+
+
+def parse_bin_paths_txt(paths_file: Path) -> dict[str, Path]:
+    """Parse drakkar's all_bin_paths.txt into {genome_name: fasta_path}.
+
+    Drakkar writes paths relative to the study work directory in current output
+    (for example ``cataloging/final/SA000022/SA000022_bin_1.fa``). This parser
+    also accepts absolute paths and paths relative to the ``final`` directory.
+    """
+    if not paths_file.exists():
+        return {}
+
+    result: dict[str, Path] = {}
+    with paths_file.open(encoding="utf-8") as fh:
+        for line in fh:
+            raw = line.strip()
+            if not raw:
+                continue
+            path = _resolve_bin_path(raw, paths_file)
+            genome_name = _strip_fasta_suffix(path.name)
+            if genome_name:
+                if genome_name not in result or (
+                    not result[genome_name].exists() and path.exists()
+                ):
+                    result[genome_name] = path
+    return result
+
+
+def gzip_fasta(fasta_path: Path) -> Path:
+    """Compress a FASTA file beside the source and return the .fa.gz path."""
+    fasta_path = Path(fasta_path)
+    lower = fasta_path.name.lower()
+    if lower.endswith(".gz"):
+        return fasta_path
+    if lower.endswith((".fa", ".fasta", ".fna")):
+        gz_path = fasta_path.with_suffix(".fa.gz")
+    else:
+        gz_path = fasta_path.with_name(f"{fasta_path.name}.fa.gz")
+
+    if gz_path.exists() and gz_path.stat().st_size > 0:
+        try:
+            if gz_path.stat().st_mtime >= fasta_path.stat().st_mtime:
+                return gz_path
+        except FileNotFoundError:
+            raise
+
+    with fasta_path.open("rb") as src, gzip.open(gz_path, "wb") as dst:
+        shutil.copyfileobj(src, dst)
+    return gz_path
+
+
+def parse_bin_metadata_csv(csv_path: Path) -> list[dict[str, Any]]:
+    """Parse drakkar's all_bin_metadata.csv into genome records.
+
+    Returns a list of ``{"sample_code": code, "fields": {field_id: value}}``.
+    The caller is responsible for resolving ``sample_code`` to an Airtable
+    sample record ID and adding the linked-record field before creating rows.
+    """
+    if not csv_path.exists():
+        return []
+
+    name_fid = _config_field_id("GENOMES_COL_NAME")
+    col_map: list[tuple[str, str, str]] = []
+    for csv_col, config_key, typ in _BIN_METADATA_CSV_COLS:
+        fid = _config_field_id(config_key)
+        if fid:
+            col_map.append((csv_col, fid, typ))
+
+    result: list[dict[str, Any]] = []
+    with csv_path.open(encoding="utf-8", newline="") as fh:
+        reader = csv.DictReader(fh)
+        for row_dict in reader:
+            genome_raw = (row_dict.get("genome") or "").strip()
+            if not genome_raw:
+                continue
+
+            genome_name = _strip_fasta_suffix(genome_raw)
+            sample_code = genome_name.split("_", 1)[0].strip()
+            if not sample_code:
+                continue
+
+            fields: dict[str, Any] = {}
+            if name_fid:
+                fields[name_fid] = genome_name
+
+            for csv_col, fid, typ in col_map:
+                value = _coerce_stat(row_dict.get(csv_col, ""), typ)
+                if value is not None:
+                    fields[fid] = value
+
+            if fields:
+                result.append(
+                    {
+                        "sample_code": sample_code,
+                        "genome_name": genome_name,
+                        "fields": fields,
+                    }
+                )
     return result
 
 

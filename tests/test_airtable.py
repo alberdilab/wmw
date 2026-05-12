@@ -152,6 +152,29 @@ def test_set_study_status(mock_client):
     assert {u["id"] for u in updates} == {"rec1", "rec2"}
 
 
+def test_upload_study_file_uses_configured_field_id(mock_client, tmp_path):
+    mock_table = MagicMock()
+    mock_client._studies_fm = {"file_preprocessing": "fldPRE"}
+    mock_client._api_fid = MagicMock()
+    mock_client._api_fid.table.return_value = mock_table
+    tsv_path = tmp_path / "preprocessing.tsv"
+    tsv_path.write_text("sample\treads_pre_fastp\nSA000001\t10\n", encoding="utf-8")
+
+    mock_client.upload_study_file(
+        "Studies",
+        "recStudy",
+        "file_preprocessing",
+        tsv_path,
+    )
+
+    mock_table.upload_attachment.assert_called_once_with(
+        "recStudy",
+        "fldPRE",
+        tsv_path,
+        content_type="text/tab-separated-values",
+    )
+
+
 def test_link_studies_to_species(mock_client):
     studies_table_mock = MagicMock()
     studies_table_mock.all.return_value = [
@@ -235,6 +258,136 @@ def test_fetch_samples_for_study_no_status_filter(mock_client):
     call_kwargs = mock_table.all.call_args[1]
     assert "ready" not in call_kwargs["formula"]
     assert "PRJEB001" in call_kwargs["formula"]
+
+
+def test_update_sample_cataloging_stats_updates_matching_codes(mock_client):
+    mock_table = MagicMock()
+    mock_table.all.return_value = [
+        _make_record("recS1", {"code": "SA000004"}),
+    ]
+    mock_client._api.table.return_value = mock_table
+
+    n = mock_client.update_sample_cataloging_stats(
+        "Samples",
+        {
+            "SA000004": {"fldGC": 41.69},
+            "SA000005": {"fldGC": 38.15},
+        },
+    )
+
+    assert n == 1
+    mock_table.batch_update.assert_called_once()
+    updates = mock_table.batch_update.call_args[0][0]
+    assert updates == [{"id": "recS1", "fields": {"fldGC": 41.69}}]
+
+
+def test_fetch_sample_record_ids_by_code(mock_client):
+    mock_table = MagicMock()
+    mock_table.all.return_value = [
+        _make_record("recS1", {"code": "SA000022", "record_id": "recFormula1"}),
+        _make_record("recS2", {"code": "SA000023"}),
+    ]
+    mock_client._api.table.return_value = mock_table
+
+    result = mock_client.fetch_sample_record_ids_by_code(
+        "Samples",
+        ["SA000022", "SA000023"],
+    )
+
+    assert result == {"SA000022": "recFormula1", "SA000023": "recS2"}
+    call_kwargs = mock_table.all.call_args[1]
+    assert "SA000022" in call_kwargs["formula"]
+    assert "SA000023" in call_kwargs["formula"]
+
+
+def test_create_genome_records_uses_field_id_table(mock_client):
+    mock_table = MagicMock()
+    mock_table.batch_create.return_value = [
+        {"id": "recGenome1", "fields": {"fldNAME": "SA000022_bin_339957"}}
+    ]
+    mock_client._api_fid = MagicMock()
+    mock_client._api_fid.table.return_value = mock_table
+
+    n = mock_client.create_genome_records(
+        "Genomes",
+        [{"fldNAME": "SA000022_bin_339957", "fldLINK": ["recS1"]}],
+    )
+
+    assert n == 1
+    mock_client._api_fid.table.assert_called_once_with("appFAKEBASE", "Genomes")
+    mock_table.batch_create.assert_called_once_with(
+        [{"fldNAME": "SA000022_bin_339957", "fldLINK": ["recS1"]}]
+    )
+
+
+def test_create_genome_records_with_response_returns_created_rows(mock_client):
+    mock_table = MagicMock()
+    created = [{"id": "recGenome1", "fields": {"fldNAME": "SA000022_bin_339957"}}]
+    mock_table.batch_create.return_value = created
+    mock_client._api_fid = MagicMock()
+    mock_client._api_fid.table.return_value = mock_table
+
+    result = mock_client.create_genome_records_with_response(
+        "Genomes",
+        [{"fldNAME": "SA000022_bin_339957"}],
+    )
+
+    assert result == created
+
+
+def test_fetch_genome_records_by_name(mock_client):
+    mock_table = MagicMock()
+    mock_table.all.return_value = [
+        _make_record("recGenome1", {"fldNAME": "SA000022_bin_339957"}),
+    ]
+    mock_client._api_fid = MagicMock()
+    mock_client._api_fid.table.return_value = mock_table
+
+    result = mock_client.fetch_genome_records_by_name(
+        "Genomes",
+        ["SA000022_bin_339957", "SA000023_bin_123"],
+        "fldNAME",
+    )
+
+    assert result["SA000022_bin_339957"]["id"] == "recGenome1"
+    call_kwargs = mock_table.all.call_args[1]
+    assert "SA000022_bin_339957" in call_kwargs["formula"]
+    assert "SA000023_bin_123" in call_kwargs["formula"]
+
+
+def test_update_genome_records_uses_field_id_table(mock_client):
+    mock_table = MagicMock()
+    mock_client._api_fid = MagicMock()
+    mock_client._api_fid.table.return_value = mock_table
+    updates = [{"id": "recGenome1", "fields": {"fldNAME": "SA000022_bin_339957"}}]
+
+    n = mock_client.update_genome_records("Genomes", updates)
+
+    assert n == 1
+    mock_client._api_fid.table.assert_called_once_with("appFAKEBASE", "Genomes")
+    mock_table.batch_update.assert_called_once_with(updates)
+
+
+def test_upload_genome_file_uses_field_id_table(mock_client, tmp_path):
+    mock_table = MagicMock()
+    mock_client._api_fid = MagicMock()
+    mock_client._api_fid.table.return_value = mock_table
+    gz_path = tmp_path / "SA000022_bin_339957.fa.gz"
+    gz_path.write_bytes(b"gzip")
+
+    mock_client.upload_genome_file(
+        "Genomes",
+        "recGenome",
+        "fldGenomeFile",
+        gz_path,
+    )
+
+    mock_table.upload_attachment.assert_called_once_with(
+        "recGenome",
+        "fldGenomeFile",
+        gz_path,
+        content_type="application/gzip",
+    )
 
 
 def test_link_studies_to_species_no_new_links(mock_client):

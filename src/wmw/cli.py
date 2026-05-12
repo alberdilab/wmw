@@ -9,6 +9,7 @@ import sys
 from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 try:
     from rich_argparse import RawDescriptionRichHelpFormatter as _RichFmt
@@ -785,11 +786,27 @@ def _print_scan_summary(
 # wmw process
 # ---------------------------------------------------------------------------
 
+def _write_and_maybe_launch_script(code: str, script_path: Path, script: str) -> None:
+    script_path.write_text(script, encoding="utf-8")
+    script_path.chmod(0o755)
+    out.info(f"  Launch script: {script_path}")
+
+    import shutil
+    import subprocess as sp
+
+    if shutil.which("screen") is None:
+        out.warn(f"  'screen' not found — script written but not launched.")
+    else:
+        sp.run(["screen", "-dmS", code, "bash", str(script_path)], check=True)
+        out.success(f"  Screen session '{code}' started.")
+
+
 def cmd_process(args: argparse.Namespace) -> int:
     from wmw import drakkar
 
     studies_table = _conf(args, "studies_table", "STUDIES_TABLE") or "Studies"
     samples_table = _conf(args, "samples_table", "SAMPLES_TABLE") or "Samples"
+    genomes_table = _conf(args, "genomes_table", "GENOMES_TABLE")
     output_dir_str = _conf(args, "output_dir", "DRAKKAR_OUTPUT_DIR", required=True)
     output_dir = Path(output_dir_str).expanduser().resolve()
     batch_filter = (args.batch or "").strip()
@@ -824,6 +841,7 @@ def cmd_process(args: argparse.Namespace) -> int:
     out.success(f"{_pl(len(actionable_studies), 'study', 'studies')} to process.")
 
     n_generated = 0
+    n_finalized = 0
     for study in actionable_studies:
         fields = study["fields"]
         code = fields.get("code", "")
@@ -834,6 +852,83 @@ def cmd_process(args: argparse.Namespace) -> int:
             continue
 
         work_dir = output_dir / code
+
+        if study_status == "resume":
+            out.info(f"{code}: status 'resume' — resolving pending Drakkar and Airtable tasks.")
+            preprocessing_tsv = work_dir / "preprocessing.tsv"
+            cataloging_tsv = work_dir / "cataloging.tsv"
+            bin_metadata_path = work_dir / "cataloging" / "final" / "all_bin_metadata.csv"
+            has_preprocessing = preprocessing_tsv.exists()
+            has_cataloging = cataloging_tsv.exists() or bin_metadata_path.exists()
+
+            finalized_this_study = False
+            if has_preprocessing:
+                finalized_this_study = _finalize_preprocessing_outputs(
+                    client,
+                    studies_table,
+                    samples_table,
+                    study,
+                    output_dir,
+                    set_status=True,
+                    skip_existing_attachments=True,
+                    prefix=code,
+                ) or finalized_this_study
+            if has_cataloging:
+                finalized_this_study = _finalize_cataloging_outputs(
+                    client,
+                    studies_table,
+                    samples_table,
+                    genomes_table,
+                    study,
+                    output_dir,
+                    set_status=True,
+                    skip_existing_attachments=True,
+                    prefix=code,
+                ) or finalized_this_study
+            if finalized_this_study:
+                n_finalized += 1
+
+            if has_cataloging:
+                continue
+
+            samples = client.fetch_samples_for_study(samples_table, study_accession)
+            use_samples = [r for r in samples if r.get("fields", r).get("status") == "use"]
+            if not use_samples:
+                out.warn(f"{code}: no samples with status 'use' — cannot launch pending Drakkar task.")
+                continue
+
+            out.info(f"{code}: {_pl(len(use_samples), 'sample')} with status 'use' available for resume.")
+            work_dir.mkdir(parents=True, exist_ok=True)
+            input_tsv = work_dir / f"{code}.tsv"
+            drakkar.build_input_tsv(samples, input_tsv)
+            out.info(f"  Input TSV:     {input_tsv}")
+
+            script_path = work_dir / f"{code}.sh"
+            if has_preprocessing:
+                out.info(f"{code}: preprocessing output exists; launching pending cataloging task.")
+                script = drakkar.generate_cataloging_script(
+                    code=code,
+                    tsv_path=input_tsv,
+                    work_dir=work_dir,
+                    conda_env=conda_env,
+                    slurm=slurm,
+                    wmw_conda_env=wmw_conda_env,
+                )
+            else:
+                out.info(f"{code}: preprocessing output is missing; launching preprocessing followed by cataloging.")
+                script = drakkar.generate_preprocessing_script(
+                    code=code,
+                    tsv_path=input_tsv,
+                    work_dir=work_dir,
+                    conda_env=conda_env,
+                    slurm=slurm,
+                    wmw_conda_env=wmw_conda_env,
+                    memory_multiplier=fields.get("memory_boost") or None,
+                    time_multiplier=fields.get("time_boost") or None,
+                )
+            _write_and_maybe_launch_script(code, script_path, script)
+            n_generated += 1
+            continue
 
         if study_status == "rerun":
             if work_dir.exists():
@@ -849,51 +944,6 @@ def cmd_process(args: argparse.Namespace) -> int:
         out.info(f"{code}: {_pl(len(use_samples), 'sample')} with status 'use' to process.")
 
         work_dir.mkdir(parents=True, exist_ok=True)
-
-        # Resume shortcut: if preprocessing output already exists, finalise stats
-        # and continue with the next missing step (cataloging) rather than relaunching
-        # Drakkar from scratch.
-        if study_status == "resume" and workflow == "preprocessing":
-            preprocessing_tsv = work_dir / "preprocessing.tsv"
-            if preprocessing_tsv.exists():
-                out.info(f"{code}: preprocessing.tsv found — finalising preprocessing and launching cataloging.")
-                client.set_study_status(studies_table, [study["id"]], "preprocessed")
-                out.success(f"{code}: study status → 'preprocessed'.")
-                stats = drakkar.parse_preprocessing_tsv(preprocessing_tsv)
-                if not stats:
-                    out.warn(f"{code}: preprocessing.tsv empty or unparseable — stats not uploaded.")
-                else:
-                    n = client.update_sample_preprocessing_stats(samples_table, stats)
-                    if n:
-                        out.success(f"{code}: uploaded preprocessing stats for {_pl(n, 'sample')}.")
-                    else:
-                        out.warn(
-                            f"{code}: preprocessing.tsv parsed ({len(stats)} sample(s)) but no matching "
-                            f"Airtable records found — stats not uploaded. "
-                            f"Check that the sample 'code' field values match the TSV."
-                        )
-                input_tsv = work_dir / f"{code}.tsv"
-                drakkar.build_input_tsv(samples, input_tsv)
-                script_path = work_dir / f"{code}.sh"
-                script = drakkar.generate_cataloging_script(
-                    code=code,
-                    tsv_path=input_tsv,
-                    work_dir=work_dir,
-                    conda_env=conda_env,
-                    slurm=slurm,
-                    wmw_conda_env=wmw_conda_env,
-                )
-                script_path.write_text(script, encoding="utf-8")
-                script_path.chmod(0o755)
-                out.info(f"  Launch script: {script_path}")
-                if shutil.which("screen") is None:
-                    out.warn(f"  'screen' not found — script written but not launched.")
-                else:
-                    import subprocess as sp
-                    sp.run(["screen", "-dmS", code, "bash", str(script_path)], check=True)
-                    out.success(f"  Screen session '{code}' started.")
-                n_generated += 1
-                continue
 
         input_tsv = work_dir / f"{code}.tsv"
         drakkar.build_input_tsv(samples, input_tsv)
@@ -915,20 +965,15 @@ def cmd_process(args: argparse.Namespace) -> int:
             _die(f"Workflow {workflow!r} script generation is not yet implemented.")
             return 1
 
-        script_path.write_text(script, encoding="utf-8")
-        script_path.chmod(0o755)
-        out.info(f"  Launch script: {script_path}")
-
-        import subprocess as sp
-        if shutil.which("screen") is None:
-            out.warn(f"  'screen' not found — script written but not launched.")
-        else:
-            sp.run(["screen", "-dmS", code, "bash", str(script_path)], check=True)
-            out.success(f"  Screen session '{code}' started.")
-
+        _write_and_maybe_launch_script(code, script_path, script)
         n_generated += 1
 
-    out.success(f"Generated scripts for {_pl(n_generated, 'study', 'studies')}.")
+    if n_generated:
+        out.success(f"Generated scripts for {_pl(n_generated, 'study', 'studies')}.")
+    if n_finalized:
+        out.success(f"Finalised Airtable outputs for {_pl(n_finalized, 'resume study', 'resume studies')}.")
+    if not n_generated and not n_finalized:
+        out.info("No scripts generated and no existing outputs finalised.")
     return 0
 
 
@@ -1173,9 +1218,366 @@ _PROCESS_STATUS_MAP: dict[tuple[str, str], str] = {
 }
 
 
+def _upload_study_tsv_attachment(
+    client: Any,
+    studies_table: str,
+    record_id: str,
+    field_name: str,
+    tsv_path: Path,
+    prefix: str = "",
+    study_fields: dict[str, Any] | None = None,
+    skip_existing: bool = False,
+) -> bool:
+    label = f"{prefix}: " if prefix else ""
+    if skip_existing and study_fields and study_fields.get(field_name):
+        out.info(f"{label}{tsv_path.name} is already attached — skipping upload.")
+        return False
+    try:
+        client.upload_study_file(studies_table, record_id, field_name, tsv_path)
+    except Exception as exc:
+        out.warn(
+            f"{label}{tsv_path.name} found at {tsv_path} but could not be uploaded "
+            f"to the study file field: {exc}"
+        )
+        return False
+    else:
+        out.success(f"{label}uploaded {tsv_path.name} to the study file field.")
+        return True
+
+
+def _created_genome_record_ids(
+    created_records: list[dict[str, Any]],
+    created_genomes: list[dict[str, Any]],
+    name_fid: str,
+) -> dict[str, str]:
+    record_ids: dict[str, str] = {}
+    for idx, record in enumerate(created_records):
+        record_id = str(record.get("id") or "").strip()
+        if not record_id:
+            continue
+        fields = record.get("fields", {}) or {}
+        genome_name = str(fields.get(name_fid) or "").strip() if name_fid else ""
+        if not genome_name and idx < len(created_genomes):
+            genome_name = str(created_genomes[idx].get("genome_name") or "").strip()
+        if genome_name:
+            record_ids[genome_name] = record_id
+    return record_ids
+
+
+def _upload_genome_bin_attachments(
+    client: Any,
+    genomes_table: str,
+    genome_record_ids: dict[str, str],
+    bin_paths: dict[str, Path],
+    existing_records_by_name: dict[str, dict[str, Any]] | None = None,
+) -> int:
+    file_fid = str(cfg.get("GENOMES_COL_FILE_GENOME") or "").strip()
+    if not file_fid:
+        out.warn("GENOMES_COL_FILE_GENOME is not configured — genome files not uploaded.")
+        return 0
+
+    from wmw import drakkar
+
+    uploaded = 0
+    skipped_existing = 0
+    missing: list[str] = []
+    failed: list[str] = []
+    for genome_name, record_id in genome_record_ids.items():
+        existing_fields = (
+            (existing_records_by_name or {}).get(genome_name, {}).get("fields", {})
+        )
+        if existing_fields.get(file_fid):
+            skipped_existing += 1
+            continue
+        fasta_path = bin_paths.get(genome_name)
+        if not fasta_path or not fasta_path.exists():
+            missing.append(genome_name)
+            continue
+        try:
+            gz_path = drakkar.gzip_fasta(fasta_path)
+            client.upload_genome_file(genomes_table, record_id, file_fid, gz_path)
+        except Exception as exc:
+            failed.append(f"{genome_name} ({exc})")
+        else:
+            uploaded += 1
+
+    if uploaded:
+        out.success(f"Uploaded compressed genome FASTA files for {_pl(uploaded, 'genome')}.")
+    if skipped_existing:
+        out.info(f"Skipped {_pl(skipped_existing, 'genome FASTA')} already attached in Airtable.")
+    if missing:
+        preview = ", ".join(missing[:10])
+        suffix = "…" if len(missing) > 10 else "."
+        out.warn(f"No bin FASTA path found for {_pl(len(missing), 'genome')}: {preview}{suffix}")
+    if failed:
+        preview = "; ".join(failed[:5])
+        suffix = "…" if len(failed) > 5 else "."
+        out.warn(f"Could not upload genome FASTA files for {_pl(len(failed), 'genome')}: {preview}{suffix}")
+    return uploaded
+
+
+def _finalize_preprocessing_outputs(
+    client: Any,
+    studies_table: str,
+    samples_table: str,
+    study_record: dict[str, Any],
+    output_root: Path,
+    *,
+    set_status: bool = False,
+    skip_existing_attachments: bool = False,
+    prefix: str = "",
+) -> bool:
+    """Upload preprocessing.tsv and sample preprocessing stats when present."""
+    from wmw import drakkar
+
+    fields = study_record.get("fields", {}) or {}
+    study_code = str(fields.get("code", "") or "").strip()
+    tsv_path = output_root / study_code / "preprocessing.tsv"
+    label = f"{prefix}: " if prefix else ""
+    if not tsv_path.exists():
+        out.warn(f"{label}preprocessing.tsv not found at {tsv_path} — file and stats not uploaded.")
+        return False
+
+    if set_status:
+        client.set_study_status(studies_table, [study_record["id"]], "preprocessed")
+        out.success(f"{label}study status → 'preprocessed'.")
+
+    _upload_study_tsv_attachment(
+        client,
+        studies_table,
+        study_record["id"],
+        "file_preprocessing",
+        tsv_path,
+        prefix=prefix,
+        study_fields=fields,
+        skip_existing=skip_existing_attachments,
+    )
+    stats = drakkar.parse_preprocessing_tsv(tsv_path)
+    if not stats:
+        out.warn(f"{label}preprocessing.tsv at {tsv_path} could not be parsed — stats not uploaded.")
+    else:
+        n = client.update_sample_preprocessing_stats(samples_table, stats)
+        if n:
+            out.success(f"{label}uploaded preprocessing stats for {_pl(n, 'sample')}.")
+        else:
+            out.warn(
+                f"{label}preprocessing.tsv parsed ({len(stats)} sample(s)) but no matching "
+                f"Airtable records found — stats not uploaded. "
+                f"Check that the sample 'code' field values match the TSV."
+            )
+    return True
+
+
+def _populate_genome_records_from_outputs(
+    client: Any,
+    samples_table: str,
+    genomes_table: str,
+    bin_metadata_path: Path,
+    bin_paths_path: Path,
+    *,
+    prefix: str = "",
+) -> bool:
+    """Create/update Genomes rows and upload bin FASTA attachments from cataloging output."""
+    from wmw import drakkar
+
+    label = f"{prefix}: " if prefix else ""
+    if not genomes_table:
+        out.warn(f"{label}GENOMES_TABLE is not configured — genome metadata not uploaded.")
+        return False
+    if not bin_metadata_path.exists():
+        out.warn(
+            f"{label}all_bin_metadata.csv not found at {bin_metadata_path} — "
+            f"genome metadata not uploaded."
+        )
+        return False
+
+    genomes = drakkar.parse_bin_metadata_csv(bin_metadata_path)
+    if not genomes:
+        out.warn(
+            f"{label}all_bin_metadata.csv at {bin_metadata_path} could not be parsed — "
+            f"genome metadata not uploaded."
+        )
+        return True
+
+    name_fid = str(cfg.get("GENOMES_COL_NAME") or "").strip()
+    sample_link_fid = str(cfg.get("GENOMES_COL_SAMPLE_ID") or "").strip()
+    code_fid = str(cfg.get("GENOMES_COL_CODE") or "").strip()
+    if not name_fid:
+        out.warn(f"{label}GENOMES_COL_NAME is not configured — genome metadata not uploaded.")
+        return True
+    if not sample_link_fid:
+        out.warn(
+            f"{label}GENOMES_COL_SAMPLE_ID is not configured — "
+            f"genome metadata not uploaded."
+        )
+        return True
+
+    sample_codes = {str(g.get("sample_code", "")) for g in genomes}
+    sample_ids = client.fetch_sample_record_ids_by_code(samples_table, sample_codes)
+    genome_names = [str(g.get("genome_name", "") or "").strip() for g in genomes]
+    existing_records = client.fetch_genome_records_by_name(
+        genomes_table,
+        genome_names,
+        name_fid,
+    )
+
+    records_to_create: list[dict[str, Any]] = []
+    genomes_to_create: list[dict[str, Any]] = []
+    records_to_update: list[dict[str, Any]] = []
+    genome_record_ids: dict[str, str] = {}
+    missing_sample_codes: set[str] = set()
+    missing_genomes = 0
+
+    for genome in genomes:
+        sample_code = str(genome.get("sample_code", "") or "").strip()
+        genome_name = str(genome.get("genome_name", "") or "").strip()
+        sample_record_id = sample_ids.get(sample_code)
+        if not sample_record_id:
+            missing_sample_codes.add(sample_code)
+            missing_genomes += 1
+            continue
+
+        fields = dict(genome.get("fields", {}) or {})
+        fields[sample_link_fid] = [sample_record_id]
+        if code_fid and genome_name:
+            fields.setdefault(code_fid, genome_name)
+
+        existing = existing_records.get(genome_name)
+        if existing:
+            record_id = str(existing.get("id") or "").strip()
+            if record_id:
+                records_to_update.append({"id": record_id, "fields": fields})
+                genome_record_ids[genome_name] = record_id
+            continue
+
+        records_to_create.append(fields)
+        genomes_to_create.append(genome)
+
+    updated = client.update_genome_records(genomes_table, records_to_update)
+    if updated:
+        out.success(f"{label}updated existing genome metadata for {_pl(updated, 'genome')}.")
+
+    created_records: list[dict[str, Any]] = []
+    if records_to_create:
+        created_records = client.create_genome_records_with_response(
+            genomes_table,
+            records_to_create,
+        )
+    if created_records:
+        out.success(
+            f"{label}created genome metadata records for "
+            f"{_pl(len(created_records), 'genome')}."
+        )
+        genome_record_ids.update(
+            _created_genome_record_ids(created_records, genomes_to_create, name_fid)
+        )
+
+    if missing_sample_codes:
+        out.warn(
+            f"{label}skipped {_pl(missing_genomes, 'genome')} with no matching sample code: "
+            f"{', '.join(sorted(missing_sample_codes))}."
+        )
+
+    if not bin_paths_path.exists():
+        out.warn(
+            f"{label}all_bin_paths.txt not found at {bin_paths_path} — "
+            f"genome files not uploaded."
+        )
+        return True
+
+    bin_paths = drakkar.parse_bin_paths_txt(bin_paths_path)
+    if not bin_paths:
+        out.warn(
+            f"{label}all_bin_paths.txt at {bin_paths_path} could not be parsed — "
+            f"genome files not uploaded."
+        )
+    elif not genome_record_ids:
+        out.warn(
+            f"{label}genome records could not be matched by name — "
+            f"genome files not uploaded."
+        )
+    else:
+        _upload_genome_bin_attachments(
+            client,
+            genomes_table,
+            genome_record_ids,
+            bin_paths,
+            existing_records_by_name=existing_records,
+        )
+
+    return True
+
+
+def _finalize_cataloging_outputs(
+    client: Any,
+    studies_table: str,
+    samples_table: str,
+    genomes_table: str,
+    study_record: dict[str, Any],
+    output_root: Path,
+    *,
+    set_status: bool = False,
+    skip_existing_attachments: bool = False,
+    prefix: str = "",
+) -> bool:
+    """Upload cataloging outputs, sample assembly stats, and Genomes rows/files."""
+    from wmw import drakkar
+
+    fields = study_record.get("fields", {}) or {}
+    study_code = str(fields.get("code", "") or "").strip()
+    work_dir = output_root / study_code
+    tsv_path = work_dir / "cataloging.tsv"
+    bin_metadata_path = work_dir / "cataloging" / "final" / "all_bin_metadata.csv"
+    bin_paths_path = work_dir / "cataloging" / "final" / "all_bin_paths.txt"
+    has_cataloging_output = tsv_path.exists() or bin_metadata_path.exists()
+    label = f"{prefix}: " if prefix else ""
+
+    if set_status and has_cataloging_output:
+        client.set_study_status(studies_table, [study_record["id"]], "cataloged")
+        out.success(f"{label}study status → 'cataloged'.")
+
+    if not tsv_path.exists():
+        out.warn(f"{label}cataloging.tsv not found at {tsv_path} — file and stats not uploaded.")
+    else:
+        _upload_study_tsv_attachment(
+            client,
+            studies_table,
+            study_record["id"],
+            "file_cataloging",
+            tsv_path,
+            prefix=prefix,
+            study_fields=fields,
+            skip_existing=skip_existing_attachments,
+        )
+        stats = drakkar.parse_cataloging_tsv(tsv_path)
+        if not stats:
+            out.warn(f"{label}cataloging.tsv at {tsv_path} could not be parsed — stats not uploaded.")
+        else:
+            n = client.update_sample_cataloging_stats(samples_table, stats)
+            if n:
+                out.success(f"{label}uploaded cataloging stats for {_pl(n, 'sample')}.")
+            else:
+                out.warn(
+                    f"{label}cataloging.tsv parsed ({len(stats)} assembly row(s)) but no matching "
+                    f"Airtable records found — stats not uploaded. "
+                    f"Check that the sample 'code' field values match the assembly column."
+                )
+
+    genomes_processed = _populate_genome_records_from_outputs(
+        client,
+        samples_table,
+        genomes_table,
+        bin_metadata_path,
+        bin_paths_path,
+        prefix=prefix,
+    )
+    return has_cataloging_output or genomes_processed
+
+
 def cmd_set_status(args: argparse.Namespace) -> int:
     studies_table = _conf(args, "studies_table", "STUDIES_TABLE") or "Studies"
     samples_table = _conf(args, "samples_table", "SAMPLES_TABLE") or "Samples"
+    genomes_table = _conf(args, "genomes_table", "GENOMES_TABLE")
     study_code = args.study
     workflow = args.workflow
     status = args.status
@@ -1194,26 +1596,27 @@ def cmd_set_status(args: argparse.Namespace) -> int:
     out.success(f"Study {study_code} status → {airtable_status!r}.")
 
     if workflow == "preprocessing" and status in ("completed", "preprocessed"):
-        from wmw import drakkar
         output_dir_str = _conf(args, "output_dir", "DRAKKAR_OUTPUT_DIR")
         if output_dir_str:
-            tsv_path = Path(output_dir_str).expanduser().resolve() / study_code / "preprocessing.tsv"
-            if not tsv_path.exists():
-                out.warn(f"preprocessing.tsv not found at {tsv_path} — stats not uploaded.")
-            else:
-                stats = drakkar.parse_preprocessing_tsv(tsv_path)
-                if not stats:
-                    out.warn(f"preprocessing.tsv at {tsv_path} could not be parsed — stats not uploaded.")
-                else:
-                    n = client.update_sample_preprocessing_stats(samples_table, stats)
-                    if n:
-                        out.success(f"Uploaded preprocessing stats for {_pl(n, 'sample')}.")
-                    else:
-                        out.warn(
-                            f"preprocessing.tsv parsed ({len(stats)} sample(s)) but no matching "
-                            f"Airtable records found — stats not uploaded. "
-                            f"Check that the sample 'code' field values match the TSV."
-                        )
+            _finalize_preprocessing_outputs(
+                client,
+                studies_table,
+                samples_table,
+                study_record,
+                Path(output_dir_str).expanduser().resolve(),
+            )
+
+    if workflow == "cataloging" and status == "cataloged":
+        output_dir_str = _conf(args, "output_dir", "DRAKKAR_OUTPUT_DIR")
+        if output_dir_str:
+            _finalize_cataloging_outputs(
+                client,
+                studies_table,
+                samples_table,
+                genomes_table,
+                study_record,
+                Path(output_dir_str).expanduser().resolve(),
+            )
 
     return 0
 
@@ -1551,10 +1954,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "process",
         help="Generate Drakkar input files and launch scripts for ready studies.",
         description=(
-            "For each study with status 'ready', fetch its ready samples from Airtable, "
-            "create a working directory under DRAKKAR_OUTPUT_DIR/<code>/, write a "
-            "<code>.tsv input file, and write a <code>.sh launch script that runs "
-            "Drakkar and logs progress back to Airtable."
+            "For each study with status 'ready' or 'rerun', fetch its ready samples "
+            "from Airtable, create a working directory under DRAKKAR_OUTPUT_DIR/<code>/, "
+            "write a <code>.tsv input file, and write a <code>.sh launch script that "
+            "runs Drakkar and logs progress back to Airtable. Studies with status "
+            "'resume' resolve pending Airtable tasks and launch the next missing "
+            "Drakkar task when needed."
         ),
     )
     _add_airtable_flags(p_process)
@@ -1562,7 +1967,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--batch",
         metavar="CODE",
         default="",
-        help="Process only the study whose code matches CODE (default: all ready studies).",
+        help="Process only the study whose code matches CODE (default: all actionable studies).",
     )
     p_process.add_argument(
         "--workflow",
@@ -1598,6 +2003,12 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="TABLE",
         default="",
         help="Override Samples table name from config.",
+    )
+    p_process.add_argument(
+        "--genomes-table",
+        metavar="TABLE",
+        default="",
+        help="Override Genomes table name from config.",
     )
     p_process.set_defaults(func=cmd_process)
 
@@ -1694,6 +2105,18 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="TABLE",
         default="",
         help="Override Samples table name from config.",
+    )
+    p_setstatus.add_argument(
+        "--genomes-table",
+        metavar="TABLE",
+        default="",
+        help="Override Genomes table name from config.",
+    )
+    p_setstatus.add_argument(
+        "--output-dir",
+        metavar="DIR",
+        default="",
+        help="Override DRAKKAR_OUTPUT_DIR from config.",
     )
     p_setstatus.set_defaults(func=cmd_set_status)
 
