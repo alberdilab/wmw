@@ -8,6 +8,14 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.4.7] - 2026-05-12
+
+### Fixed
+
+- `wmw process` resume path now correctly detects completed profiling when
+  `profiling_genomes.tsv` is absent but `profiling_genomes/final/bases.tsv` or
+  `profiling_genomes/final/counts.tsv` exist, preventing it from re-launching a
+  profiling script instead of an annotation script.
 ## [0.4.6] - 2026-05-12
 
 ### Changed

@@ -910,7 +910,11 @@ def cmd_process(args: argparse.Namespace) -> int:
                     screen_args=args,
                 ) or finalized_this_study
 
-            has_profiling = (work_dir / "profiling_genomes.tsv").exists()
+            has_profiling = (
+                (work_dir / "profiling_genomes.tsv").exists()
+                or (work_dir / "profiling_genomes" / "final" / "bases.tsv").exists()
+                or (work_dir / "profiling_genomes" / "final" / "counts.tsv").exists()
+            )
             has_annotation = (work_dir / "annotating" / "gene_annotations.tsv.xz").exists()
 
             if has_profiling:
