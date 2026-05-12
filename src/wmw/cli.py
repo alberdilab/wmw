@@ -801,6 +801,24 @@ def _write_and_maybe_launch_script(code: str, script_path: Path, script: str) ->
         out.success(f"  Screen session '{code}' started.")
 
 
+def _workflow_tsv_path(work_dir: Path, study_code: str, workflow: str) -> Path:
+    return work_dir / f"{study_code}_{workflow}.tsv"
+
+
+def _legacy_workflow_tsv_path(work_dir: Path, workflow: str) -> Path:
+    return work_dir / f"{workflow}.tsv"
+
+
+def _existing_workflow_tsv_path(work_dir: Path, study_code: str, workflow: str) -> Path:
+    preferred = _workflow_tsv_path(work_dir, study_code, workflow)
+    if preferred.exists():
+        return preferred
+    legacy = _legacy_workflow_tsv_path(work_dir, workflow)
+    if legacy.exists():
+        return legacy
+    return preferred
+
+
 def cmd_process(args: argparse.Namespace) -> int:
     from wmw import drakkar
 
@@ -855,8 +873,8 @@ def cmd_process(args: argparse.Namespace) -> int:
 
         if study_status == "resume":
             out.info(f"{code}: status 'resume' — resolving pending Drakkar and Airtable tasks.")
-            preprocessing_tsv = work_dir / "preprocessing.tsv"
-            cataloging_tsv = work_dir / "cataloging.tsv"
+            preprocessing_tsv = _existing_workflow_tsv_path(work_dir, code, "preprocessing")
+            cataloging_tsv = _existing_workflow_tsv_path(work_dir, code, "cataloging")
             bin_metadata_path = work_dir / "cataloging" / "final" / "all_bin_metadata.csv"
             has_preprocessing = preprocessing_tsv.exists()
             has_cataloging = cataloging_tsv.exists() or bin_metadata_path.exists()
@@ -1327,15 +1345,19 @@ def _finalize_preprocessing_outputs(
     skip_existing_attachments: bool = False,
     prefix: str = "",
 ) -> bool:
-    """Upload preprocessing.tsv and sample preprocessing stats when present."""
+    """Upload preprocessing TSV and sample preprocessing stats when present."""
     from wmw import drakkar
 
     fields = study_record.get("fields", {}) or {}
     study_code = str(fields.get("code", "") or "").strip()
-    tsv_path = output_root / study_code / "preprocessing.tsv"
+    work_dir = output_root / study_code
+    tsv_path = _existing_workflow_tsv_path(work_dir, study_code, "preprocessing")
     label = f"{prefix}: " if prefix else ""
     if not tsv_path.exists():
-        out.warn(f"{label}preprocessing.tsv not found at {tsv_path} — file and stats not uploaded.")
+        out.warn(
+            f"{label}{tsv_path.name} not found at {tsv_path} — "
+            f"file and stats not uploaded."
+        )
         return False
 
     if set_status:
@@ -1354,14 +1376,14 @@ def _finalize_preprocessing_outputs(
     )
     stats = drakkar.parse_preprocessing_tsv(tsv_path)
     if not stats:
-        out.warn(f"{label}preprocessing.tsv at {tsv_path} could not be parsed — stats not uploaded.")
+        out.warn(f"{label}{tsv_path.name} at {tsv_path} could not be parsed — stats not uploaded.")
     else:
         n = client.update_sample_preprocessing_stats(samples_table, stats)
         if n:
             out.success(f"{label}uploaded preprocessing stats for {_pl(n, 'sample')}.")
         else:
             out.warn(
-                f"{label}preprocessing.tsv parsed ({len(stats)} sample(s)) but no matching "
+                f"{label}{tsv_path.name} parsed ({len(stats)} sample(s)) but no matching "
                 f"Airtable records found — stats not uploaded. "
                 f"Check that the sample 'code' field values match the TSV."
             )
@@ -1401,7 +1423,6 @@ def _populate_genome_records_from_outputs(
 
     name_fid = str(cfg.get("GENOMES_COL_NAME") or "").strip()
     sample_link_fid = str(cfg.get("GENOMES_COL_SAMPLE_ID") or "").strip()
-    code_fid = str(cfg.get("GENOMES_COL_CODE") or "").strip()
     if not name_fid:
         out.warn(f"{label}GENOMES_COL_NAME is not configured — genome metadata not uploaded.")
         return True
@@ -1439,8 +1460,6 @@ def _populate_genome_records_from_outputs(
 
         fields = dict(genome.get("fields", {}) or {})
         fields[sample_link_fid] = [sample_record_id]
-        if code_fid and genome_name:
-            fields.setdefault(code_fid, genome_name)
 
         existing = existing_records.get(genome_name)
         if existing:
@@ -1526,7 +1545,7 @@ def _finalize_cataloging_outputs(
     fields = study_record.get("fields", {}) or {}
     study_code = str(fields.get("code", "") or "").strip()
     work_dir = output_root / study_code
-    tsv_path = work_dir / "cataloging.tsv"
+    tsv_path = _existing_workflow_tsv_path(work_dir, study_code, "cataloging")
     bin_metadata_path = work_dir / "cataloging" / "final" / "all_bin_metadata.csv"
     bin_paths_path = work_dir / "cataloging" / "final" / "all_bin_paths.txt"
     has_cataloging_output = tsv_path.exists() or bin_metadata_path.exists()
@@ -1537,7 +1556,10 @@ def _finalize_cataloging_outputs(
         out.success(f"{label}study status → 'cataloged'.")
 
     if not tsv_path.exists():
-        out.warn(f"{label}cataloging.tsv not found at {tsv_path} — file and stats not uploaded.")
+        out.warn(
+            f"{label}{tsv_path.name} not found at {tsv_path} — "
+            f"file and stats not uploaded."
+        )
     else:
         _upload_study_tsv_attachment(
             client,
@@ -1551,14 +1573,14 @@ def _finalize_cataloging_outputs(
         )
         stats = drakkar.parse_cataloging_tsv(tsv_path)
         if not stats:
-            out.warn(f"{label}cataloging.tsv at {tsv_path} could not be parsed — stats not uploaded.")
+            out.warn(f"{label}{tsv_path.name} at {tsv_path} could not be parsed — stats not uploaded.")
         else:
             n = client.update_sample_cataloging_stats(samples_table, stats)
             if n:
                 out.success(f"{label}uploaded cataloging stats for {_pl(n, 'sample')}.")
             else:
                 out.warn(
-                    f"{label}cataloging.tsv parsed ({len(stats)} assembly row(s)) but no matching "
+                    f"{label}{tsv_path.name} parsed ({len(stats)} assembly row(s)) but no matching "
                     f"Airtable records found — stats not uploaded. "
                     f"Check that the sample 'code' field values match the assembly column."
                 )

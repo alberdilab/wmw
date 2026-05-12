@@ -108,8 +108,9 @@ SAMPLES_COL_ASSEMBLY_MAPPING_RATE_ALL: "fldyoREcPpIXbZANB"
 
 # --- Drakkar > Cataloging > Genomes ---
 
-GENOMES_COL_RECORD_ID: "fldY23Xw8FIRa0T8b"
-GENOMES_COL_CODE: "fldQzo5sFYPe5k1Aj"
+# Airtable-computed fields: wmw never writes these.
+GENOMES_COL_RECORD_ID: ""
+GENOMES_COL_CODE: ""
 GENOMES_COL_NAME: "fldJBmRSVbfMHtRKv"
 GENOMES_COL_SAMPLE_ID: "fldSKVzsL5i4lauWL"
 GENOMES_COL_COMPLETENESS: "fldFWcFdXImPQyCha"

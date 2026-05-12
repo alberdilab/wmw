@@ -117,7 +117,7 @@ def test_cmd_stop_sets_status_stops_screen_and_cancels_matching_slurm_jobs(tmp_p
 def test_cmd_set_status_preprocessed_uploads_preprocessing_tsv(tmp_path):
     work_dir = tmp_path / "ST001"
     work_dir.mkdir()
-    preprocessing_tsv = work_dir / "preprocessing.tsv"
+    preprocessing_tsv = work_dir / "ST001_preprocessing.tsv"
     preprocessing_tsv.write_text(
         "sample\treads_pre_fastp\nSA000022\t1000\n",
         encoding="utf-8",
@@ -152,11 +152,24 @@ def test_cmd_set_status_preprocessed_uploads_preprocessing_tsv(tmp_path):
     client.update_sample_preprocessing_stats.assert_called_once()
 
 
+def test_workflow_tsv_path_prefers_prefixed_and_falls_back_to_legacy(tmp_path):
+    work_dir = tmp_path / "ST001"
+    work_dir.mkdir()
+    legacy = work_dir / "preprocessing.tsv"
+    preferred = work_dir / "ST001_preprocessing.tsv"
+
+    legacy.write_text("legacy\n", encoding="utf-8")
+    assert cli._existing_workflow_tsv_path(work_dir, "ST001", "preprocessing") == legacy
+
+    preferred.write_text("preferred\n", encoding="utf-8")
+    assert cli._existing_workflow_tsv_path(work_dir, "ST001", "preprocessing") == preferred
+
+
 def test_cmd_set_status_cataloged_uploads_genome_metadata(tmp_path):
     work_dir = tmp_path / "ST001"
     final_dir = work_dir / "cataloging" / "final"
     final_dir.mkdir(parents=True)
-    cataloging_tsv = work_dir / "cataloging.tsv"
+    cataloging_tsv = work_dir / "ST001_cataloging.tsv"
     cataloging_tsv.write_text(
         "assembly\tassembly_N50\nSA000022\t12345\n",
         encoding="utf-8",
@@ -213,14 +226,14 @@ def test_cmd_set_status_cataloged_uploads_genome_metadata(tmp_path):
     )
 
     link_fid = str(cfg.get("GENOMES_COL_SAMPLE_ID"))
-    code_fid = str(cfg.get("GENOMES_COL_CODE"))
     completeness_fid = str(cfg.get("GENOMES_COL_COMPLETENESS"))
     length_fid = str(cfg.get("GENOMES_COL_LENGTH"))
     client.create_genome_records_with_response.assert_called_once()
     genomes_table, records = client.create_genome_records_with_response.call_args[0]
     assert genomes_table == "Genomes"
     assert records[0][link_fid] == ["recSample"]
-    assert records[0][code_fid] == "SA000022_bin_339957"
+    assert "fldY23Xw8FIRa0T8b" not in records[0]
+    assert "fldQzo5sFYPe5k1Aj" not in records[0]
     assert records[0][name_fid] == "SA000022_bin_339957"
     assert records[0][completeness_fid] == 99.98
     assert records[0][length_fid] == 2585871
@@ -238,11 +251,11 @@ def test_cmd_process_resume_finalizes_airtable_without_launching_drakkar(tmp_pat
     work_dir = tmp_path / "ST001"
     final_dir = work_dir / "cataloging" / "final"
     final_dir.mkdir(parents=True)
-    (work_dir / "preprocessing.tsv").write_text(
+    (work_dir / "ST001_preprocessing.tsv").write_text(
         "sample\treads_pre_fastp\nSA000022\t1000\n",
         encoding="utf-8",
     )
-    (work_dir / "cataloging.tsv").write_text(
+    (work_dir / "ST001_cataloging.tsv").write_text(
         "assembly\tassembly_N50\nSA000022\t12345\n",
         encoding="utf-8",
     )
@@ -377,7 +390,7 @@ def test_cmd_process_resume_without_outputs_launches_preprocessing(tmp_path):
 def test_cmd_process_resume_after_preprocessing_launches_cataloging_only(tmp_path):
     work_dir = tmp_path / "ST001"
     work_dir.mkdir()
-    preprocessing_tsv = work_dir / "preprocessing.tsv"
+    preprocessing_tsv = work_dir / "ST001_preprocessing.tsv"
     preprocessing_tsv.write_text(
         "sample\treads_pre_fastp\nSA000022\t1000\n",
         encoding="utf-8",

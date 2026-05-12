@@ -114,6 +114,12 @@ def build_input_tsv(
 # Script generation
 # ---------------------------------------------------------------------------
 
+def _rename_workflow_tsv_line(code: str, work_dir: Path, workflow: str) -> str:
+    src = shlex.quote(str(work_dir / f"{workflow}.tsv"))
+    dst = shlex.quote(str(work_dir / f"{code}_{workflow}.tsv"))
+    return f"if [ -f {src} ]; then mv -f {src} {dst}; fi"
+
+
 def generate_preprocessing_script(
     code: str,
     tsv_path: Path,
@@ -193,6 +199,7 @@ def generate_preprocessing_script(
         "",
         f"{wmw_cmd} set-status --study {code} --workflow preprocessing --status preprocessing{output_dir_arg}",
         drakkar_cmd,
+        _rename_workflow_tsv_line(code, work_dir, "preprocessing"),
         f"{wmw_cmd} set-status --study {code} --workflow preprocessing --status preprocessed{output_dir_arg}",
         "_WMW_SUCCESS=1",
         "",
@@ -209,6 +216,7 @@ def generate_preprocessing_script(
         "trap _on_exit_cataloging EXIT",
         f"{wmw_cmd} set-status --study {code} --workflow cataloging --status cataloging{output_dir_arg}",
         cataloging_cmd,
+        _rename_workflow_tsv_line(code, work_dir, "cataloging"),
         f"{wmw_cmd} set-status --study {code} --workflow cataloging --status cataloged{output_dir_arg}",
         "_WMW_SUCCESS=1",
         "",
@@ -281,6 +289,7 @@ def generate_cataloging_script(
         "",
         f"{wmw_cmd} set-status --study {code} --workflow cataloging --status cataloging{output_dir_arg}",
         cataloging_cmd,
+        _rename_workflow_tsv_line(code, work_dir, "cataloging"),
         f"{wmw_cmd} set-status --study {code} --workflow cataloging --status cataloged{output_dir_arg}",
         "_WMW_SUCCESS=1",
         "",

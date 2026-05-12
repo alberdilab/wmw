@@ -8,6 +8,22 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.4.1] - 2026-05-12
+
+### Added
+
+- No unreleased changes yet.
+
+### Changed
+
+- Drakkar run summaries are now stored and uploaded as
+  `<code>_preprocessing.tsv` and `<code>_cataloging.tsv`; existing legacy
+  `preprocessing.tsv` / `cataloging.tsv` files are still accepted on resume.
+
+### Fixed
+
+- Genomes uploads no longer write Airtable-computed `Code` or `Record ID`
+  fields, avoiding `INVALID_VALUE_FOR_COLUMN` errors during row creation.
 ## [0.4.0] - 2026-05-12
 
 ### Added

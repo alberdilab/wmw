@@ -168,6 +168,11 @@ def test_generate_preprocessing_script_contains_key_elements(tmp_path):
     assert "wmw set-status --study PRJ001 --workflow preprocessing --status stopped" in script
     assert "wmw set-status --study PRJ001 --workflow cataloging --status cataloging" in script
     assert "drakkar cataloging" in script
+    assert "mv -f" in script
+    assert "preprocessing.tsv" in script
+    assert "PRJ001_preprocessing.tsv" in script
+    assert "cataloging.tsv" in script
+    assert "PRJ001_cataloging.tsv" in script
     assert "wmw set-status --study PRJ001 --workflow cataloging --status cataloged" in script
     assert "wmw set-status --study PRJ001 --workflow cataloging --status stopped" in script
     assert "trap _on_exit_preprocessing EXIT" in script
@@ -222,6 +227,8 @@ def test_generate_cataloging_script_contains_key_elements(tmp_path):
     assert "#!/usr/bin/env bash" in script
     assert "cataloging only" in script
     assert "drakkar cataloging" in script
+    assert "cataloging.tsv" in script
+    assert "PRJ001_cataloging.tsv" in script
     assert "wmw set-status --study PRJ001 --workflow cataloging --status cataloging" in script
     assert "wmw set-status --study PRJ001 --workflow cataloging --status cataloged" in script
     assert "wmw set-status --study PRJ001 --workflow cataloging --status error" in script
