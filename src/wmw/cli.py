@@ -2356,6 +2356,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "preprocessed",
             "cataloging",
             "cataloged",
+            "quantifying",
+            "quantified",
             "stopped",
             "error",
         ],

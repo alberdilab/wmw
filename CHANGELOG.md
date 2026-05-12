@@ -8,6 +8,12 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.4.3] - 2026-05-12
+
+### Fixed
+
+- `wmw set-status --status quantifying` and `--status quantified` were rejected
+  as invalid choices; added both to the `--status` argparse allowlist.
 ## [0.4.2] - 2026-05-12
 
 ### Added
@@ -31,6 +37,7 @@ All notable changes to wmw are documented here.
   the current process.
 - Genomes are only created/updated in Airtable and uploaded as attachments when
   completeness is above 50 and contamination is below 10.
+
 ## [0.4.1] - 2026-05-12
 
 ### Added
@@ -47,6 +54,7 @@ All notable changes to wmw are documented here.
 
 - Genomes uploads no longer write Airtable-computed `Code` or `Record ID`
   fields, avoiding `INVALID_VALUE_FOR_COLUMN` errors during row creation.
+
 ## [0.4.0] - 2026-05-12
 
 ### Added
@@ -71,6 +79,7 @@ All notable changes to wmw are documented here.
   recovery: it first uploads any existing preprocessing/cataloging outputs and
   fills missing sample stats and Genomes records/files, then launches only the
   earliest missing Drakkar task whose dependencies are satisfied.
+  
 ## [0.3.12] - 2026-05-10
 
 ### Added
