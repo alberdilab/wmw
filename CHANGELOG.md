@@ -8,6 +8,15 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.4.6] - 2026-05-12
+
+### Changed
+
+- `wmw process` with `rerun` status now generates a full-pipeline script
+  (preprocessing → cataloging → profiling → annotation) instead of stopping after
+  cataloging. Previously, studies set to `rerun` would only produce a
+  preprocessing+cataloging script and require additional manual resume steps to
+  reach profiling and annotation.
 ## [0.4.5] - 2026-05-12
 
 ### Added

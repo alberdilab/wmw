@@ -120,6 +120,165 @@ def _rename_workflow_tsv_line(code: str, work_dir: Path, workflow: str) -> str:
     return f"if [ -f {src} ]; then mv -f {src} {dst}; fi"
 
 
+def generate_full_pipeline_script(
+    code: str,
+    tsv_path: Path,
+    work_dir: Path,
+    conda_env: str,
+    slurm: bool = False,
+    wmw_conda_env: str = "",
+    memory_multiplier: str | float | None = None,
+    time_multiplier: str | float | None = None,
+) -> str:
+    """Return a bash script that runs the full pipeline for *code*:
+    preprocessing → cataloging → profiling → annotation."""
+    preprocessing_flags = f"-f {tsv_path} -o {work_dir} --fraction --nonpareil"
+    if slurm:
+        preprocessing_flags += " -p slurm"
+    if memory_multiplier not in (None, "", "1", 1, 1.0):
+        preprocessing_flags += f" --memory-multiplier {memory_multiplier}"
+    if time_multiplier not in (None, "", "1", 1, 1.0):
+        preprocessing_flags += f" --time-multiplier {time_multiplier}"
+
+    cataloging_flags = f"-f {tsv_path} -o {work_dir} --multicoverage"
+    if slurm:
+        cataloging_flags += " -p slurm"
+
+    bin_paths = shlex.quote(str(work_dir / "cataloging" / "final" / "all_bin_paths.txt"))
+    reads_dir = shlex.quote(str(work_dir / "preprocessing" / "final"))
+    bin_metadata = shlex.quote(str(work_dir / "cataloging" / "final" / "all_bin_metadata.csv"))
+    out_dir = shlex.quote(str(work_dir))
+
+    profiling_flags = f"-B {bin_paths} -r {reads_dir} -a 0.98 -t genomes -q {bin_metadata} -o {out_dir}"
+    if slurm:
+        profiling_flags += " -p slurm"
+
+    annotation_flags = f"-B {bin_paths} -q {bin_metadata} -o {out_dir}"
+    if slurm:
+        annotation_flags += " -p slurm"
+
+    if conda_env:
+        c_flag = "-p" if str(conda_env).startswith(("/", "~", ".")) else "-n"
+        preprocessing_cmd = f"conda run {c_flag} {conda_env} drakkar preprocessing {preprocessing_flags}"
+        cataloging_cmd  = f"conda run {c_flag} {conda_env} drakkar cataloging {cataloging_flags}"
+        profiling_cmd   = f"conda run {c_flag} {conda_env} drakkar profiling {profiling_flags}"
+        annotation_cmd  = f"conda run {c_flag} {conda_env} drakkar profiling {annotation_flags}"
+        conda_lines = [
+            'if [ -f "$(conda info --base 2>/dev/null)/etc/profile.d/conda.sh" ]; then',
+            '    source "$(conda info --base)/etc/profile.d/conda.sh"',
+            f"    conda activate {conda_env}",
+            "fi",
+            "",
+        ]
+    else:
+        preprocessing_cmd = f"drakkar preprocessing {preprocessing_flags}"
+        cataloging_cmd  = f"drakkar cataloging {cataloging_flags}"
+        profiling_cmd   = f"drakkar profiling {profiling_flags}"
+        annotation_cmd  = f"drakkar profiling {annotation_flags}"
+        conda_lines = []
+
+    if wmw_conda_env:
+        w_flag = "-p" if str(wmw_conda_env).startswith(("/", "~", ".")) else "-n"
+        wmw_cmd = f"conda run {w_flag} {wmw_conda_env} wmw"
+    else:
+        wmw_cmd = "wmw"
+
+    stop_file = shlex.quote(str(work_dir / ".wmw-stop"))
+    output_dir_arg = f" --output-dir {shlex.quote(str(work_dir.parent))}"
+
+    lines = [
+        "#!/usr/bin/env bash",
+        f"# wmw-generated script — batch {code} (preprocessing → cataloging → profiling → annotation)",
+        "# Do not edit manually; re-run wmw process to regenerate.",
+        "# AIRTABLE_TOKEN must be exported in the environment before launching.",
+        "",
+        "set -euo pipefail",
+        f"exec >> {work_dir}/{code}.out 2>> {work_dir}/{code}.err",
+        'echo ""',
+        "echo \"=== $(date '+%Y-%m-%d %H:%M:%S') ===\"",
+        "echo \"=== $(date '+%Y-%m-%d %H:%M:%S') ===\" >&2",
+        "",
+        *conda_lines,
+        f"_WMW_STOP_FILE={stop_file}",
+        'rm -f "$_WMW_STOP_FILE"',
+        # preprocessing
+        "_WMW_SUCCESS=0",
+        "_on_exit_preprocessing() {",
+        '    if [ "$_WMW_SUCCESS" -ne 1 ]; then',
+        '        if [ -f "$_WMW_STOP_FILE" ]; then',
+        f"            {wmw_cmd} set-status --study {code} --workflow preprocessing --status stopped{output_dir_arg}",
+        "        else",
+        f"            {wmw_cmd} set-status --study {code} --workflow preprocessing --status error{output_dir_arg}",
+        "        fi",
+        "    fi",
+        "}",
+        "trap _on_exit_preprocessing EXIT",
+        "",
+        f"{wmw_cmd} set-status --study {code} --workflow preprocessing --status preprocessing{output_dir_arg}",
+        preprocessing_cmd,
+        _rename_workflow_tsv_line(code, work_dir, "preprocessing"),
+        f"{wmw_cmd} set-status --study {code} --workflow preprocessing --status preprocessed{output_dir_arg}",
+        "_WMW_SUCCESS=1",
+        "",
+        # cataloging
+        "_WMW_SUCCESS=0",
+        "_on_exit_cataloging() {",
+        '    if [ "$_WMW_SUCCESS" -ne 1 ]; then',
+        '        if [ -f "$_WMW_STOP_FILE" ]; then',
+        f"            {wmw_cmd} set-status --study {code} --workflow cataloging --status stopped{output_dir_arg}",
+        "        else",
+        f"            {wmw_cmd} set-status --study {code} --workflow cataloging --status error{output_dir_arg}",
+        "        fi",
+        "    fi",
+        "}",
+        "trap _on_exit_cataloging EXIT",
+        f"{wmw_cmd} set-status --study {code} --workflow cataloging --status cataloging{output_dir_arg}",
+        cataloging_cmd,
+        _rename_workflow_tsv_line(code, work_dir, "cataloging"),
+        f"{wmw_cmd} set-status --study {code} --workflow cataloging --status cataloged{output_dir_arg}",
+        "_WMW_SUCCESS=1",
+        "",
+        # profiling
+        "_WMW_SUCCESS=0",
+        "_on_exit_profiling() {",
+        '    if [ "$_WMW_SUCCESS" -ne 1 ]; then',
+        '        if [ -f "$_WMW_STOP_FILE" ]; then',
+        f"            {wmw_cmd} set-status --study {code} --workflow profiling --status stopped{output_dir_arg}",
+        "        else",
+        f"            {wmw_cmd} set-status --study {code} --workflow profiling --status error{output_dir_arg}",
+        "        fi",
+        "    fi",
+        "}",
+        "trap _on_exit_profiling EXIT",
+        "",
+        f"cd {shlex.quote(str(work_dir))}",
+        f"{wmw_cmd} set-status --study {code} --workflow profiling --status quantifying{output_dir_arg}",
+        profiling_cmd,
+        f"{wmw_cmd} set-status --study {code} --workflow profiling --status quantified{output_dir_arg}",
+        "_WMW_SUCCESS=1",
+        "",
+        # annotation
+        "_WMW_SUCCESS=0",
+        "_on_exit_annotation() {",
+        '    if [ "$_WMW_SUCCESS" -ne 1 ]; then',
+        '        if [ -f "$_WMW_STOP_FILE" ]; then',
+        f"            {wmw_cmd} set-status --study {code} --workflow annotating --status stopped{output_dir_arg}",
+        "        else",
+        f"            {wmw_cmd} set-status --study {code} --workflow annotating --status error{output_dir_arg}",
+        "        fi",
+        "    fi",
+        "}",
+        "trap _on_exit_annotation EXIT",
+        "",
+        f"{wmw_cmd} set-status --study {code} --workflow annotating --status annotating{output_dir_arg}",
+        annotation_cmd,
+        f"{wmw_cmd} set-status --study {code} --workflow annotating --status completed{output_dir_arg}",
+        "_WMW_SUCCESS=1",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def generate_preprocessing_script(
     code: str,
     tsv_path: Path,

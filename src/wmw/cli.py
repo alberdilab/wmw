@@ -1017,7 +1017,7 @@ def cmd_process(args: argparse.Namespace) -> int:
 
         script_path = work_dir / f"{code}.sh"
         if workflow == "preprocessing":
-            script = drakkar.generate_preprocessing_script(
+            script = drakkar.generate_full_pipeline_script(
                 code=code,
                 tsv_path=input_tsv,
                 work_dir=work_dir,
