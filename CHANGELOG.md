@@ -8,6 +8,14 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.4.4] - 2026-05-12
+
+### Fixed
+
+- Profiling script now `cd`s to the study work directory before invoking
+  `drakkar profiling`, so relative paths inside `all_bin_paths.txt` (e.g.
+  `cataloging/final/SA000039/SA000039_bin_100159.fa`) are resolved correctly
+  instead of against the shell's launch directory.
 ## [0.4.3] - 2026-05-12
 
 ### Fixed

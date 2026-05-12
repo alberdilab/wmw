@@ -291,6 +291,7 @@ def generate_profiling_script(
         "}",
         "trap _on_exit EXIT",
         "",
+        f"cd {shlex.quote(str(work_dir))}",
         f"{wmw_cmd} set-status --study {code} --workflow profiling --status quantifying{output_dir_arg}",
         profiling_cmd,
         f"{wmw_cmd} set-status --study {code} --workflow profiling --status quantified{output_dir_arg}",
