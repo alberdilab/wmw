@@ -8,6 +8,19 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.4.8] - 2026-05-14
+
+### Fixed
+
+- `wmw process` resume path now correctly launches an annotation script when profiling is
+  complete (`profiling_genomes.tsv` or alternative output files present) regardless of whether
+  cataloging output files are still detectable locally. Previously the check required
+  `has_cataloging` to be true as well; if cataloging files were absent or not at the expected
+  path the code fell through and generated a cataloging/preprocessing script instead of annotation.
+- Annotation scripts now call `drakkar annotating -B <bin_paths> -o <work_dir>` instead of
+  the incorrect `drakkar profiling -B <bin_paths> -q <bin_metadata> -o <work_dir>`. This
+  affects both `wmw process --workflow annotating` and the annotation stage of the full
+  pipeline script.
 ## [0.4.7] - 2026-05-12
 
 ### Fixed

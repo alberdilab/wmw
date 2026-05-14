@@ -4,7 +4,7 @@ from __future__ import annotations
 
 __all__ = ["__version__"]
 
-__version__ = "0.4.7"
+__version__ = "0.4.8"
 
 try:
     from importlib.metadata import version, PackageNotFoundError

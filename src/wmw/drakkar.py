@@ -153,7 +153,7 @@ def generate_full_pipeline_script(
     if slurm:
         profiling_flags += " -p slurm"
 
-    annotation_flags = f"-B {bin_paths} -q {bin_metadata} -o {out_dir}"
+    annotation_flags = f"-B {bin_paths} -o {out_dir}"
     if slurm:
         annotation_flags += " -p slurm"
 
@@ -162,7 +162,7 @@ def generate_full_pipeline_script(
         preprocessing_cmd = f"conda run {c_flag} {conda_env} drakkar preprocessing {preprocessing_flags}"
         cataloging_cmd  = f"conda run {c_flag} {conda_env} drakkar cataloging {cataloging_flags}"
         profiling_cmd   = f"conda run {c_flag} {conda_env} drakkar profiling {profiling_flags}"
-        annotation_cmd  = f"conda run {c_flag} {conda_env} drakkar profiling {annotation_flags}"
+        annotation_cmd  = f"conda run {c_flag} {conda_env} drakkar annotating {annotation_flags}"
         conda_lines = [
             'if [ -f "$(conda info --base 2>/dev/null)/etc/profile.d/conda.sh" ]; then',
             '    source "$(conda info --base)/etc/profile.d/conda.sh"',
@@ -174,7 +174,7 @@ def generate_full_pipeline_script(
         preprocessing_cmd = f"drakkar preprocessing {preprocessing_flags}"
         cataloging_cmd  = f"drakkar cataloging {cataloging_flags}"
         profiling_cmd   = f"drakkar profiling {profiling_flags}"
-        annotation_cmd  = f"drakkar profiling {annotation_flags}"
+        annotation_cmd  = f"drakkar annotating {annotation_flags}"
         conda_lines = []
 
     if wmw_conda_env:
@@ -467,18 +467,17 @@ def generate_annotation_script(
     slurm: bool = False,
     wmw_conda_env: str = "",
 ) -> str:
-    """Return a bash script that runs drakkar profiling (annotation mode) for *code* and updates Airtable."""
+    """Return a bash script that runs drakkar annotating for *code* and updates Airtable."""
     bin_paths = shlex.quote(str(work_dir / "cataloging" / "final" / "all_bin_paths.txt"))
-    bin_metadata = shlex.quote(str(work_dir / "cataloging" / "final" / "all_bin_metadata.csv"))
     out_dir = shlex.quote(str(work_dir))
 
-    annotation_flags = f"-B {bin_paths} -q {bin_metadata} -o {out_dir}"
+    annotation_flags = f"-B {bin_paths} -o {out_dir}"
     if slurm:
         annotation_flags += " -p slurm"
 
     if conda_env:
         c_flag = "-p" if str(conda_env).startswith(("/", "~", ".")) else "-n"
-        annotation_cmd = f"conda run {c_flag} {conda_env} drakkar profiling {annotation_flags}"
+        annotation_cmd = f"conda run {c_flag} {conda_env} drakkar annotating {annotation_flags}"
         conda_lines = [
             'if [ -f "$(conda info --base 2>/dev/null)/etc/profile.d/conda.sh" ]; then',
             '    source "$(conda info --base)/etc/profile.d/conda.sh"',
@@ -487,7 +486,7 @@ def generate_annotation_script(
             "",
         ]
     else:
-        annotation_cmd = f"drakkar profiling {annotation_flags}"
+        annotation_cmd = f"drakkar annotating {annotation_flags}"
         conda_lines = []
 
     if wmw_conda_env:

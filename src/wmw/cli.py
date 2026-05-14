@@ -930,10 +930,10 @@ def cmd_process(args: argparse.Namespace) -> int:
             if finalized_this_study:
                 n_finalized += 1
 
-            if has_cataloging and has_profiling and has_annotation:
+            if has_profiling and has_annotation:
                 continue
 
-            if has_cataloging and has_profiling and not has_annotation:
+            if has_profiling and not has_annotation:
                 out.info(f"{code}: profiling done, annotation output absent — launching annotation task.")
                 script_path = work_dir / f"{code}.sh"
                 script = drakkar.generate_annotation_script(
