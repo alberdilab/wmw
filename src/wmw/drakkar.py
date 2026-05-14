@@ -13,6 +13,7 @@ from typing import Any
 
 from wmw import config as cfg
 
+DRAKKAR_ENV_PATH = "/projects/alberdilab/data/environments/drakkar/"
 
 # ---------------------------------------------------------------------------
 # Sample sheet
@@ -132,7 +133,7 @@ def generate_full_pipeline_script(
 ) -> str:
     """Return a bash script that runs the full pipeline for *code*:
     preprocessing → cataloging → profiling → annotation."""
-    preprocessing_flags = f"-f {tsv_path} -o {work_dir} --fraction --nonpareil"
+    preprocessing_flags = f"-f {tsv_path} -o {work_dir} --fraction --nonpareil --env_path {DRAKKAR_ENV_PATH}"
     if slurm:
         preprocessing_flags += " -p slurm"
     if memory_multiplier not in (None, "", "1", 1, 1.0):
@@ -140,7 +141,7 @@ def generate_full_pipeline_script(
     if time_multiplier not in (None, "", "1", 1, 1.0):
         preprocessing_flags += f" --time-multiplier {time_multiplier}"
 
-    cataloging_flags = f"-f {tsv_path} -o {work_dir} --multicoverage"
+    cataloging_flags = f"-f {tsv_path} -o {work_dir} --multicoverage --env_path {DRAKKAR_ENV_PATH}"
     if slurm:
         cataloging_flags += " -p slurm"
 
@@ -149,11 +150,11 @@ def generate_full_pipeline_script(
     bin_metadata = shlex.quote(str(work_dir / "cataloging" / "final" / "all_bin_metadata.csv"))
     out_dir = shlex.quote(str(work_dir))
 
-    profiling_flags = f"-B {bin_paths} -r {reads_dir} -a 0.98 -t genomes -q {bin_metadata} -o {out_dir}"
+    profiling_flags = f"-B {bin_paths} -r {reads_dir} -a 0.98 -t genomes -q {bin_metadata} -o {out_dir} --env_path {DRAKKAR_ENV_PATH}"
     if slurm:
         profiling_flags += " -p slurm"
 
-    annotation_flags = f"-B {bin_paths} -o {out_dir}"
+    annotation_flags = f"-B {bin_paths} -o {out_dir} --env_path {DRAKKAR_ENV_PATH}"
     if slurm:
         annotation_flags += " -p slurm"
 
@@ -290,7 +291,7 @@ def generate_preprocessing_script(
     time_multiplier: str | float | None = None,
 ) -> str:
     """Return a bash script that runs drakkar preprocessing for *code* and updates Airtable."""
-    drakkar_flags = f"-f {tsv_path} -o {work_dir} --fraction --nonpareil"
+    drakkar_flags = f"-f {tsv_path} -o {work_dir} --fraction --nonpareil --env_path {DRAKKAR_ENV_PATH}"
     if slurm:
         drakkar_flags += " -p slurm"
     if memory_multiplier not in (None, "", "1", 1, 1.0):
@@ -318,7 +319,7 @@ def generate_preprocessing_script(
     else:
         wmw_cmd = "wmw"
 
-    cataloging_flags = f"-f {tsv_path} -o {work_dir} --multicoverage"
+    cataloging_flags = f"-f {tsv_path} -o {work_dir} --multicoverage --env_path {DRAKKAR_ENV_PATH}"
     if slurm:
         cataloging_flags += " -p slurm"
     if conda_env:
@@ -396,7 +397,7 @@ def generate_profiling_script(
     bin_metadata = shlex.quote(str(work_dir / "cataloging" / "final" / "all_bin_metadata.csv"))
     out_dir = shlex.quote(str(work_dir))
 
-    profiling_flags = f"-B {bin_paths} -r {reads_dir} -a 0.98 -t genomes -q {bin_metadata} -o {out_dir}"
+    profiling_flags = f"-B {bin_paths} -r {reads_dir} -a 0.98 -t genomes -q {bin_metadata} -o {out_dir} --env_path {DRAKKAR_ENV_PATH}"
     if slurm:
         profiling_flags += " -p slurm"
 
@@ -471,7 +472,7 @@ def generate_annotation_script(
     bin_paths = shlex.quote(str(work_dir / "cataloging" / "final" / "all_bin_paths.txt"))
     out_dir = shlex.quote(str(work_dir))
 
-    annotation_flags = f"-B {bin_paths} -o {out_dir}"
+    annotation_flags = f"-B {bin_paths} -o {out_dir} --env_path {DRAKKAR_ENV_PATH}"
     if slurm:
         annotation_flags += " -p slurm"
 
@@ -544,7 +545,7 @@ def generate_cataloging_script(
     wmw_conda_env: str = "",
 ) -> str:
     """Return a bash script that runs drakkar cataloging only for *code* and updates Airtable."""
-    cataloging_flags = f"-f {tsv_path} -o {work_dir} --multicoverage"
+    cataloging_flags = f"-f {tsv_path} -o {work_dir} --multicoverage --env_path {DRAKKAR_ENV_PATH}"
     if slurm:
         cataloging_flags += " -p slurm"
 
@@ -620,7 +621,8 @@ def _drakkar_cmd(subcommand: str, extra: list[str]) -> list[str]:
         prefix = ["conda", "run", flag, conda_env]
     else:
         prefix = []
-    return [*prefix, "drakkar", subcommand, *extra]
+    env_args = ["--env_path", DRAKKAR_ENV_PATH] if subcommand != "--version" else []
+    return [*prefix, "drakkar", subcommand, *env_args, *extra]
 
 
 def run_workflow(

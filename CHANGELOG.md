@@ -8,6 +8,11 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.4.9] - 2026-05-14
+
+### Changed
+
+- All generated drakkar scripts (preprocessing, cataloging, profiling, annotating) and direct `run_workflow` calls now include `--env_path /projects/alberdilab/data/environments/drakkar/` so Snakemake conda environments are resolved from the correct shared directory.
 ## [0.4.8] - 2026-05-14
 
 ### Fixed
