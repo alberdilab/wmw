@@ -176,6 +176,28 @@ def test_workflow_tsv_path_prefers_prefixed_and_falls_back_to_legacy(tmp_path):
     assert cli._existing_workflow_tsv_path(work_dir, "ST001", "preprocessing") == preferred
 
 
+def test_cmd_set_status_annotating_completed_sets_done(tmp_path):
+    args = argparse.Namespace(
+        study="ST001",
+        workflow="annotating",
+        status="completed",
+        output_dir=str(tmp_path),
+        studies_table="Studies",
+        samples_table="Samples",
+        genomes_table="Genomes",
+        airtable_token="",
+        base_id="",
+    )
+
+    client = MagicMock()
+    client.fetch_study_by_code.return_value = {"id": "recStudy", "fields": {"code": "ST001"}}
+
+    with patch("wmw.cli._require_airtable", return_value=client):
+        assert cli.cmd_set_status(args) == 0
+
+    client.set_study_status.assert_called_once_with("Studies", ["recStudy"], "Done")
+
+
 def test_cmd_set_status_cataloged_uploads_genome_metadata(tmp_path):
     work_dir = tmp_path / "ST001"
     final_dir = work_dir / "cataloging" / "final"
@@ -428,6 +450,7 @@ def test_cmd_process_resume_finalizes_airtable_without_launching_drakkar(tmp_pat
     annotation_dir = work_dir / "annotating"
     annotation_dir.mkdir()
     (annotation_dir / "gene_annotations.tsv.xz").write_bytes(b"")
+    (annotation_dir / "genome_taxonomy.tsv").write_text("", encoding="utf-8")
 
     args = argparse.Namespace(
         batch="",
@@ -482,6 +505,7 @@ def test_cmd_process_resume_finalizes_airtable_without_launching_drakkar(tmp_pat
         [
             call("Studies", ["recStudy"], "preprocessed"),
             call("Studies", ["recStudy"], "cataloged"),
+            call("Studies", ["recStudy"], "Done"),
         ]
     )
     assert client.upload_study_file.call_count == 3
@@ -489,6 +513,57 @@ def test_cmd_process_resume_finalizes_airtable_without_launching_drakkar(tmp_pat
     client.update_sample_cataloging_stats.assert_called_once()
     client.create_genome_records_with_response.assert_called_once()
     client.upload_genome_file.assert_called_once()
+
+
+def test_cmd_process_resume_launches_annotation_when_taxonomy_missing(tmp_path):
+    work_dir = tmp_path / "ST001"
+    work_dir.mkdir()
+    (work_dir / "profiling_genomes.tsv").write_text(
+        "sample\tmapping_percentage\nSA000022\t10.5\n",
+        encoding="utf-8",
+    )
+    annotation_dir = work_dir / "annotating"
+    annotation_dir.mkdir()
+    (annotation_dir / "gene_annotations.tsv.xz").write_bytes(b"")
+
+    args = argparse.Namespace(
+        batch="",
+        workflow="preprocessing",
+        slurm=False,
+        output_dir=str(tmp_path),
+        studies_table="Studies",
+        samples_table="Samples",
+        genomes_table="Genomes",
+        airtable_token="",
+        base_id="",
+    )
+
+    client = MagicMock()
+    resume_study = {
+        "id": "recStudy",
+        "fields": {"code": "ST001", "study_accession": "PRJEB001", "status": "resume"},
+    }
+
+    def fetch_by_status(_table, status):
+        return [resume_study] if status == "resume" else []
+
+    client.fetch_studies_by_status.side_effect = fetch_by_status
+    client.update_sample_profiling_stats.return_value = 1
+
+    with (
+        patch("wmw.cli._require_airtable", return_value=client),
+        patch("shutil.which", return_value=None),
+        patch("subprocess.run") as run,
+    ):
+        assert cli.cmd_process(args) == 0
+
+    script_path = work_dir / "ST001.sh"
+    assert script_path.exists(), "annotation script should have been written"
+    script_text = script_path.read_text(encoding="utf-8")
+    assert "drakkar annotating" in script_text
+    assert "genome_taxonomy.tsv" in script_text
+    client.set_study_status.assert_not_called()
+    run.assert_not_called()
 
 
 def test_cmd_process_resume_launches_profiling_when_cataloging_done(tmp_path):

@@ -272,6 +272,31 @@ def test_generate_cataloging_script_wmw_conda_env(tmp_path):
     assert "conda run -p /envs/drakkar drakkar cataloging" in script
 
 
+def test_annotation_outputs_present_requires_gene_annotations_and_taxonomy(tmp_path):
+    annotation_dir = tmp_path / "annotating"
+    annotation_dir.mkdir()
+    (annotation_dir / "gene_annotations.tsv.xz").write_bytes(b"")
+
+    assert not drakkar.annotation_outputs_present(tmp_path)
+
+    (annotation_dir / "genome_taxonomy.tsv").write_text("", encoding="utf-8")
+    assert drakkar.annotation_outputs_present(tmp_path)
+
+
+def test_generate_annotation_script_checks_required_outputs(tmp_path):
+    script = drakkar.generate_annotation_script(
+        code="PRJ001",
+        work_dir=tmp_path,
+        conda_env="/envs/drakkar",
+    )
+
+    assert "drakkar annotating" in script
+    assert "gene_annotations.tsv.xz" in script
+    assert "genome_taxonomy.tsv" in script
+    assert "Missing required annotation outputs" in script
+    assert "wmw set-status --study PRJ001 --workflow annotating --status completed" in script
+
+
 # parse_cataloging_tsv
 # ---------------------------------------------------------------------------
 

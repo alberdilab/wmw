@@ -8,6 +8,14 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.4.10] - 2026-05-19
+
+### Changed
+
+- Annotation completion now requires both `annotating/gene_annotations.tsv.xz` and
+  `annotating/genome_taxonomy.tsv`. Resume mode launches annotation when profiling
+  exists but either annotation output is missing, and marks the Airtable study
+  status as `Done` only when both files are present.
 ## [0.4.9] - 2026-05-14
 
 ### Changed

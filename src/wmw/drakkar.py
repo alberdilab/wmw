@@ -15,6 +15,41 @@ from wmw import config as cfg
 
 DRAKKAR_ENV_PATH = "/projects/alberdilab/data/environments/drakkar/"
 
+ANNOTATION_OUTPUT_FILES = (
+    Path("annotating") / "gene_annotations.tsv.xz",
+    Path("annotating") / "genome_taxonomy.tsv",
+)
+
+
+def missing_annotation_outputs(work_dir: Path) -> list[Path]:
+    """Return required annotation outputs that are absent from *work_dir*."""
+    return [
+        work_dir / rel_path
+        for rel_path in ANNOTATION_OUTPUT_FILES
+        if not (work_dir / rel_path).exists()
+    ]
+
+
+def annotation_outputs_present(work_dir: Path) -> bool:
+    """Return True when all required annotation outputs exist."""
+    return not missing_annotation_outputs(work_dir)
+
+
+def _annotation_output_check_lines(work_dir: Path) -> list[str]:
+    checks = [
+        f"[ ! -f {shlex.quote(str(work_dir / rel_path))} ]"
+        for rel_path in ANNOTATION_OUTPUT_FILES
+    ]
+    rendered_files = " and ".join(
+        str(work_dir / rel_path) for rel_path in ANNOTATION_OUTPUT_FILES
+    )
+    return [
+        f"if {' || '.join(checks)}; then",
+        f"    echo \"Missing required annotation outputs: {rendered_files}\" >&2",
+        "    exit 1",
+        "fi",
+    ]
+
 # ---------------------------------------------------------------------------
 # Sample sheet
 # ---------------------------------------------------------------------------
@@ -273,6 +308,7 @@ def generate_full_pipeline_script(
         "",
         f"{wmw_cmd} set-status --study {code} --workflow annotating --status annotating{output_dir_arg}",
         annotation_cmd,
+        *_annotation_output_check_lines(work_dir),
         f"{wmw_cmd} set-status --study {code} --workflow annotating --status completed{output_dir_arg}",
         "_WMW_SUCCESS=1",
         "",
@@ -529,6 +565,7 @@ def generate_annotation_script(
         f"cd {shlex.quote(str(work_dir))}",
         f"{wmw_cmd} set-status --study {code} --workflow annotating --status annotating{output_dir_arg}",
         annotation_cmd,
+        *_annotation_output_check_lines(work_dir),
         f"{wmw_cmd} set-status --study {code} --workflow annotating --status completed{output_dir_arg}",
         "_WMW_SUCCESS=1",
         "",

@@ -126,12 +126,12 @@ wmw process [--batch BATCH]
 
 **Execution order:**
 1. Fetch studies where `status` is `"ready"`, `"resume"`, or `"rerun"` (filtered by `--batch` if given)
-2. For `status="resume"`, upload any existing preprocessing/cataloging outputs to Airtable
+2. For `status="resume"`, upload any existing preprocessing/cataloging/profiling outputs to Airtable
 3. If resume still has a pending Drakkar task, launch only the earliest missing task whose dependencies are satisfied
 4. For `status="ready"` or `"rerun"`, fetch the study's samples and write `{output_dir}/{code}/{code}.tsv` with samples whose status is `"use"`
 5. Write `{output_dir}/{code}/{code}.sh`
 6. Launch the script in a detached `screen` session named `{code}`
-7. Generated scripts update the Study status through `preprocessing`, `preprocessed`, `cataloging`, `cataloged`, `error`, or `stopped`
+7. Generated scripts update the Study status through `preprocessing`, `preprocessed`, `cataloging`, `cataloged`, `quantifying`, `quantified`, `annotating`, `Done`, `error`, or `stopped`
 8. Genome FASTA attachment uploads are detached into a `{code}-genome-upload`
    `screen` session when finalization is run outside an existing `screen`; if
    `screen` is unavailable, upload falls back to the current process

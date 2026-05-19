@@ -915,7 +915,8 @@ def cmd_process(args: argparse.Namespace) -> int:
                 or (work_dir / "profiling_genomes" / "final" / "bases.tsv").exists()
                 or (work_dir / "profiling_genomes" / "final" / "counts.tsv").exists()
             )
-            has_annotation = (work_dir / "annotating" / "gene_annotations.tsv.xz").exists()
+            missing_annotation_outputs = drakkar.missing_annotation_outputs(work_dir)
+            has_annotation = not missing_annotation_outputs
 
             if has_profiling:
                 finalized_this_study = _finalize_profiling_outputs(
@@ -927,14 +928,26 @@ def cmd_process(args: argparse.Namespace) -> int:
                     prefix=code,
                 ) or finalized_this_study
 
+            if has_profiling and has_annotation:
+                client.set_study_status(studies_table, [study["id"]], "Done")
+                out.success(f"{code}: annotation outputs complete; study status → 'Done'.")
+                finalized_this_study = True
+
             if finalized_this_study:
                 n_finalized += 1
 
             if has_profiling and has_annotation:
                 continue
 
-            if has_profiling and not has_annotation:
-                out.info(f"{code}: profiling done, annotation output absent — launching annotation task.")
+            if has_profiling and missing_annotation_outputs:
+                missing = ", ".join(
+                    str(path.relative_to(work_dir))
+                    for path in missing_annotation_outputs
+                )
+                out.info(
+                    f"{code}: profiling done, annotation outputs incomplete ({missing}) "
+                    "— launching annotation task."
+                )
                 script_path = work_dir / f"{code}.sh"
                 script = drakkar.generate_annotation_script(
                     code=code,
@@ -1314,7 +1327,9 @@ _PROCESS_STATUS_MAP: dict[tuple[str, str], str] = {
     ("profiling",     "stopped"):       "stopped",
     ("profiling",     "error"):         "error",
     ("annotating",   "annotating"):    "annotating",
-    ("annotating",   "completed"):     "completed",
+    ("annotating",   "completed"):     "Done",
+    ("annotating",   "annotated"):     "Done",
+    ("annotating",   "Done"):          "Done",
     ("annotating",   "stopped"):       "stopped",
     ("annotating",   "error"):         "error",
 }
@@ -2484,6 +2499,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "quantified",
             "annotating",
             "annotated",
+            "Done",
             "stopped",
             "error",
         ],
