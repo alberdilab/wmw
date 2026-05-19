@@ -198,6 +198,92 @@ def test_cmd_set_status_annotating_completed_sets_done(tmp_path):
     client.set_study_status.assert_called_once_with("Studies", ["recStudy"], "Done")
 
 
+def test_cmd_set_status_annotating_completed_uploads_annotation_stats_and_file(tmp_path):
+    work_dir = tmp_path / "ST001"
+    final_dir = work_dir / "annotating" / "final"
+    final_dir.mkdir(parents=True)
+    annotation_path = final_dir / "SA000022_bin_339957_genes.tsv"
+    annotation_path.write_text(
+        "gene\tstart\tend\tstrand\tkegg\tec\tpfam\tcazy\tresistance_type\t"
+        "resistance_target\tvf\tvf_type\tsignalp\tdefense\tdefense_type\t"
+        "antidefense\tantidefense_type\n"
+        "gene1\t1\t100\t+\tK00001\t\tPF00001\t\t\t\t\t\t\t\t\t\t\n"
+        "gene2\t2\t200\t-\t\t\t\t\t\t\t\t\t\t\t\t\t\n"
+        "gene3\t3\t300\t+\t\t1.1.1.1\t\tGH1\tDrug\tTarget\tVF1\tType\tSec\tDef\tType\tAnti\tType\n",
+        encoding="utf-8",
+    )
+    (work_dir / "annotating" / "genome_taxonomy.tsv").write_text(
+        "genome\tclassification\tclosest_genome_ani\tclosest_placement_ani\tclosest_placement_af\n"
+        "SA000022_bin_339957.fa\t"
+        "d__Bacteria;p__Pseudomonadota;c__Gammaproteobacteria;"
+        "o__Enterobacterales;f__Aeromonadaceae;g__Aeromonas;"
+        "s__Aeromonas rivipollensis\t"
+        "99.8123\t97.4567\t0.823456\n",
+        encoding="utf-8",
+    )
+    args = argparse.Namespace(
+        study="ST001",
+        workflow="annotating",
+        status="completed",
+        output_dir=str(tmp_path),
+        studies_table="Studies",
+        samples_table="Samples",
+        genomes_table="Genomes",
+        airtable_token="",
+        base_id="",
+    )
+
+    name_fid = str(cfg.get("GENOMES_COL_NAME"))
+    file_fid = str(cfg.get("GENOMES_COL_FILE_ANNOTATION"))
+    client = MagicMock()
+    client.fetch_study_by_code.return_value = {"id": "recStudy", "fields": {"code": "ST001"}}
+    client.fetch_genome_records_by_name.return_value = {
+        "SA000022_bin_339957": {
+            "id": "recGenome",
+            "fields": {name_fid: "SA000022_bin_339957"},
+        }
+    }
+    client.update_genome_records.return_value = 1
+
+    with patch("wmw.cli._require_airtable", return_value=client):
+        assert cli.cmd_set_status(args) == 0
+
+    client.set_study_status.assert_called_once_with("Studies", ["recStudy"], "Done")
+    client.fetch_genome_records_by_name.assert_called_once_with(
+        "Genomes",
+        ["SA000022_bin_339957"],
+        name_fid,
+    )
+    client.update_genome_records.assert_called_once()
+    genomes_table, updates = client.update_genome_records.call_args[0]
+    assert genomes_table == "Genomes"
+    assert updates[0]["id"] == "recGenome"
+    fields = updates[0]["fields"]
+    assert fields[str(cfg.get("GENOMES_COL_NUMBER_GENES"))] == 3
+    assert fields[str(cfg.get("GENOMES_COL_NUMBER_ANNOTATED"))] == 2
+    assert fields[str(cfg.get("GENOMES_COL_NUMBER_KEGG"))] == 1
+    assert fields[str(cfg.get("GENOMES_COL_NUMBER_CAZY"))] == 1
+    assert fields[str(cfg.get("GENOMES_COL_TAXONOMY_DIVISION"))] == "Bacteria"
+    assert fields[str(cfg.get("GENOMES_COL_TAXONOMY_PHYLUM"))] == "Pseudomonadota"
+    assert fields[str(cfg.get("GENOMES_COL_TAXONOMY_CLASS"))] == "Gammaproteobacteria"
+    assert fields[str(cfg.get("GENOMES_COL_TAXONOMY_ORDER"))] == "Enterobacterales"
+    assert fields[str(cfg.get("GENOMES_COL_TAXONOMY_FAMILY"))] == "Aeromonadaceae"
+    assert fields[str(cfg.get("GENOMES_COL_TAXONOMY_GENUS"))] == "Aeromonas"
+    assert fields[str(cfg.get("GENOMES_COL_TAXONOMY_SPECIES"))] == "Aeromonas rivipollensis"
+    assert fields[str(cfg.get("GENOMES_COL_TAXONOMY_FASTANI_ANI"))] == 99.8123
+    assert fields[str(cfg.get("GENOMES_COL_TAXONOMY_CLOSEST_ANI"))] == 97.4567
+    assert fields[str(cfg.get("GENOMES_COL_TAXONOMY_CLOSEST_AF"))] == 0.823456
+
+    gz_path = annotation_path.with_suffix(".tsv.gz")
+    assert gz_path.exists()
+    client.upload_genome_file.assert_called_once_with(
+        "Genomes",
+        "recGenome",
+        file_fid,
+        gz_path,
+    )
+
+
 def test_cmd_set_status_cataloged_uploads_genome_metadata(tmp_path):
     work_dir = tmp_path / "ST001"
     final_dir = work_dir / "cataloging" / "final"

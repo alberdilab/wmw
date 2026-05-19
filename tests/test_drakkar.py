@@ -297,6 +297,90 @@ def test_generate_annotation_script_checks_required_outputs(tmp_path):
     assert "wmw set-status --study PRJ001 --workflow annotating --status completed" in script
 
 
+def test_parse_genome_annotation_tsv_counts_annotation_types(tmp_path):
+    path = tmp_path / "SA000022_bin_1_genes.tsv"
+    path.write_text(
+        "\t".join(
+            [
+                "gene",
+                "start",
+                "end",
+                "strand",
+                "kegg",
+                "ec",
+                "pfam",
+                "cazy",
+                "resistance_type",
+                "resistance_target",
+                "vf",
+                "vf_type",
+                "signalp",
+                "defense",
+                "defense_type",
+                "antidefense",
+                "antidefense_type",
+            ]
+        )
+        + "\n"
+        + "gene1\t1\t100\t+\tK00001\t\tPF00001\t\t\t\t\t\t\t\t\t\t\n"
+        + "gene2\t2\t200\t-\t\t\t\t\t\t\t\t\t\t\t\t\t\n"
+        + "gene3\t3\t300\t+\t\t1.1.1.1\t\tGH1\tDrug\tTarget\tVF1\tType\tSec\tDef\tType\tAnti\tType\n",
+        encoding="utf-8",
+    )
+
+    stats = drakkar.parse_genome_annotation_tsv(path)
+
+    assert stats[str(cfg.get("GENOMES_COL_NUMBER_GENES"))] == 3
+    assert stats[str(cfg.get("GENOMES_COL_NUMBER_ANNOTATED"))] == 2
+    assert stats[str(cfg.get("GENOMES_COL_NUMBER_KEGG"))] == 1
+    assert stats[str(cfg.get("GENOMES_COL_NUMBER_CAZY"))] == 1
+    assert stats[str(cfg.get("GENOMES_COL_NUMBER_EC"))] == 1
+    assert stats[str(cfg.get("GENOMES_COL_NUMBER_VF"))] == 1
+    assert stats[str(cfg.get("GENOMES_COL_NUMBER_AMR"))] == 1
+    assert stats[str(cfg.get("GENOMES_COL_NUMBER_PFAM"))] == 1
+    assert stats[str(cfg.get("GENOMES_COL_NUMBER_SIGNALP"))] == 1
+    assert stats[str(cfg.get("GENOMES_COL_NUMBER_DEFENCE"))] == 1
+    assert stats[str(cfg.get("GENOMES_COL_NUMBER_ANTIDEFENCE"))] == 1
+
+
+def test_parse_genome_taxonomy_tsv_extracts_classification_and_ani(tmp_path):
+    path = tmp_path / "genome_taxonomy.tsv"
+    path.write_text(
+        "genome\tclassification\tclosest_genome_ani\tclosest_placement_ani\tclosest_placement_af\n"
+        "SA000022_bin_1.fa\t"
+        "d__Bacteria;p__Pseudomonadota;c__Gammaproteobacteria;"
+        "o__Enterobacterales;f__Aeromonadaceae;g__Aeromonas;"
+        "s__Aeromonas rivipollensis\t"
+        "99.8123\t97.4567\t0.823456\n",
+        encoding="utf-8",
+    )
+
+    taxonomy = drakkar.parse_genome_taxonomy_tsv(path)
+
+    fields = taxonomy["SA000022_bin_1"]
+    assert fields[str(cfg.get("GENOMES_COL_TAXONOMY_DIVISION"))] == "Bacteria"
+    assert fields[str(cfg.get("GENOMES_COL_TAXONOMY_PHYLUM"))] == "Pseudomonadota"
+    assert fields[str(cfg.get("GENOMES_COL_TAXONOMY_CLASS"))] == "Gammaproteobacteria"
+    assert fields[str(cfg.get("GENOMES_COL_TAXONOMY_ORDER"))] == "Enterobacterales"
+    assert fields[str(cfg.get("GENOMES_COL_TAXONOMY_FAMILY"))] == "Aeromonadaceae"
+    assert fields[str(cfg.get("GENOMES_COL_TAXONOMY_GENUS"))] == "Aeromonas"
+    assert fields[str(cfg.get("GENOMES_COL_TAXONOMY_SPECIES"))] == "Aeromonas rivipollensis"
+    assert fields[str(cfg.get("GENOMES_COL_TAXONOMY_FASTANI_ANI"))] == 99.8123
+    assert fields[str(cfg.get("GENOMES_COL_TAXONOMY_CLOSEST_ANI"))] == 97.4567
+    assert fields[str(cfg.get("GENOMES_COL_TAXONOMY_CLOSEST_AF"))] == 0.823456
+
+
+def test_gzip_annotation_tsv_writes_tsv_gz(tmp_path):
+    path = tmp_path / "SA000022_bin_1_genes.tsv"
+    path.write_text("gene\tkegg\ngene1\tK00001\n", encoding="utf-8")
+
+    gz_path = drakkar.gzip_annotation_tsv(path)
+
+    assert gz_path == tmp_path / "SA000022_bin_1_genes.tsv.gz"
+    with gzip.open(gz_path, "rt", encoding="utf-8") as fh:
+        assert fh.read() == "gene\tkegg\ngene1\tK00001\n"
+
+
 # parse_cataloging_tsv
 # ---------------------------------------------------------------------------
 

@@ -8,6 +8,16 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.4.11] - 2026-05-19
+
+### Added
+
+- Annotation finalization now reads per-genome `annotating/final/*_genes.tsv`
+  files, writes annotation-count fields to matching Genomes records, compresses
+  each TSV to `.tsv.gz`, and uploads it to `GENOMES_COL_FILE_ANNOTATION`.
+- Annotation finalization now reads `annotating/genome_taxonomy.tsv`, extracts
+  rank fields from `classification`, captures ANI/AF taxonomy metrics, and writes
+  them to the configured Genomes taxonomy columns in Airtable.
 ## [0.4.10] - 2026-05-19
 
 ### Changed

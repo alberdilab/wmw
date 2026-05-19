@@ -929,6 +929,13 @@ def cmd_process(args: argparse.Namespace) -> int:
                 ) or finalized_this_study
 
             if has_profiling and has_annotation:
+                finalized_this_study = _finalize_annotation_outputs(
+                    client,
+                    genomes_table,
+                    study,
+                    output_dir,
+                    prefix=code,
+                ) or finalized_this_study
                 client.set_study_status(studies_table, [study["id"]], "Done")
                 out.success(f"{code}: annotation outputs complete; study status → 'Done'.")
                 finalized_this_study = True
@@ -1456,6 +1463,184 @@ def _upload_genome_bin_attachments(
         suffix = "…" if len(failed) > 5 else "."
         out.warn(f"Could not upload genome FASTA files for {_pl(len(failed), 'genome')}: {preview}{suffix}")
     return uploaded
+
+
+def _upload_genome_annotation_attachments(
+    client: Any,
+    genomes_table: str,
+    annotations_by_name: dict[str, Path],
+    existing_records_by_name: dict[str, dict[str, Any]],
+    *,
+    prefix: str = "",
+) -> int:
+    file_fid = str(cfg.get("GENOMES_COL_FILE_ANNOTATION") or "").strip()
+    label = f"{prefix}: " if prefix else ""
+    if not file_fid:
+        out.warn(f"{label}GENOMES_COL_FILE_ANNOTATION is not configured - annotation files not uploaded.")
+        return 0
+
+    from wmw import drakkar
+
+    uploaded = 0
+    skipped_existing = 0
+    failed: list[str] = []
+    for genome_name, annotation_path in annotations_by_name.items():
+        record = existing_records_by_name.get(genome_name, {})
+        record_id = str(record.get("id") or "").strip()
+        if not record_id:
+            continue
+        existing_fields = record.get("fields", {}) or {}
+        if existing_fields.get(file_fid):
+            skipped_existing += 1
+            continue
+        try:
+            gz_path = drakkar.gzip_annotation_tsv(annotation_path)
+            client.upload_genome_file(genomes_table, record_id, file_fid, gz_path)
+        except Exception as exc:
+            failed.append(f"{genome_name} ({exc})")
+        else:
+            uploaded += 1
+
+    if uploaded:
+        out.success(f"{label}uploaded compressed annotation files for {_pl(uploaded, 'genome')}.")
+    if skipped_existing:
+        out.info(f"{label}skipped {_pl(skipped_existing, 'annotation file')} already attached in Airtable.")
+    if failed:
+        preview = "; ".join(failed[:5])
+        suffix = "..." if len(failed) > 5 else "."
+        out.warn(f"{label}could not upload annotation files for {_pl(len(failed), 'genome')}: {preview}{suffix}")
+    return uploaded
+
+
+def _finalize_annotation_outputs(
+    client: Any,
+    genomes_table: str,
+    study_record: dict[str, Any],
+    output_root: Path,
+    *,
+    prefix: str = "",
+) -> bool:
+    """Upload per-genome annotation TSVs and annotation counts to Genomes rows."""
+    from wmw import drakkar
+
+    label = f"{prefix}: " if prefix else ""
+    if not genomes_table:
+        out.warn(f"{label}GENOMES_TABLE is not configured - genome annotations not uploaded.")
+        return False
+
+    fields = study_record.get("fields", {}) or {}
+    study_code = str(fields.get("code", "") or "").strip()
+    if not study_code:
+        out.warn(f"{label}study code is missing - genome annotations not uploaded.")
+        return False
+
+    name_fid = str(cfg.get("GENOMES_COL_NAME") or "").strip()
+    if not name_fid:
+        out.warn(f"{label}GENOMES_COL_NAME is not configured - genome annotations not uploaded.")
+        return True
+
+    work_dir = output_root / study_code
+    annotation_paths = drakkar.genome_annotation_files(work_dir)
+    taxonomy_path = work_dir / "annotating" / "genome_taxonomy.tsv"
+    taxonomy_by_name = drakkar.parse_genome_taxonomy_tsv(taxonomy_path)
+
+    if not annotation_paths and not taxonomy_by_name:
+        final_dir = work_dir / "annotating" / "final"
+        out.warn(
+            f"{label}no per-genome annotation files found at {final_dir} and "
+            f"no taxonomy data parsed from {taxonomy_path} - "
+            "annotation stats, taxonomy, and files not uploaded."
+        )
+        return False
+
+    annotations_by_name: dict[str, Path] = {}
+    unrecognised: list[str] = []
+    for path in annotation_paths:
+        genome_name = drakkar.annotation_file_genome_name(path)
+        if genome_name:
+            annotations_by_name[genome_name] = path
+        else:
+            unrecognised.append(path.name)
+
+    if unrecognised:
+        preview = ", ".join(unrecognised[:10])
+        suffix = "..." if len(unrecognised) > 10 else "."
+        out.warn(f"{label}skipped annotation files with unexpected names: {preview}{suffix}")
+    if annotation_paths and not annotations_by_name and not taxonomy_by_name:
+        return False
+
+    genome_names = list(dict.fromkeys([*annotations_by_name, *taxonomy_by_name]))
+    if not genome_names:
+        return False
+
+    existing_records = client.fetch_genome_records_by_name(
+        genomes_table,
+        genome_names,
+        name_fid,
+    )
+    matched_records = {
+        name: record
+        for name, record in existing_records.items()
+        if str(record.get("id") or "").strip()
+    }
+    missing_records = [name for name in genome_names if name not in matched_records]
+    if missing_records:
+        preview = ", ".join(missing_records[:10])
+        suffix = "..." if len(missing_records) > 10 else "."
+        out.warn(
+            f"{label}no matching Genomes record found for "
+            f"{_pl(len(missing_records), 'annotation/taxonomy output')}: {preview}{suffix}"
+        )
+
+    updates: list[dict[str, Any]] = []
+    unparsed: list[str] = []
+    annotation_update_count = 0
+    taxonomy_update_count = 0
+    for genome_name in genome_names:
+        record = matched_records.get(genome_name)
+        if not record:
+            continue
+
+        fields_to_update: dict[str, Any] = {}
+        annotation_path = annotations_by_name.get(genome_name)
+        if annotation_path:
+            stats = drakkar.parse_genome_annotation_tsv(annotation_path)
+            if stats:
+                fields_to_update.update(stats)
+                annotation_update_count += 1
+            else:
+                unparsed.append(annotation_path.name)
+
+        taxonomy_fields = taxonomy_by_name.get(genome_name)
+        if taxonomy_fields:
+            fields_to_update.update(taxonomy_fields)
+            taxonomy_update_count += 1
+
+        if fields_to_update:
+            updates.append({"id": str(record["id"]), "fields": fields_to_update})
+
+    if updates:
+        updated = client.update_genome_records(genomes_table, updates)
+        if updated:
+            if annotation_update_count and taxonomy_update_count:
+                out.success(f"{label}uploaded annotation counts and taxonomy for {_pl(updated, 'genome')}.")
+            elif annotation_update_count:
+                out.success(f"{label}uploaded annotation counts for {_pl(updated, 'genome')}.")
+            else:
+                out.success(f"{label}uploaded taxonomy for {_pl(updated, 'genome')}.")
+    if unparsed:
+        preview = ", ".join(unparsed[:10])
+        suffix = "..." if len(unparsed) > 10 else "."
+        out.warn(f"{label}could not parse annotation counts from: {preview}{suffix}")
+
+    _upload_genome_annotation_attachments(
+        client,
+        genomes_table,
+        annotations_by_name,
+        matched_records,
+        prefix=prefix,
+    )
+    return True
 
 
 def _launch_genome_file_upload_screen(
@@ -1996,6 +2181,16 @@ def cmd_set_status(args: argparse.Namespace) -> int:
                 client,
                 studies_table,
                 samples_table,
+                study_record,
+                Path(output_dir_str).expanduser().resolve(),
+            )
+
+    if workflow == "annotating" and status in ("completed", "annotated", "Done"):
+        output_dir_str = _conf(args, "output_dir", "DRAKKAR_OUTPUT_DIR")
+        if output_dir_str:
+            _finalize_annotation_outputs(
+                client,
+                genomes_table,
                 study_record,
                 Path(output_dir_str).expanduser().resolve(),
             )

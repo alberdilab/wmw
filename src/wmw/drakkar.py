@@ -750,6 +750,47 @@ _BIN_METADATA_CSV_COLS: list[tuple[str, str, str]] = [
     ("contig_count",  "GENOMES_COL_CONTIGS",        "int"),
 ]
 
+_GENOME_ANNOTATION_COUNT_COLS: list[tuple[str, tuple[str, ...]]] = [
+    # (config_key,                         annotation TSV column(s))
+    ("GENOMES_COL_NUMBER_KEGG",           ("kegg",)),
+    ("GENOMES_COL_NUMBER_CAZY",           ("cazy",)),
+    ("GENOMES_COL_NUMBER_EC",             ("ec",)),
+    ("GENOMES_COL_NUMBER_VF",             ("vf", "vf_type")),
+    ("GENOMES_COL_NUMBER_AMR",            ("resistance_type", "resistance_target")),
+    ("GENOMES_COL_NUMBER_PFAM",           ("pfam",)),
+    ("GENOMES_COL_NUMBER_SIGNALP",        ("signalp",)),
+    ("GENOMES_COL_NUMBER_DEFENCE",        ("defense", "defense_type")),
+    ("GENOMES_COL_NUMBER_ANTIDEFENCE",    ("antidefense", "antidefense_type")),
+]
+
+_GENOME_TAXONOMY_RANKS: list[tuple[str, str]] = [
+    # (classification prefix, config_key)
+    ("d", "GENOMES_COL_TAXONOMY_DIVISION"),
+    ("p", "GENOMES_COL_TAXONOMY_PHYLUM"),
+    ("c", "GENOMES_COL_TAXONOMY_CLASS"),
+    ("o", "GENOMES_COL_TAXONOMY_ORDER"),
+    ("f", "GENOMES_COL_TAXONOMY_FAMILY"),
+    ("g", "GENOMES_COL_TAXONOMY_GENUS"),
+    ("s", "GENOMES_COL_TAXONOMY_SPECIES"),
+]
+
+_GENOME_TAXONOMY_STAT_COLS: list[tuple[tuple[str, ...], str, str]] = [
+    # (tsv_column(s),                         config_key,                          type)
+    (("closest_genome_ani", "fastani_ani"),   "GENOMES_COL_TAXONOMY_FASTANI_ANI",  "float"),
+    (("closest_placement_ani",),              "GENOMES_COL_TAXONOMY_CLOSEST_ANI",  "float"),
+    (("closest_placement_af",),               "GENOMES_COL_TAXONOMY_CLOSEST_AF",   "float"),
+]
+
+_GENOME_TAXONOMY_NAME_COLS = (
+    "genome",
+    "user_genome",
+    "name",
+    "bin",
+    "mag",
+)
+
+_GENOME_ANNOTATION_NON_ANNOTATION_COLS = {"gene", "start", "end", "strand"}
+
 _MISSING_VALUES = {"", "NA", "N/A", "NONE", "NULL", "NAN"}
 
 
@@ -764,6 +805,8 @@ def _coerce_stat(raw: str, typ: str) -> Any | None:
     try:
         if typ == "int":
             return int(float(raw))
+        if typ == "float":
+            return float(raw)
         if typ == "float2":
             return round(float(raw), 2)
         return round(float(raw), 4)
@@ -908,6 +951,205 @@ def parse_cataloging_tsv(tsv_path: Path) -> dict[str, dict[str, Any]]:
             if fields:
                 result[assembly] = fields
     return result
+
+
+def genome_annotation_files(work_dir: Path) -> list[Path]:
+    """Return genome-specific annotation TSVs produced by drakkar annotating."""
+    final_dir = Path(work_dir) / "annotating" / "final"
+    if not final_dir.exists():
+        return []
+    return sorted(final_dir.glob("*_genes.tsv"))
+
+
+def annotation_file_genome_name(annotation_path: Path) -> str:
+    """Return the genome name encoded in ``<genome>_genes.tsv``."""
+    name = Path(annotation_path).name
+    lower = name.lower()
+    for suffix in ("_genes.tsv.gz", "_genes.tsv"):
+        if lower.endswith(suffix):
+            return name[: -len(suffix)]
+    return ""
+
+
+def _row_has_value(row: dict[str, Any], columns: tuple[str, ...]) -> bool:
+    for column in columns:
+        value = row.get(column)
+        if value is None:
+            continue
+        if not _is_missing(str(value)):
+            return True
+    return False
+
+
+def _row_has_any_annotation(row: dict[str, Any], columns: list[str]) -> bool:
+    for column in columns:
+        if column in _GENOME_ANNOTATION_NON_ANNOTATION_COLS:
+            continue
+        value = row.get(column)
+        if value is None:
+            continue
+        if not _is_missing(str(value)):
+            return True
+    return False
+
+
+def _row_value(row: dict[str, Any], *columns: str) -> str:
+    fallback = ""
+    for column in columns:
+        value = row.get(column)
+        if value is not None:
+            text = str(value).strip()
+            if text:
+                return text
+            fallback = text
+
+    lower_row = {str(key).strip().lower(): value for key, value in row.items()}
+    for column in columns:
+        value = lower_row.get(column.lower())
+        if value is not None:
+            text = str(value).strip()
+            if text:
+                return text
+            fallback = text
+    return fallback
+
+
+def _parse_taxonomy_classification(raw: str) -> dict[str, str]:
+    rank_fids = {
+        prefix: fid
+        for prefix, config_key in _GENOME_TAXONOMY_RANKS
+        if (fid := _config_field_id(config_key))
+    }
+    if not rank_fids:
+        return {}
+
+    fields: dict[str, str] = {}
+    parts = [part.strip() for part in raw.split(";") if part.strip()]
+    for part in parts:
+        if "__" not in part:
+            continue
+        prefix, value = part.split("__", 1)
+        prefix = prefix.strip().lower()
+        value = value.strip()
+        fid = rank_fids.get(prefix)
+        if fid and not _is_missing(value):
+            fields[fid] = value
+
+    if fields or "__" in raw:
+        return fields
+
+    for value, (_prefix, config_key) in zip(parts, _GENOME_TAXONOMY_RANKS):
+        value = value.strip()
+        fid = _config_field_id(config_key)
+        if fid and not _is_missing(value):
+            fields[fid] = value
+    return fields
+
+
+def parse_genome_annotation_tsv(tsv_path: Path) -> dict[str, int]:
+    """Parse a per-genome ``*_genes.tsv`` and return Airtable field-ID counts."""
+    if not tsv_path.exists():
+        return {}
+
+    genes_fid = _config_field_id("GENOMES_COL_NUMBER_GENES")
+    annotated_fid = _config_field_id("GENOMES_COL_NUMBER_ANNOTATED")
+    count_fields = [
+        (fid, columns)
+        for config_key, columns in _GENOME_ANNOTATION_COUNT_COLS
+        if (fid := _config_field_id(config_key))
+    ]
+
+    with tsv_path.open(encoding="utf-8", newline="") as fh:
+        reader = csv.DictReader(fh, delimiter="\t")
+        columns = list(reader.fieldnames or [])
+        if not columns:
+            return {}
+
+        n_genes = 0
+        n_annotated = 0
+        counts: dict[str, int] = {fid: 0 for fid, _columns in count_fields}
+
+        for row in reader:
+            if not str(row.get("gene") or "").strip():
+                continue
+            n_genes += 1
+            if _row_has_any_annotation(row, columns):
+                n_annotated += 1
+            for fid, annotation_columns in count_fields:
+                if _row_has_value(row, annotation_columns):
+                    counts[fid] += 1
+
+    fields: dict[str, int] = {}
+    if genes_fid:
+        fields[genes_fid] = n_genes
+    if annotated_fid:
+        fields[annotated_fid] = n_annotated
+    fields.update(counts)
+    return fields
+
+
+def parse_genome_taxonomy_tsv(tsv_path: Path) -> dict[str, dict[str, Any]]:
+    """Parse drakkar's genome taxonomy TSV into Genomes-table Airtable fields.
+
+    Returns ``{genome_name: {field_id: value}}``. Genome names are normalized in
+    the same way as bin FASTA and annotation filenames, so ``*.fa`` suffixes and
+    path components are removed before matching Airtable Genomes rows.
+    """
+    if not tsv_path.exists():
+        return {}
+
+    stat_map = [
+        (columns, fid, typ)
+        for columns, config_key, typ in _GENOME_TAXONOMY_STAT_COLS
+        if (fid := _config_field_id(config_key))
+    ]
+
+    result: dict[str, dict[str, Any]] = {}
+    with tsv_path.open(encoding="utf-8", newline="") as fh:
+        reader = csv.DictReader(fh, delimiter="\t")
+        if not reader.fieldnames:
+            return {}
+
+        for row in reader:
+            genome_raw = _row_value(row, *_GENOME_TAXONOMY_NAME_COLS)
+            genome_name = _strip_fasta_suffix(genome_raw)
+            if not genome_name:
+                continue
+
+            fields: dict[str, Any] = dict(
+                _parse_taxonomy_classification(_row_value(row, "classification"))
+            )
+            for columns, fid, typ in stat_map:
+                value = _coerce_stat(_row_value(row, *columns), typ)
+                if value is not None:
+                    fields[fid] = value
+
+            if fields:
+                result[genome_name] = fields
+    return result
+
+
+def gzip_annotation_tsv(tsv_path: Path) -> Path:
+    """Compress a per-genome annotation TSV beside the source and return .tsv.gz."""
+    tsv_path = Path(tsv_path)
+    lower = tsv_path.name.lower()
+    if lower.endswith(".gz"):
+        return tsv_path
+    if lower.endswith(".tsv"):
+        gz_path = tsv_path.with_suffix(".tsv.gz")
+    else:
+        gz_path = tsv_path.with_name(f"{tsv_path.name}.tsv.gz")
+
+    if gz_path.exists() and gz_path.stat().st_size > 0:
+        try:
+            if gz_path.stat().st_mtime >= tsv_path.stat().st_mtime:
+                return gz_path
+        except FileNotFoundError:
+            raise
+
+    with tsv_path.open("rb") as src, gzip.open(gz_path, "wb") as dst:
+        shutil.copyfileobj(src, dst)
+    return gz_path
 
 
 def _strip_fasta_suffix(raw: str) -> str:

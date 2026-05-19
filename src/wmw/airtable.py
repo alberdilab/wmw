@@ -431,7 +431,7 @@ class AirtableClient:
         field_id: str,
         file_path: str | Path,
     ) -> dict[str, Any]:
-        """Upload a local genome FASTA archive to a Genomes-table attachment field."""
+        """Upload a local gzip archive to a Genomes-table attachment field."""
         tbl = self._fid_tbl(genomes_table)
         return tbl.upload_attachment(
             record_id,
