@@ -778,6 +778,64 @@ def test_cmd_process_resume_without_outputs_launches_preprocessing(tmp_path):
     )
 
 
+def test_study_priority_drakkar_kwargs_low_sets_lazy_slurm_options():
+    assert cli._study_priority_drakkar_kwargs({"priority": "Low"}) == {
+        "slurm_partition": "lazyqueue",
+        "slurm_qos": "lazy",
+    }
+    assert cli._study_priority_drakkar_kwargs({"priority": "High"}) == {}
+    assert cli._study_priority_drakkar_kwargs({}) == {}
+
+
+def test_cmd_process_low_priority_passes_lazy_slurm_options(tmp_path):
+    work_dir = tmp_path / "ST001"
+    args = argparse.Namespace(
+        batch="",
+        workflow="preprocessing",
+        slurm=True,
+        output_dir=str(tmp_path),
+        studies_table="Studies",
+        samples_table="Samples",
+        genomes_table="Genomes",
+        airtable_token="",
+        base_id="",
+    )
+
+    client = MagicMock()
+    ready_study = {
+        "id": "recStudy",
+        "fields": {
+            "code": "ST001",
+            "study_accession": "PRJEB001",
+            "status": "ready",
+            "priority": "Low",
+        },
+    }
+
+    def fetch_by_status(_table, status):
+        return [ready_study] if status == "ready" else []
+
+    client.fetch_studies_by_status.side_effect = fetch_by_status
+    client.fetch_samples_for_study.return_value = [
+        {"id": "recS1", "fields": {"code": "SA000022", "status": "use"}},
+    ]
+
+    with (
+        patch("wmw.cli._require_airtable", return_value=client),
+        patch("wmw.drakkar.generate_full_pipeline_script", return_value="#!/usr/bin/env bash\n") as gen_full,
+        patch("shutil.which", return_value=None),
+        patch("subprocess.run") as run,
+    ):
+        assert cli.cmd_process(args) == 0
+
+    assert (work_dir / "ST001.sh").exists()
+    kwargs = gen_full.call_args.kwargs
+    assert kwargs["slurm"] is True
+    assert kwargs["slurm_partition"] == "lazyqueue"
+    assert kwargs["slurm_qos"] == "lazy"
+    run.assert_not_called()
+
+
 def test_cmd_process_resume_after_preprocessing_launches_cataloging_only(tmp_path):
     work_dir = tmp_path / "ST001"
     work_dir.mkdir()

@@ -271,6 +271,21 @@ def deduplicate_runs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def _run_exclusion(
+    run: dict[str, Any],
+    criterion: str,
+    value: str,
+    expected: str,
+) -> dict[str, str]:
+    return {
+        "run_accession": _str(run.get("run_accession")),
+        "study_accession": _str(run.get("study_accession")),
+        "criterion": criterion,
+        "value": value,
+        "expected": expected,
+    }
+
+
 def filter_runs(
     runs: list[dict[str, Any]],
     *,
@@ -279,13 +294,16 @@ def filter_runs(
     library_strategies: list[str] | None = None,
     library_sources: list[str] | None = None,
     instrument_platform: str | None = None,
-) -> tuple[list[dict[str, Any]], int]:
+    include_exclusions: bool = False,
+) -> tuple[list[dict[str, Any]], int] | tuple[list[dict[str, Any]], int, list[dict[str, str]]]:
     """Post-fetch filter applied after normalization.
 
     Used as a secondary safety net for host/base filters, and as the primary
     filter layer for wmw fetch (library strategy, source, platform).
 
-    Returns (kept_runs, excluded_count).
+    Returns (kept_runs, excluded_count). If include_exclusions is true, returns
+    (kept_runs, excluded_count, exclusions), where exclusions describes the
+    first criterion that rejected each run.
     """
     exclude_set = {str(t).strip() for t in (exclude_host_tax_ids or []) if str(t).strip()}
     strategy_set = (
@@ -300,11 +318,21 @@ def filter_runs(
 
     kept: list[dict[str, Any]] = []
     excluded = 0
+    exclusions: list[dict[str, str]] = []
 
     for run in runs:
         host_tid = str(run.get("host_tax_id") or "").strip()
         if exclude_set and host_tid and host_tid in exclude_set:
             excluded += 1
+            if include_exclusions:
+                exclusions.append(
+                    _run_exclusion(
+                        run,
+                        "host_tax_id",
+                        host_tid,
+                        "not in excluded host taxon IDs",
+                    )
+                )
             continue
 
         if min_bases is not None:
@@ -313,6 +341,15 @@ def filter_runs(
                 try:
                     if int(raw) < min_bases:
                         excluded += 1
+                        if include_exclusions:
+                            exclusions.append(
+                                _run_exclusion(
+                                    run,
+                                    "base_count",
+                                    raw,
+                                    f">= {min_bases}",
+                                )
+                            )
                         continue
                 except (ValueError, TypeError):
                     pass
@@ -321,20 +358,49 @@ def filter_runs(
             strat = str(run.get("library_strategy") or "").strip().upper()
             if strat and strat not in strategy_set:
                 excluded += 1
+                if include_exclusions:
+                    exclusions.append(
+                        _run_exclusion(
+                            run,
+                            "library_strategy",
+                            strat,
+                            "one of " + ",".join(sorted(strategy_set)),
+                        )
+                    )
                 continue
 
         if source_set:
             src = str(run.get("library_source") or "").strip().upper()
             if src and src not in source_set:
                 excluded += 1
+                if include_exclusions:
+                    exclusions.append(
+                        _run_exclusion(
+                            run,
+                            "library_source",
+                            src,
+                            "one of " + ",".join(sorted(source_set)),
+                        )
+                    )
                 continue
 
         if platform_upper:
             plat = str(run.get("instrument_platform") or "").strip().upper()
             if plat and plat != platform_upper:
                 excluded += 1
+                if include_exclusions:
+                    exclusions.append(
+                        _run_exclusion(
+                            run,
+                            "instrument_platform",
+                            plat,
+                            platform_upper,
+                        )
+                    )
                 continue
 
         kept.append(run)
 
+    if include_exclusions:
+        return kept, excluded, exclusions
     return kept, excluded

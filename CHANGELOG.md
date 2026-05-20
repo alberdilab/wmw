@@ -8,6 +8,16 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.5.0] - 2026-05-20
+
+### Added
+
+- `wmw process` now reads the Studies table `priority` field from
+  `STUDIES_COL_PRIORITY`; studies marked `Low` add
+  `--slurm-partition lazyqueue --slurm-qos lazy` to generated Drakkar commands.
+- `wmw fetch` now reports the first filter criterion that excluded each run,
+  grouped by criterion/value, so removed runs are easier to diagnose.
+
 ## [0.4.11] - 2026-05-19
 
 ### Added
@@ -18,6 +28,7 @@ All notable changes to wmw are documented here.
 - Annotation finalization now reads `annotating/genome_taxonomy.tsv`, extracts
   rank fields from `classification`, captures ANI/AF taxonomy metrics, and writes
   them to the configured Genomes taxonomy columns in Airtable.
+
 ## [0.4.10] - 2026-05-19
 
 ### Changed
@@ -26,11 +37,13 @@ All notable changes to wmw are documented here.
   `annotating/genome_taxonomy.tsv`. Resume mode launches annotation when profiling
   exists but either annotation output is missing, and marks the Airtable study
   status as `Done` only when both files are present.
+
 ## [0.4.9] - 2026-05-14
 
 ### Changed
 
 - All generated drakkar scripts (preprocessing, cataloging, profiling, annotating) and direct `run_workflow` calls now include `--env_path /projects/alberdilab/data/environments/drakkar/` so Snakemake conda environments are resolved from the correct shared directory.
+
 ## [0.4.8] - 2026-05-14
 
 ### Fixed
@@ -44,6 +57,7 @@ All notable changes to wmw are documented here.
   the incorrect `drakkar profiling -B <bin_paths> -q <bin_metadata> -o <work_dir>`. This
   affects both `wmw process --workflow annotating` and the annotation stage of the full
   pipeline script.
+
 ## [0.4.7] - 2026-05-12
 
 ### Fixed
@@ -52,6 +66,7 @@ All notable changes to wmw are documented here.
   `profiling_genomes.tsv` is absent but `profiling_genomes/final/bases.tsv` or
   `profiling_genomes/final/counts.tsv` exist, preventing it from re-launching a
   profiling script instead of an annotation script.
+
 ## [0.4.6] - 2026-05-12
 
 ### Changed
@@ -61,6 +76,7 @@ All notable changes to wmw are documented here.
   cataloging. Previously, studies set to `rerun` would only produce a
   preprocessing+cataloging script and require additional manual resume steps to
   reach profiling and annotation.
+
 ## [0.4.5] - 2026-05-12
 
 ### Added
@@ -82,6 +98,7 @@ All notable changes to wmw are documented here.
 - `profiling_genomes.tsv` is uploaded to the study's `STUDIES_COL_FILE_QUANTIFYING` attachment field.
 - `profiling_genomes/final/bases.tsv` and `profiling_genomes/final/counts.tsv` are uploaded to
   `STUDIES_COL_FILE_BASES` and `STUDIES_COL_FILE_COUNTS` respectively.
+
 ## [0.4.4] - 2026-05-12
 
 ### Fixed
@@ -90,12 +107,14 @@ All notable changes to wmw are documented here.
   `drakkar profiling`, so relative paths inside `all_bin_paths.txt` (e.g.
   `cataloging/final/SA000039/SA000039_bin_100159.fa`) are resolved correctly
   instead of against the shell's launch directory.
+
 ## [0.4.3] - 2026-05-12
 
 ### Fixed
 
 - `wmw set-status --status quantifying` and `--status quantified` were rejected
   as invalid choices; added both to the `--status` argparse allowlist.
+
 ## [0.4.2] - 2026-05-12
 
 ### Added

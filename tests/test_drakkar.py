@@ -191,6 +191,37 @@ def test_generate_preprocessing_script_slurm_flag(tmp_path):
     assert "-p slurm" in script
 
 
+def test_generate_preprocessing_script_slurm_partition_and_qos(tmp_path):
+    script = drakkar.generate_preprocessing_script(
+        code="PRJ002",
+        tsv_path=tmp_path / "PRJ002.tsv",
+        work_dir=tmp_path,
+        conda_env="/envs/drakkar",
+        slurm=True,
+        slurm_partition="lazyqueue",
+        slurm_qos="lazy",
+    )
+
+    assert "-p slurm" in script
+    assert "--slurm-partition lazyqueue" in script
+    assert "--slurm-qos lazy" in script
+
+
+def test_generate_full_pipeline_script_slurm_partition_and_qos_for_each_stage(tmp_path):
+    script = drakkar.generate_full_pipeline_script(
+        code="PRJ002",
+        tsv_path=tmp_path / "PRJ002.tsv",
+        work_dir=tmp_path,
+        conda_env="/envs/drakkar",
+        slurm=True,
+        slurm_partition="lazyqueue",
+        slurm_qos="lazy",
+    )
+
+    assert script.count("--slurm-partition lazyqueue") == 4
+    assert script.count("--slurm-qos lazy") == 4
+
+
 def test_generate_preprocessing_script_no_conda(tmp_path):
     script = drakkar.generate_preprocessing_script(
         code="PRJ003",

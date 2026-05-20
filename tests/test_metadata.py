@@ -201,6 +201,30 @@ def _run_full(run_accession, library_strategy="WGS", library_source="METAGENOMIC
     }
 
 
+def test_filter_runs_reports_exclusion_criterion():
+    runs = [
+        _run_full("ERR010", library_source="GENOMIC"),
+        _run_full("ERR011", library_source="METAGENOMIC"),
+    ]
+    kept, excluded, exclusions = metadata.filter_runs(
+        runs,
+        library_sources=["METAGENOMIC"],
+        include_exclusions=True,
+    )
+
+    assert excluded == 1
+    assert kept[0]["run_accession"] == "ERR011"
+    assert exclusions == [
+        {
+            "run_accession": "ERR010",
+            "study_accession": "",
+            "criterion": "library_source",
+            "value": "GENOMIC",
+            "expected": "one of METAGENOMIC",
+        }
+    ]
+
+
 def test_filter_runs_library_strategy():
     runs = [
         _run_full("ERR040", library_strategy="WGS"),

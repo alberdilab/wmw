@@ -37,6 +37,8 @@ from wmw import output as out
 _GENOME_UPLOAD_SCREEN_SUFFIX = "-genome-upload"
 _GENOME_MIN_COMPLETENESS = 50.0
 _GENOME_MAX_CONTAMINATION = 10.0
+_LOW_PRIORITY_SLURM_PARTITION = "lazyqueue"
+_LOW_PRIORITY_SLURM_QOS = "lazy"
 
 
 class _WmwParser(argparse.ArgumentParser):
@@ -647,6 +649,40 @@ def _resolve_fetch_params(args: argparse.Namespace) -> dict:
     }
 
 
+def _show_run_filter_exclusions(
+    exclusions: list[dict[str, str]],
+    *,
+    max_examples: int = 20,
+) -> None:
+    """Print the first failed filter criterion for excluded runs."""
+    if not exclusions:
+        return
+
+    grouped: dict[tuple[str, str, str], list[str]] = {}
+    for exclusion in exclusions:
+        key = (
+            exclusion.get("criterion", ""),
+            exclusion.get("value", ""),
+            exclusion.get("expected", ""),
+        )
+        accession = exclusion.get("run_accession") or "(unknown run)"
+        grouped.setdefault(key, []).append(accession)
+
+    out.info("  Exclusion criteria used:")
+    for (criterion, value, expected), accessions in sorted(
+        grouped.items(),
+        key=lambda item: (-len(item[1]), item[0]),
+    ):
+        shown = ", ".join(accessions[:max_examples])
+        more = len(accessions) - max_examples
+        if more > 0:
+            shown = f"{shown}, +{more} more"
+        out.info(
+            f"    {criterion}={value or '(blank)'}; expected {expected}: "
+            f"{_pl(len(accessions), 'run')} ({shown})"
+        )
+
+
 def cmd_fetch(args: argparse.Namespace) -> int:
     from wmw import ena, metadata
 
@@ -718,25 +754,29 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     all_runs = metadata.deduplicate_runs(all_runs)
 
     if params["exclude_ids"]:
-        all_runs, n_host_excluded = metadata.filter_runs(
+        all_runs, n_host_excluded, host_exclusions = metadata.filter_runs(
             all_runs,
             exclude_host_tax_ids=params["exclude_ids"],
+            include_exclusions=True,
         )
         out.info(
             f"Excluding {len(params['exclude_ids'])} host taxon ID(s). Use --include All to disable."
         )
         if n_host_excluded:
             out.info(f"  Host exclusion filter removed {_pl(n_host_excluded, 'run')}.")
+            _show_run_filter_exclusions(host_exclusions)
 
-    all_runs, n_other_excluded = metadata.filter_runs(
+    all_runs, n_other_excluded, other_exclusions = metadata.filter_runs(
         all_runs,
         min_bases=params["min_bases"],
         library_strategies=params["library_strategies"],
         library_sources=params["library_sources"],
         instrument_platform=params["instrument_platform"],
+        include_exclusions=True,
     )
     if n_other_excluded:
         out.info(f"Run filter(s) removed {_pl(n_other_excluded, 'run')}.")
+        _show_run_filter_exclusions(other_exclusions)
 
     out.info(f"Total runs after filtering: {len(all_runs)}")
 
@@ -824,6 +864,16 @@ def _existing_workflow_tsv_path(work_dir: Path, study_code: str, workflow: str) 
     return preferred
 
 
+def _study_priority_drakkar_kwargs(fields: dict[str, Any]) -> dict[str, str]:
+    priority = str(fields.get("priority", "") or "").strip().lower()
+    if priority != "low":
+        return {}
+    return {
+        "slurm_partition": _LOW_PRIORITY_SLURM_PARTITION,
+        "slurm_qos": _LOW_PRIORITY_SLURM_QOS,
+    }
+
+
 def cmd_process(args: argparse.Namespace) -> int:
     from wmw import drakkar
 
@@ -870,6 +920,7 @@ def cmd_process(args: argparse.Namespace) -> int:
         code = fields.get("code", "")
         study_accession = fields.get("study_accession", "")
         study_status = fields.get("status", "ready")
+        priority_drakkar_kwargs = _study_priority_drakkar_kwargs(fields)
         if not code:
             out.warn(f"Study {study['id']} has no code — skipping.")
             continue
@@ -962,6 +1013,7 @@ def cmd_process(args: argparse.Namespace) -> int:
                     conda_env=conda_env,
                     slurm=slurm,
                     wmw_conda_env=wmw_conda_env,
+                    **priority_drakkar_kwargs,
                 )
                 _write_and_maybe_launch_script(code, script_path, script)
                 n_generated += 1
@@ -976,6 +1028,7 @@ def cmd_process(args: argparse.Namespace) -> int:
                     conda_env=conda_env,
                     slurm=slurm,
                     wmw_conda_env=wmw_conda_env,
+                    **priority_drakkar_kwargs,
                 )
                 _write_and_maybe_launch_script(code, script_path, script)
                 n_generated += 1
@@ -1003,6 +1056,7 @@ def cmd_process(args: argparse.Namespace) -> int:
                     conda_env=conda_env,
                     slurm=slurm,
                     wmw_conda_env=wmw_conda_env,
+                    **priority_drakkar_kwargs,
                 )
             else:
                 out.info(f"{code}: preprocessing output is missing; launching preprocessing followed by cataloging.")
@@ -1015,6 +1069,7 @@ def cmd_process(args: argparse.Namespace) -> int:
                     wmw_conda_env=wmw_conda_env,
                     memory_multiplier=fields.get("memory_boost") or None,
                     time_multiplier=fields.get("time_boost") or None,
+                    **priority_drakkar_kwargs,
                 )
             _write_and_maybe_launch_script(code, script_path, script)
             n_generated += 1
@@ -1050,6 +1105,7 @@ def cmd_process(args: argparse.Namespace) -> int:
                 wmw_conda_env=wmw_conda_env,
                 memory_multiplier=fields.get("memory_boost") or None,
                 time_multiplier=fields.get("time_boost") or None,
+                **priority_drakkar_kwargs,
             )
         elif workflow == "profiling":
             script = drakkar.generate_profiling_script(
@@ -1058,6 +1114,7 @@ def cmd_process(args: argparse.Namespace) -> int:
                 conda_env=conda_env,
                 slurm=slurm,
                 wmw_conda_env=wmw_conda_env,
+                **priority_drakkar_kwargs,
             )
         elif workflow == "annotating":
             script = drakkar.generate_annotation_script(
@@ -1066,6 +1123,7 @@ def cmd_process(args: argparse.Namespace) -> int:
                 conda_env=conda_env,
                 slurm=slurm,
                 wmw_conda_env=wmw_conda_env,
+                **priority_drakkar_kwargs,
             )
         else:
             _die(f"Workflow {workflow!r} script generation is not yet implemented.")

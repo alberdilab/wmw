@@ -130,12 +130,13 @@ wmw process [--batch BATCH]
 3. If resume still has a pending Drakkar task, launch only the earliest missing task whose dependencies are satisfied
 4. For `status="ready"` or `"rerun"`, fetch the study's samples and write `{output_dir}/{code}/{code}.tsv` with samples whose status is `"use"`
 5. Write `{output_dir}/{code}/{code}.sh`
-6. Launch the script in a detached `screen` session named `{code}`
-7. Generated scripts update the Study status through `preprocessing`, `preprocessed`, `cataloging`, `cataloged`, `quantifying`, `quantified`, `annotating`, `Done`, `error`, or `stopped`
-8. Genome FASTA attachment uploads are detached into a `{code}-genome-upload`
+6. Studies with `Priority = Low` add `--slurm-partition lazyqueue --slurm-qos lazy` to generated Drakkar commands
+7. Launch the script in a detached `screen` session named `{code}`
+8. Generated scripts update the Study status through `preprocessing`, `preprocessed`, `cataloging`, `cataloged`, `quantifying`, `quantified`, `annotating`, `Done`, `error`, or `stopped`
+9. Genome FASTA attachment uploads are detached into a `{code}-genome-upload`
    `screen` session when finalization is run outside an existing `screen`; if
    `screen` is unavailable, upload falls back to the current process
-9. Genomes are only created/updated and uploaded when completeness is above 50
+10. Genomes are only created/updated and uploaded when completeness is above 50
    and contamination is below 10
 
 ## wmw stop

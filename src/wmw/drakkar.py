@@ -156,6 +156,18 @@ def _rename_workflow_tsv_line(code: str, work_dir: Path, workflow: str) -> str:
     return f"if [ -f {src} ]; then mv -f {src} {dst}; fi"
 
 
+def _with_slurm_options(
+    flags: str,
+    slurm_partition: str | None = None,
+    slurm_qos: str | None = None,
+) -> str:
+    if slurm_partition:
+        flags += f" --slurm-partition {shlex.quote(str(slurm_partition))}"
+    if slurm_qos:
+        flags += f" --slurm-qos {shlex.quote(str(slurm_qos))}"
+    return flags
+
+
 def generate_full_pipeline_script(
     code: str,
     tsv_path: Path,
@@ -165,6 +177,8 @@ def generate_full_pipeline_script(
     wmw_conda_env: str = "",
     memory_multiplier: str | float | None = None,
     time_multiplier: str | float | None = None,
+    slurm_partition: str | None = None,
+    slurm_qos: str | None = None,
 ) -> str:
     """Return a bash script that runs the full pipeline for *code*:
     preprocessing → cataloging → profiling → annotation."""
@@ -175,10 +189,20 @@ def generate_full_pipeline_script(
         preprocessing_flags += f" --memory-multiplier {memory_multiplier}"
     if time_multiplier not in (None, "", "1", 1, 1.0):
         preprocessing_flags += f" --time-multiplier {time_multiplier}"
+    preprocessing_flags = _with_slurm_options(
+        preprocessing_flags,
+        slurm_partition=slurm_partition,
+        slurm_qos=slurm_qos,
+    )
 
     cataloging_flags = f"-f {tsv_path} -o {work_dir} --multicoverage --env_path {DRAKKAR_ENV_PATH}"
     if slurm:
         cataloging_flags += " -p slurm"
+    cataloging_flags = _with_slurm_options(
+        cataloging_flags,
+        slurm_partition=slurm_partition,
+        slurm_qos=slurm_qos,
+    )
 
     bin_paths = shlex.quote(str(work_dir / "cataloging" / "final" / "all_bin_paths.txt"))
     reads_dir = shlex.quote(str(work_dir / "preprocessing" / "final"))
@@ -188,10 +212,20 @@ def generate_full_pipeline_script(
     profiling_flags = f"-B {bin_paths} -r {reads_dir} -a 0.98 -t genomes -q {bin_metadata} -o {out_dir} --env_path {DRAKKAR_ENV_PATH}"
     if slurm:
         profiling_flags += " -p slurm"
+    profiling_flags = _with_slurm_options(
+        profiling_flags,
+        slurm_partition=slurm_partition,
+        slurm_qos=slurm_qos,
+    )
 
     annotation_flags = f"-B {bin_paths} -o {out_dir} --env_path {DRAKKAR_ENV_PATH}"
     if slurm:
         annotation_flags += " -p slurm"
+    annotation_flags = _with_slurm_options(
+        annotation_flags,
+        slurm_partition=slurm_partition,
+        slurm_qos=slurm_qos,
+    )
 
     if conda_env:
         c_flag = "-p" if str(conda_env).startswith(("/", "~", ".")) else "-n"
@@ -325,6 +359,8 @@ def generate_preprocessing_script(
     wmw_conda_env: str = "",
     memory_multiplier: str | float | None = None,
     time_multiplier: str | float | None = None,
+    slurm_partition: str | None = None,
+    slurm_qos: str | None = None,
 ) -> str:
     """Return a bash script that runs drakkar preprocessing for *code* and updates Airtable."""
     drakkar_flags = f"-f {tsv_path} -o {work_dir} --fraction --nonpareil --env_path {DRAKKAR_ENV_PATH}"
@@ -334,6 +370,11 @@ def generate_preprocessing_script(
         drakkar_flags += f" --memory-multiplier {memory_multiplier}"
     if time_multiplier not in (None, "", "1", 1, 1.0):
         drakkar_flags += f" --time-multiplier {time_multiplier}"
+    drakkar_flags = _with_slurm_options(
+        drakkar_flags,
+        slurm_partition=slurm_partition,
+        slurm_qos=slurm_qos,
+    )
 
     if conda_env:
         c_flag = "-p" if str(conda_env).startswith(("/", "~", ".")) else "-n"
@@ -358,6 +399,11 @@ def generate_preprocessing_script(
     cataloging_flags = f"-f {tsv_path} -o {work_dir} --multicoverage --env_path {DRAKKAR_ENV_PATH}"
     if slurm:
         cataloging_flags += " -p slurm"
+    cataloging_flags = _with_slurm_options(
+        cataloging_flags,
+        slurm_partition=slurm_partition,
+        slurm_qos=slurm_qos,
+    )
     if conda_env:
         cataloging_cmd = f"conda run {c_flag} {conda_env} drakkar cataloging {cataloging_flags}"
     else:
@@ -426,6 +472,8 @@ def generate_profiling_script(
     conda_env: str,
     slurm: bool = False,
     wmw_conda_env: str = "",
+    slurm_partition: str | None = None,
+    slurm_qos: str | None = None,
 ) -> str:
     """Return a bash script that runs drakkar profiling for *code* and updates Airtable."""
     bin_paths = shlex.quote(str(work_dir / "cataloging" / "final" / "all_bin_paths.txt"))
@@ -436,6 +484,11 @@ def generate_profiling_script(
     profiling_flags = f"-B {bin_paths} -r {reads_dir} -a 0.98 -t genomes -q {bin_metadata} -o {out_dir} --env_path {DRAKKAR_ENV_PATH}"
     if slurm:
         profiling_flags += " -p slurm"
+    profiling_flags = _with_slurm_options(
+        profiling_flags,
+        slurm_partition=slurm_partition,
+        slurm_qos=slurm_qos,
+    )
 
     if conda_env:
         c_flag = "-p" if str(conda_env).startswith(("/", "~", ".")) else "-n"
@@ -503,6 +556,8 @@ def generate_annotation_script(
     conda_env: str,
     slurm: bool = False,
     wmw_conda_env: str = "",
+    slurm_partition: str | None = None,
+    slurm_qos: str | None = None,
 ) -> str:
     """Return a bash script that runs drakkar annotating for *code* and updates Airtable."""
     bin_paths = shlex.quote(str(work_dir / "cataloging" / "final" / "all_bin_paths.txt"))
@@ -511,6 +566,11 @@ def generate_annotation_script(
     annotation_flags = f"-B {bin_paths} -o {out_dir} --env_path {DRAKKAR_ENV_PATH}"
     if slurm:
         annotation_flags += " -p slurm"
+    annotation_flags = _with_slurm_options(
+        annotation_flags,
+        slurm_partition=slurm_partition,
+        slurm_qos=slurm_qos,
+    )
 
     if conda_env:
         c_flag = "-p" if str(conda_env).startswith(("/", "~", ".")) else "-n"
@@ -580,11 +640,18 @@ def generate_cataloging_script(
     conda_env: str,
     slurm: bool = False,
     wmw_conda_env: str = "",
+    slurm_partition: str | None = None,
+    slurm_qos: str | None = None,
 ) -> str:
     """Return a bash script that runs drakkar cataloging only for *code* and updates Airtable."""
     cataloging_flags = f"-f {tsv_path} -o {work_dir} --multicoverage --env_path {DRAKKAR_ENV_PATH}"
     if slurm:
         cataloging_flags += " -p slurm"
+    cataloging_flags = _with_slurm_options(
+        cataloging_flags,
+        slurm_partition=slurm_partition,
+        slurm_qos=slurm_qos,
+    )
 
     if conda_env:
         c_flag = "-p" if str(conda_env).startswith(("/", "~", ".")) else "-n"
