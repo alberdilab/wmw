@@ -4,6 +4,12 @@ All notable changes to wmw are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- No unreleased changes yet.
+
+## [0.5.1] - 2026-05-21
+
 ### Fixed
 
 - **Resume no longer re-uploads profiling attachments** (`file_quantifying`, `file_bases`, `file_counts`) that already exist in the Studies table; they are now properly skipped, matching the behaviour already in place for preprocessing and cataloging attachments.
@@ -11,7 +17,6 @@ All notable changes to wmw are documented here.
 - **Genome FASTA and annotation attachments** in the Genomes table follow the same rules: skipped on resume (unchanged), replaced on rerun via `wmw set-status`.
 - Added `AirtableClient.clear_study_file` and `AirtableClient.clear_genome_file` to support clearing attachment fields before re-uploading.
 - Added `--replace-files` flag to `wmw upload-genome-files` for explicit replacement of existing genome FASTA attachments (propagated automatically when invoked via a rerun screen session).
-
 ## [0.5.0] - 2026-05-20
 
 ### Added
