@@ -976,6 +976,7 @@ def cmd_process(args: argparse.Namespace) -> int:
                     samples_table,
                     study,
                     output_dir,
+                    skip_existing_attachments=True,
                     prefix=code,
                 ) or finalized_this_study
 
@@ -1409,11 +1410,18 @@ def _upload_study_tsv_attachment(
     prefix: str = "",
     study_fields: dict[str, Any] | None = None,
     skip_existing: bool = False,
+    replace_existing: bool = False,
 ) -> bool:
     label = f"{prefix}: " if prefix else ""
-    if skip_existing and study_fields and study_fields.get(field_name):
+    has_existing = bool(study_fields and study_fields.get(field_name))
+    if skip_existing and has_existing:
         out.info(f"{label}{tsv_path.name} is already attached — skipping upload.")
         return False
+    if replace_existing and has_existing:
+        try:
+            client.clear_study_file(studies_table, record_id, field_name)
+        except Exception as exc:
+            out.warn(f"{label}could not clear existing {field_name} attachment: {exc}")
     try:
         client.upload_study_file(studies_table, record_id, field_name, tsv_path)
     except Exception as exc:
@@ -1477,6 +1485,7 @@ def _upload_genome_bin_attachments(
     genome_record_ids: dict[str, str],
     bin_paths: dict[str, Path],
     existing_records_by_name: dict[str, dict[str, Any]] | None = None,
+    replace_existing: bool = False,
 ) -> int:
     file_fid = str(cfg.get("GENOMES_COL_FILE_GENOME") or "").strip()
     if not file_fid:
@@ -1494,8 +1503,15 @@ def _upload_genome_bin_attachments(
             (existing_records_by_name or {}).get(genome_name, {}).get("fields", {})
         )
         if existing_fields.get(file_fid):
-            skipped_existing += 1
-            continue
+            if replace_existing:
+                try:
+                    client.clear_genome_file(genomes_table, record_id, file_fid)
+                except Exception as exc:
+                    failed.append(f"{genome_name} (clear failed: {exc})")
+                    continue
+            else:
+                skipped_existing += 1
+                continue
         fasta_path = bin_paths.get(genome_name)
         if not fasta_path or not fasta_path.exists():
             missing.append(genome_name)
@@ -1530,6 +1546,7 @@ def _upload_genome_annotation_attachments(
     existing_records_by_name: dict[str, dict[str, Any]],
     *,
     prefix: str = "",
+    replace_existing: bool = False,
 ) -> int:
     file_fid = str(cfg.get("GENOMES_COL_FILE_ANNOTATION") or "").strip()
     label = f"{prefix}: " if prefix else ""
@@ -1549,8 +1566,15 @@ def _upload_genome_annotation_attachments(
             continue
         existing_fields = record.get("fields", {}) or {}
         if existing_fields.get(file_fid):
-            skipped_existing += 1
-            continue
+            if replace_existing:
+                try:
+                    client.clear_genome_file(genomes_table, record_id, file_fid)
+                except Exception as exc:
+                    failed.append(f"{genome_name} (clear failed: {exc})")
+                    continue
+            else:
+                skipped_existing += 1
+                continue
         try:
             gz_path = drakkar.gzip_annotation_tsv(annotation_path)
             client.upload_genome_file(genomes_table, record_id, file_fid, gz_path)
@@ -1577,6 +1601,7 @@ def _finalize_annotation_outputs(
     output_root: Path,
     *,
     prefix: str = "",
+    replace_existing_attachments: bool = False,
 ) -> bool:
     """Upload per-genome annotation TSVs and annotation counts to Genomes rows."""
     from wmw import drakkar
@@ -1697,6 +1722,7 @@ def _finalize_annotation_outputs(
         annotations_by_name,
         matched_records,
         prefix=prefix,
+        replace_existing=replace_existing_attachments,
     )
     return True
 
@@ -1709,6 +1735,7 @@ def _launch_genome_file_upload_screen(
     genomes_table: str,
     *,
     prefix: str = "",
+    replace_files: bool = False,
 ) -> bool:
     """Launch the slow genome FASTA attachment upload in a detached screen session."""
     label = f"{prefix}: " if prefix else ""
@@ -1746,6 +1773,8 @@ def _launch_genome_file_upload_screen(
     base_id = str(getattr(args, "base_id", "") or "").strip()
     if base_id:
         cmd.extend(["--base-id", base_id])
+    if replace_files:
+        cmd.append("--replace-files")
 
     script = "\n".join(
         [
@@ -1805,6 +1834,7 @@ def _finalize_preprocessing_outputs(
     *,
     set_status: bool = False,
     skip_existing_attachments: bool = False,
+    replace_existing_attachments: bool = False,
     prefix: str = "",
 ) -> bool:
     """Upload preprocessing TSV and sample preprocessing stats when present."""
@@ -1835,6 +1865,7 @@ def _finalize_preprocessing_outputs(
         prefix=prefix,
         study_fields=fields,
         skip_existing=skip_existing_attachments,
+        replace_existing=replace_existing_attachments,
     )
     stats = drakkar.parse_preprocessing_tsv(tsv_path)
     if not stats:
@@ -1864,6 +1895,7 @@ def _populate_genome_records_from_outputs(
     screen_args: argparse.Namespace | None = None,
     study_code: str = "",
     output_root: Path | None = None,
+    replace_existing_attachments: bool = False,
 ) -> bool:
     """Create/update Genomes rows and upload bin FASTA attachments from cataloging output."""
     from wmw import drakkar
@@ -2029,6 +2061,7 @@ def _populate_genome_records_from_outputs(
                 samples_table,
                 genomes_table,
                 prefix=prefix,
+                replace_files=replace_existing_attachments,
             )
         if not launched:
             _upload_genome_bin_attachments(
@@ -2037,6 +2070,7 @@ def _populate_genome_records_from_outputs(
                 genome_record_ids,
                 bin_paths,
                 existing_records_by_name=existing_records,
+                replace_existing=replace_existing_attachments,
             )
 
     return True
@@ -2049,6 +2083,8 @@ def _finalize_profiling_outputs(
     study_record: dict[str, Any],
     output_root: Path,
     *,
+    skip_existing_attachments: bool = False,
+    replace_existing_attachments: bool = False,
     prefix: str = "",
 ) -> bool:
     """Upload profiling outputs and sample MAG mapping rates when present."""
@@ -2077,6 +2113,8 @@ def _finalize_profiling_outputs(
         tsv_path,
         prefix=prefix,
         study_fields=fields,
+        skip_existing=skip_existing_attachments,
+        replace_existing=replace_existing_attachments,
     )
 
     stats = drakkar.parse_profiling_tsv(tsv_path)
@@ -2108,6 +2146,8 @@ def _finalize_profiling_outputs(
                 path,
                 prefix=prefix,
                 study_fields=fields,
+                skip_existing=skip_existing_attachments,
+                replace_existing=replace_existing_attachments,
             )
 
     return True
@@ -2123,6 +2163,7 @@ def _finalize_cataloging_outputs(
     *,
     set_status: bool = False,
     skip_existing_attachments: bool = False,
+    replace_existing_attachments: bool = False,
     prefix: str = "",
     screen_args: argparse.Namespace | None = None,
 ) -> bool:
@@ -2157,6 +2198,7 @@ def _finalize_cataloging_outputs(
             prefix=prefix,
             study_fields=fields,
             skip_existing=skip_existing_attachments,
+            replace_existing=replace_existing_attachments,
         )
         stats = drakkar.parse_cataloging_tsv(tsv_path)
         if not stats:
@@ -2183,6 +2225,7 @@ def _finalize_cataloging_outputs(
         screen_args=screen_args,
         study_code=study_code,
         output_root=output_root,
+        replace_existing_attachments=replace_existing_attachments,
     )
     return has_cataloging_output or genomes_processed
 
@@ -2217,6 +2260,7 @@ def cmd_set_status(args: argparse.Namespace) -> int:
                 samples_table,
                 study_record,
                 Path(output_dir_str).expanduser().resolve(),
+                replace_existing_attachments=True,
             )
 
     if workflow == "cataloging" and status == "cataloged":
@@ -2229,6 +2273,7 @@ def cmd_set_status(args: argparse.Namespace) -> int:
                 genomes_table,
                 study_record,
                 Path(output_dir_str).expanduser().resolve(),
+                replace_existing_attachments=True,
                 screen_args=args,
             )
 
@@ -2241,6 +2286,7 @@ def cmd_set_status(args: argparse.Namespace) -> int:
                 samples_table,
                 study_record,
                 Path(output_dir_str).expanduser().resolve(),
+                replace_existing_attachments=True,
             )
 
     if workflow == "annotating" and status in ("completed", "annotated", "Done"):
@@ -2251,6 +2297,7 @@ def cmd_set_status(args: argparse.Namespace) -> int:
                 genomes_table,
                 study_record,
                 Path(output_dir_str).expanduser().resolve(),
+                replace_existing_attachments=True,
             )
 
     return 0
@@ -2261,6 +2308,7 @@ def cmd_upload_genome_files(args: argparse.Namespace) -> int:
     genomes_table = _conf(args, "genomes_table", "GENOMES_TABLE")
     output_dir_str = _conf(args, "output_dir", "DRAKKAR_OUTPUT_DIR", required=True)
     study_code = args.study
+    replace_files = getattr(args, "replace_files", False)
 
     out.section("WMW GENOME FASTA UPLOAD")
     if not genomes_table:
@@ -2276,6 +2324,7 @@ def cmd_upload_genome_files(args: argparse.Namespace) -> int:
         final_dir / "all_bin_metadata.csv",
         final_dir / "all_bin_paths.txt",
         prefix=study_code,
+        replace_existing_attachments=replace_files,
     )
     return 0 if processed else 1
 
@@ -2814,6 +2863,13 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="TABLE",
         default="",
         help="Override Genomes table name from config.",
+    )
+    p_upload_genomes.add_argument(
+        "--replace-files",
+        dest="replace_files",
+        action="store_true",
+        default=False,
+        help="Replace existing FASTA attachments instead of skipping them.",
     )
     p_upload_genomes.set_defaults(func=cmd_upload_genome_files)
 

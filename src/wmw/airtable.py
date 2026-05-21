@@ -440,6 +440,16 @@ class AirtableClient:
             content_type="application/gzip",
         )
 
+    def clear_genome_file(
+        self,
+        genomes_table: str,
+        record_id: str,
+        field_id: str,
+    ) -> None:
+        """Clear an attachment field in the Genomes table."""
+        tbl = self._fid_tbl(genomes_table)
+        tbl.update(record_id, {field_id: []})
+
     def set_study_status(
         self,
         studies_table: str,
@@ -467,6 +477,17 @@ class AirtableClient:
             Path(file_path),
             content_type="text/tab-separated-values",
         )
+
+    def clear_study_file(
+        self,
+        studies_table: str,
+        record_id: str,
+        field_name: str,
+    ) -> None:
+        """Clear an attachment field in the Studies table."""
+        field = self._fld(field_name, self._studies_fm)
+        tbl = self._tbl(studies_table, self._studies_fm)
+        tbl.update(record_id, {field: []})
 
     # ------------------------------------------------------------------
     # Species table — link studies via host taxid
