@@ -4,10 +4,15 @@ All notable changes to wmw are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- No unreleased changes yet.
+
+## [0.5.2] - 2026-05-22
+
 ### Fixed
 
 - `_split_fastq_urls` now correctly handles ENA runs with three FASTQ files (merged singleton + paired `_1`/`_2`). The unsuffixed file is ignored and the `_1`/`_2` files are assigned as R1/R2 respectively.
-
 ## [0.5.1] - 2026-05-21
 
 ### Fixed
