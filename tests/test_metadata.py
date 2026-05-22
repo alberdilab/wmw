@@ -98,6 +98,19 @@ def test_split_fastq_urls_empty():
     assert url2 == ""
 
 
+def test_split_fastq_urls_three_files_selects_paired():
+    # ENA sometimes returns a merged singleton alongside the _1/_2 paired files.
+    # The unsuffixed file should be ignored and _1/_2 selected as R1/R2.
+    ftp = (
+        "ftp://host/path/SRR13765885.fastq.gz;"
+        "ftp://host/path/SRR13765885_1.fastq.gz;"
+        "ftp://host/path/SRR13765885_2.fastq.gz"
+    )
+    url1, url2 = metadata._split_fastq_urls(ftp)
+    assert url1 == "ftp://host/path/SRR13765885_1.fastq.gz"
+    assert url2 == "ftp://host/path/SRR13765885_2.fastq.gz"
+
+
 def test_deduplicate_runs(ena_run_record):
     runs = [
         metadata.normalize_ena_run(ena_run_record),

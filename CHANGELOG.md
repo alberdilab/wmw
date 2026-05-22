@@ -4,9 +4,9 @@ All notable changes to wmw are documented here.
 
 ## [Unreleased]
 
-### Added
+### Fixed
 
-- No unreleased changes yet.
+- `_split_fastq_urls` now correctly handles ENA runs with three FASTQ files (merged singleton + paired `_1`/`_2`). The unsuffixed file is ignored and the `_1`/`_2` files are assigned as R1/R2 respectively.
 
 ## [0.5.1] - 2026-05-21
 
@@ -17,6 +17,7 @@ All notable changes to wmw are documented here.
 - **Genome FASTA and annotation attachments** in the Genomes table follow the same rules: skipped on resume (unchanged), replaced on rerun via `wmw set-status`.
 - Added `AirtableClient.clear_study_file` and `AirtableClient.clear_genome_file` to support clearing attachment fields before re-uploading.
 - Added `--replace-files` flag to `wmw upload-genome-files` for explicit replacement of existing genome FASTA attachments (propagated automatically when invoked via a rerun screen session).
+
 ## [0.5.0] - 2026-05-20
 
 ### Added

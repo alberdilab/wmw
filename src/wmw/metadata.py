@@ -6,6 +6,8 @@ import re
 from typing import Any
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_FASTQ_R1 = re.compile(r"_1\.(fastq|fq)(\.gz)?$")
+_FASTQ_R2 = re.compile(r"_2\.(fastq|fq)(\.gz)?$")
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +91,9 @@ def _date(val: Any) -> str | None:
 def _split_fastq_urls(fastq_ftp: str) -> tuple[str, str]:
     """Split a semicolon-delimited FTP string into (url1, url2).
 
-    ENA returns up to two FASTQ paths separated by ';'.
+    ENA returns up to three FASTQ paths separated by ';'. When three files
+    are present (e.g. a merged singleton alongside _1/_2 paired files), the
+    _1 and _2 suffixed files are selected and the unsuffixed file is ignored.
     Prepend ftp:// if the path lacks a scheme.
     """
     parts = [p.strip() for p in fastq_ftp.split(";") if p.strip()]
@@ -98,6 +102,10 @@ def _split_fastq_urls(fastq_ftp: str) -> tuple[str, str]:
         if p and "://" not in p:
             p = "ftp://" + p
         urls.append(p)
+    if len(urls) > 2:
+        r1 = next((u for u in urls if _FASTQ_R1.search(u)), "")
+        r2 = next((u for u in urls if _FASTQ_R2.search(u)), "")
+        return r1, r2
     url1 = urls[0] if len(urls) > 0 else ""
     url2 = urls[1] if len(urls) > 1 else ""
     return url1, url2
