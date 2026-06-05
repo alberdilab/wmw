@@ -153,7 +153,7 @@ GENOMES_COL_NUMBER_ANTIDEFENCE: "fld4M8BePUjfh0Rux"
 # --- Drakkar ---
 WMW_CONDA_ENV: "/projects/alberdilab/data/environments/conda/wmw" # Conda env name or path containing wmw; leave blank to use $PATH
 DRAKKAR_CONDA_ENV: "/projects/alberdilab/data/environments/conda/drakkar" # Conda env name or path containing drakkar; leave blank to use $PATH
-DRAKKAR_OUTPUT_DIR: "/projects/alberdilab/data/wmw"                       # Root output directory for drakkar runs
+DRAKKAR_OUTPUT_DIR: "/projects/alberdilab/scratch/jpl786/wmw"  # Root output directory for drakkar runs
 
 # --- NCBI / ENA ---
 NCBI_EMAIL: ""              # Used as contact email for Unpaywall PDF lookup (optional)

@@ -8,6 +8,11 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.5.3] - 2026-06-05
+
+### Changed
+
+- Updated default `DRAKKAR_OUTPUT_DIR` in `config.yaml` to `/projects/alberdilab/scratch/jpl786/wmw`.
 ## [0.5.2] - 2026-05-22
 
 ### Fixed
