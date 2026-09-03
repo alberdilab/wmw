@@ -90,6 +90,7 @@ def _resolve_token(args: argparse.Namespace) -> str:
 
 def _airtable_client(args: argparse.Namespace):
     from wmw.airtable import AirtableClient
+    from wmw.metadata import OPTIONAL_SAMPLE_FIELDS
     token = _resolve_token(args)
     base_id = _conf(args, "base_id", "WMW_BASE", required=True)
     studies_fm = _field_map_from_config("STUDIES_COL_")
@@ -99,6 +100,7 @@ def _airtable_client(args: argparse.Namespace):
         base_id,
         studies_field_map=studies_fm or None,
         samples_field_map=samples_fm or None,
+        optional_sample_fields=OPTIONAL_SAMPLE_FIELDS,
     )
 
 
@@ -862,8 +864,10 @@ def cmd_fetch(args: argparse.Namespace) -> int:
 
     record_id_map: dict[str, str] = {}
 
-    # Verify Airtable access early; for --study + --dry-run Airtable is not used at all
-    if args.study and dry_run:
+    # Verify Airtable access early; for --study + --dry-run Airtable is not used
+    # at all — except by --fill-missing, which has to read the table to know
+    # which cells are empty.
+    if args.study and dry_run and not getattr(args, "fill_missing", False):
         client = None
     else:
         client = _require_airtable(args, studies_table, samples_table)
@@ -961,10 +965,35 @@ def cmd_fetch(args: argparse.Namespace) -> int:
 
     if dry_run:
         out.info("Dry-run mode — no changes written to Airtable.")
+        if getattr(args, "fill_missing", False) and client is not None:
+            n_rows, n_cells = client.fill_missing_sample_fields(
+                samples_table,
+                all_runs,
+                metadata.REFRESHABLE_SAMPLE_FIELDS,
+                dry_run=True,
+            )
+            out.info(
+                f"  --fill-missing would fill {_pl(n_cells, 'empty cell')} "
+                f"on {_pl(n_rows, 'existing sample')}."
+            )
         return 0
 
     r_inserted, r_skipped = client.upsert_samples(samples_table, all_runs)
     out.success(f"Samples/runs: {r_inserted} inserted, {r_skipped} already existed.")
+
+    if args.refresh_metadata:
+        n_refreshed = client.refresh_sample_metadata(
+            samples_table, all_runs, metadata.BIOSAMPLE_FIELDS
+        )
+        out.success(f"BioSample metadata refreshed on {_pl(n_refreshed, 'existing sample')}.")
+
+    if getattr(args, "fill_missing", False):
+        n_rows, n_cells = client.fill_missing_sample_fields(
+            samples_table, all_runs, metadata.REFRESHABLE_SAMPLE_FIELDS
+        )
+        out.success(
+            f"Filled {_pl(n_cells, 'empty cell')} on {_pl(n_rows, 'existing sample')}."
+        )
 
     if record_id_map and fetched_accessions:
         record_ids = [record_id_map[acc] for acc in fetched_accessions if acc in record_id_map]
@@ -3469,7 +3498,9 @@ def _build_parser() -> argparse.ArgumentParser:
             "Read studies whose status equals --status (default: 'approved') from the "
             "Airtable Studies table, fetch all run records from ENA for each, apply "
             "run-level filters, and upsert into the Samples table. Study status is "
-            "updated to 'indexed' after a successful fetch."
+            "updated to 'indexed' after a successful fetch. Add --refresh-metadata "
+            "to rewrite the BioSample metadata columns on rows already present, or "
+            "--fill-missing to fill only the cells those rows leave empty."
         ),
     )
     _add_airtable_flags(p_fetch)
@@ -3483,6 +3514,26 @@ def _build_parser() -> argparse.ArgumentParser:
         "--study",
         metavar="ACCESSION",
         help="Fetch a single study by ENA accession directly (bypasses status filter).",
+    )
+    p_fetch.add_argument(
+        "--refresh-metadata",
+        action="store_true",
+        help=(
+            "Also rewrite the BioSample metadata columns (collection date, "
+            "lat/lon, country, environmental context and medium, host and host "
+            "sex) on samples already in the table. Without it, existing rows "
+            "are left untouched."
+        ),
+    )
+    p_fetch.add_argument(
+        "--fill-missing",
+        action="store_true",
+        help=(
+            "Backfill samples already in the table: write every column wmw can "
+            "supply from the archive record, but only where the Airtable cell "
+            "is empty. Values already present are never overwritten. Use it "
+            "after adding a column, e.g. --fill-missing --status indexed."
+        ),
     )
     p_fetch.add_argument(
         "--library-strategy",

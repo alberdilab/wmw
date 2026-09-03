@@ -59,11 +59,16 @@ encoded attachment limit is reported and left on ERDA only.
 | `fastq_url_2` | text | derived | Parsed R2 URL; empty for single-end |
 | `collection_date` | text | ENA + GSA | ISO date sample was collected |
 | `first_public` | text | ENA + SRA | ISO date run was made public |
-| `geo_loc_name` | text | ENA + GSA | Free-text location |
+| `geo_loc_name` | text | GSA | Free-text location; ENA has no such run-level field, so it is empty for ENA records |
 | `host` | text | ENA + GSA | Host common name, e.g. "red fox"; a Latin name for GSA |
 | `host_tax_id` | text | ENA + GSA | NCBI taxon ID of the host; resolved from the host name for GSA, always `""` for SRA |
 | `host_scientific_name` | text | ENA + GSA | Host Latin name |
-| `country` | text | ENA + GSA | Standardised country name; the part before `:` in the GSA location |
+| `host_sex` | text | ENA + GSA | Physical sex of the host; config `SAMPLES_COL_HOST_SEX` |
+| `country` | text | ENA + GSA | MIxS *geographic location (country and/or sea)* — a country name, ocean or sea, optionally followed by a region after `:`. GSA takes the part before `:` |
+| `lat` | number | ENA + GSA | MIxS *geographic location (latitude)*, decimal degrees; config `SAMPLES_COL_LAT` |
+| `lon` | number | ENA + GSA | MIxS *geographic location (longitude)*, decimal degrees; config `SAMPLES_COL_LON` |
+| `broad_scale_environmental_context` | text | ENA + GSA | MIxS *broad-scale environmental context*, usually an EnvO biome term; config `SAMPLES_COL_BROAD_SCALE_ENVIRONMENTAL_CONTEXT` |
+| `environmental_medium` | text | ENA + GSA | MIxS *environmental medium* — the material surrounding the sample at collection; config `SAMPLES_COL_ENVIRONMENTAL_MEDIUM` |
 | `center_name` | text | ENA + SRA | Submitting institution |
 | `source` | text | derived | `"ENA"`, `"SRA"` or `"GSA"` |
 | `status` | text | derived | Default `"pending"`; user-controlled processing inclusion uses `use`, `pending`, or `ignore` |
@@ -81,6 +86,63 @@ AMR rows are matched by the `amr_qc.tsv` `assembly_id` column against the sample
 than results and are never written. Field names above are illustrative — only
 the config key matters, and each ships blank so the write is opt-in.
 
+## BioSample metadata
+
+ENA joins each registered sample's attributes onto every run record it returns, so wmw
+reads the MIxS fields from the same `read_run` call that supplies the FASTQ paths — no
+separate BioSample lookup, and no extra request per sample.
+
+The MIxS v5 column names are used. `broad_scale_environmental_context` and
+`environmental_medium` are what ENA resolves the older v4 `environment_biome` and
+`environment_material` names to, so a record registered under either checklist version
+comes back the same way.
+
+Five of these columns ship **opt-in**, the way the AMR columns do: `SAMPLES_COL_LAT`,
+`SAMPLES_COL_LON`, `SAMPLES_COL_HOST_SEX`,
+`SAMPLES_COL_BROAD_SCALE_ENVIRONMENTAL_CONTEXT` and
+`SAMPLES_COL_ENVIRONMENTAL_MEDIUM` are blank in the shipped config. While a key is blank
+wmw never sends that column, so a base without the field keeps working — one unknown field
+name makes Airtable reject the entire batch. Add the column in Airtable (`LAT`/`LON` as
+Number with 6 decimal places, the rest as single line text), paste its field ID into the
+config, and the writes begin.
+
+`collection_date` and `country` were already fetched and are unchanged.
+
+### Backfilling existing rows
+
+`wmw fetch` inserts new runs and skips run accessions already in the table, so rows written
+before these columns existed keep their blanks. Two flags fill them in.
+
+`--fill-missing` writes every column wmw can supply from the archive record, but only into
+cells that are currently **empty** — a value already in the base, including a curator's
+correction, is never overwritten, and `status` is never written at all:
+
+```bash
+wmw fetch --fill-missing --status indexed
+wmw fetch --fill-missing --status indexed --dry-run   # count the cells first
+```
+
+This is the flag for "rows created before the latest update": it is not limited to the
+BioSample fields, so it also picks up any other column that was added later. A cell holding
+`0` (or a latitude of `0.0`) counts as filled, not empty.
+
+`--refresh-metadata` instead **rewrites** exactly the BioSample fields — `collection_date`, `geo_loc_name`, `country`,
+`lat`, `lon`, `broad_scale_environmental_context`, `environmental_medium`, `host`,
+`host_tax_id`, `host_scientific_name`, `host_sex` — on rows that already exist:
+
+```bash
+wmw fetch --refresh-metadata --status indexed
+```
+
+Accessions, FASTQ paths, batch assignment, status and every Drakkar result column are left
+untouched, so a refresh is safe to run against studies that are already processed — but
+unlike `--fill-missing` it replaces BioSample values that are already there. Use it when
+the archive record is the one you trust.
+
+`collection_date` still only accepts a full `YYYY-MM-DD` value. Submitters also register
+year-only (`2019`) and year-month (`2019-06`) dates, and those are dropped rather than
+written to what is a date-typed Airtable column.
+
 ## Status lifecycle
 
 **Studies:** `new` → (manual review) → `approved` → `indexed` → `ready` → `preprocessing` → `preprocessed` → `cataloging` → `cataloged` → `amr` → `amr_done`. Failed or externally cancelled runs use `error` or `stopped`.
@@ -90,8 +152,10 @@ the config key matters, and each ships blank so the write is opt-in.
 ## Notes on SRA gaps
 
 SRA records arrive with `host_tax_id = ""`, `geo_loc_name = ""`, `host = ""`, `country = ""`,
-`collection_date = ""`, `fastq_md5 = ""`. These fields require separate BioSample lookups
-not currently implemented. ENA is the preferred source for host-annotated records.
+`collection_date = ""`, `fastq_md5 = ""`, and every BioSample attribute blank
+(`lat`, `lon`, `host_sex`, `broad_scale_environmental_context`, `environmental_medium`).
+These fields require separate BioSample lookups not currently implemented. ENA is the
+preferred source for host-annotated records.
 
 ## Notes on GSA gaps
 
@@ -104,6 +168,14 @@ have no GSA equivalent:
 - `tax_id` and `host_tax_id` are not published; they are resolved from the organism and host
   *names* through the NCBI/ENA taxonomy service at fetch time. A name that will not resolve
   leaves the ID blank, and a blank field is never excluded by a filter.
+
+GSA's BioSample attributes come from the same metadata workbook, but the Sample sheet
+follows whichever sample type the submitter chose, so the columns vary between studies.
+`lat`/`lon` are parsed from a single `Latitude longitude` cell (`"26.075 N 119.297 E"`,
+also accepted signed or comma-separated), and host sex, broad-scale environmental context
+and environmental medium are looked up case-insensitively across the few headings the GSA
+templates use. A study whose template omits an attribute leaves it blank, as does GSA's
+`NA` placeholder.
 
 Accessions differ in shape: `study_accession` holds the GSA study (`CRA…`) and
 `secondary_study_accession` the NGDC BioProject (`PRJCA…`), mirroring the ENA PRJEB/ERP

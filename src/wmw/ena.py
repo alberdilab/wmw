@@ -49,6 +49,16 @@ RUN_FIELDS = ",".join([
     "country",
     "center_name",
     "study_title",
+    # --- BioSample / MIxS attributes ---
+    # ENA joins the registered sample's attributes onto every run record, so
+    # these need no separate BioSample call. The MIxS v5 names are used;
+    # `environment_biome` and `environment_material` are the v4 aliases ENA
+    # resolves to the same underlying value.
+    "host_sex",
+    "lat",
+    "lon",
+    "broad_scale_environmental_context",
+    "environmental_medium",
 ])
 
 # Fields fetched per study record from ENA

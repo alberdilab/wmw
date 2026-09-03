@@ -50,6 +50,11 @@ def ena_run_record():
         "country": "Denmark",
         "center_name": "SUND-KU",
         "study_title": "Gut metagenomes of red foxes",
+        "host_sex": "female",
+        "lat": "55.6761",
+        "lon": "12.5683",
+        "broad_scale_environmental_context": "temperate broadleaf forest biome",
+        "environmental_medium": "feces",
     }
 
 

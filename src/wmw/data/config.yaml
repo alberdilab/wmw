@@ -92,6 +92,19 @@ SAMPLES_COL_REFERENCE_PATH: "fldTUFQzXopetr39l"
 SAMPLES_COL_ASSEMBLY: "fldwebZ97xjx6lrvy"
 SAMPLES_COL_COVERAGE: "fldQuVvsn5lDIt97J"
 
+# --- Samples table > BioSample metadata columns ---
+# MIxS attributes ENA returns alongside each run record. Each ships blank, so
+# the write is opt-in: leave a key empty and wmw simply never sends that column,
+# which keeps a base that has no such field working. Add the column in Airtable
+# (LAT/LON as Number with 6 decimal places, the rest as single line text), then
+# paste its field ID here. Backfill existing rows with:
+#   wmw fetch --refresh-metadata --status indexed
+SAMPLES_COL_LAT: "fldjBYcpVU1EhSfpF"
+SAMPLES_COL_LON: "fldzIS9N0EVQcnpjS"
+SAMPLES_COL_HOST_SEX: "fldliGJAe4D0rE7Jt"
+SAMPLES_COL_BROAD_SCALE_ENVIRONMENTAL_CONTEXT: "fldzFWZxqRqgghe7l"
+SAMPLES_COL_ENVIRONMENTAL_MEDIUM: "fld2Znb2qvlcS94Kv"
+
 # --- Drakkar > Preprocessing ---
 
 SAMPLES_COL_READS_PRE_FASTP: "fldMgbvw5AWrkbYi6"

@@ -310,6 +310,11 @@ _GSA_RUN = {
     "country": "China",
     "host": "Atelerix albiventris",
     "host_tax_id": "9368",
+    "host_sex": "female",
+    "lat": 26.075,
+    "lon": 119.297,
+    "broad_scale_environmental_context": "forest biome",
+    "environmental_medium": "feces",
     # Non-schema extras that gsa.py carries for traceability.
     "file_name_1": "CRR2009389_r1.fq.gz",
     "file_size_1": 3402548213,
@@ -377,3 +382,79 @@ def test_studies_from_runs_dispatches_to_gsa():
 def test_normalize_runs_still_dispatches_to_ena_and_sra():
     assert metadata.normalize_runs([{"run_accession": "ERR1"}], "ENA")[0]["source"] == "ENA"
     assert metadata.normalize_runs([{"run_accession": "SRR1"}], "SRA")[0]["source"] == "SRA"
+
+
+# ---------------------------------------------------------------------------
+# BioSample metadata
+# ---------------------------------------------------------------------------
+
+def test_normalize_ena_run_carries_biosample_metadata(ena_run_record):
+    result = metadata.normalize_ena_run(ena_run_record)
+    assert result["collection_date"] == "2023-06-15"
+    assert result["country"] == "Denmark"
+    assert result["host_sex"] == "female"
+    assert result["broad_scale_environmental_context"] == "temperate broadleaf forest biome"
+    assert result["environmental_medium"] == "feces"
+    # ENA returns coordinates as strings; Airtable number fields want numbers.
+    assert result["lat"] == 55.6761
+    assert result["lon"] == 12.5683
+    assert isinstance(result["lat"], float)
+    assert isinstance(result["lon"], float)
+
+
+def test_normalize_ena_run_blank_biosample_metadata(ena_run_record):
+    for key in ("lat", "lon", "host_sex", "broad_scale_environmental_context",
+                "environmental_medium"):
+        ena_run_record[key] = ""
+    result = metadata.normalize_ena_run(ena_run_record)
+    assert result["lat"] is None
+    assert result["lon"] is None
+    assert result["host_sex"] == ""
+    assert result["broad_scale_environmental_context"] == ""
+    assert result["environmental_medium"] == ""
+
+
+def test_normalize_ena_run_tolerates_unparseable_coordinates(ena_run_record):
+    ena_run_record["lat"] = "not applicable"
+    ena_run_record["lon"] = "55N"
+    result = metadata.normalize_ena_run(ena_run_record)
+    assert result["lat"] is None
+    assert result["lon"] is None
+
+
+def test_normalize_sra_run_leaves_biosample_metadata_blank(sra_run_record):
+    result = metadata.normalize_sra_run(sra_run_record)
+    assert result["lat"] is None
+    assert result["lon"] is None
+    assert result["host_sex"] == ""
+    assert result["broad_scale_environmental_context"] == ""
+    assert result["environmental_medium"] == ""
+
+
+def test_biosample_fields_are_all_sample_fields():
+    assert set(metadata.BIOSAMPLE_FIELDS) <= set(metadata.SAMPLE_FIELDS)
+
+
+def test_optional_sample_fields_are_all_sample_fields():
+    assert metadata.OPTIONAL_SAMPLE_FIELDS <= set(metadata.SAMPLE_FIELDS)
+
+
+def test_every_normalizer_emits_the_full_sample_schema(ena_run_record, sra_run_record):
+    """A field missing from one normalizer would silently blank that column."""
+    for fn, record in (
+        (metadata.normalize_ena_run, ena_run_record),
+        (metadata.normalize_sra_run, sra_run_record),
+        (metadata.normalize_gsa_run, _GSA_RUN),
+    ):
+        keys = set(fn(record))
+        missing = set(metadata.SAMPLE_FIELDS) - keys
+        assert not missing, f"{fn.__name__} is missing {sorted(missing)}"
+
+
+def test_normalize_gsa_run_carries_biosample_metadata():
+    run = metadata.normalize_gsa_run(_GSA_RUN)
+    assert run["lat"] == 26.075
+    assert run["lon"] == 119.297
+    assert run["host_sex"] == "female"
+    assert run["broad_scale_environmental_context"] == "forest biome"
+    assert run["environmental_medium"] == "feces"

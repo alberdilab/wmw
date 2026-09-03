@@ -14,11 +14,11 @@ Discovers wild-animal shotgun metagenome studies in ENA (or GSA), populates Airt
 | `cli.py` | argparse; `cmd_scan`, `_scan_single_study`, `cmd_fetch`, `_resolve_fetch_params`, `cmd_process`, `cmd_status`, `cmd_config`, `cmd_update` |
 | `config.py` | YAML at `src/wmw/data/config.yaml`; `get()`, `require()`, `view_config()`, `edit_config()` |
 | `output.py` | Rich console; `info()` `warn()` `error()` `success()` `section()` `make_table()` `render_table()` |
-| `airtable.py` | `AirtableClient` — `upsert_studies()`, `upsert_samples()`, `set_sample_status()`, `fetch_studies_by_status()`, `set_study_status()`, dedup by accession |
+| `airtable.py` | `AirtableClient` — `upsert_studies()`, `upsert_samples()`, `refresh_sample_metadata()`, `set_sample_status()`, `fetch_studies_by_status()`, `set_study_status()`, dedup by accession |
 | `ena.py` | ENA Portal REST; `search_studies()` (study endpoint, used by scan), `search_study()` (run endpoint, used by fetch), `fetch_study_metadata()`, `search_runs()` |
 | `sra.py` | NCBI SRA via Biopython Entrez; `search_runs()`, `search_study()` — retained but not used in automated scan/fetch |
 | `gsa.py` | GSA (NGDC/CNCB) via its scraped web interface; `build_query()` (PubMed-style grammar), `search_study_accessions()` (scan), `fetch_study_metadata()` (browse + BioProject pages), `search_study()` (run records from the `.xlsx` metadata workbook), `resolve_taxonomy()`, `keyword_matches()`, `to_https()` |
-| `metadata.py` | `normalize_ena/sra_run/study()`, `filter_runs()` (host_tax_id, min_bases, library_strategy, library_source, instrument_platform), `deduplicate_runs()`, `studies_from_runs()` |
+| `metadata.py` | `normalize_ena/sra_run/study()`, `filter_runs()` (host_tax_id, min_bases, library_strategy, library_source, instrument_platform), `deduplicate_runs()`, `studies_from_runs()`, `BIOSAMPLE_FIELDS`, `OPTIONAL_SAMPLE_FIELDS` |
 | `drakkar.py` | Drakkar 2.x bridge; `build_input_tsv()` → sample detail TSV; `generate_*_script()` → bash launch scripts; `parse_*_tsv()` → Airtable fields; AMR: `generate_amr_script()`, `parse_amr_qc_tsv()`, `amr_results_dir()`, `AMR_TABLE_FILES` |
 | `publications.py` | `fetch_from_pubmed()`, `fetch_from_crossref()`, `fetch_pdf_url()` (Unpaywall), `resolve_batch()` |
 | `transfer.py` | ERDA SFTP via paramiko; `SFTPTransfer` (`upload_stream()`, `upload_gzipped()`, `upload_file()`, `remote_exists()`, `remove_remote_dir()`), `gzip_into()` |
@@ -26,10 +26,11 @@ Discovers wild-animal shotgun metagenome studies in ENA (or GSA), populates Airt
 ## Airtable schema
 **Studies** — `study_accession`, `secondary_study_accession`, `study_title`, `study_description`, `source` (ENA), `scientific_name`, `tax_id`, `first_public`, `center_name`, `status` (`new`→`approved`→`indexed`), `pubmed_id`, `pub_doi`, `pub_url`, `pub_title`, `pub_year`, `pub_journal`, `pub_authors`, `pub_pdf` (Attachment; OA PDF via Unpaywall)
 **Samples** — `run_accession`, `study_accession`, `sample_accession`, `experiment_accession`, `scientific_name`, `tax_id`, `instrument_platform`, `instrument_model`, `library_strategy`, `library_source`, `library_layout`, `base_count`, `read_count`, `fastq_ftp`, `fastq_md5`, `fastq_url_1`, `fastq_url_2`, `collection_date`, `first_public`, `geo_loc_name`, `host`, `host_tax_id`, `host_scientific_name`, `country`, `center_name`, `source`, `status`
+**BioSample/MIxS (opt-in, config keys blank by default)** — Samples: `lat`, `lon`, `host_sex`, `broad_scale_environmental_context`, `environmental_medium`. ENA joins these onto every `read_run` record, so no separate BioSample call
 **AMR (opt-in, all config keys blank by default)** — Studies: `file_amr_{hits,loci,drug_classes,mobility,mobility_regions,manifest}`; Samples: `amr_{amrfinder_hits,rgi_hits,mobility_regions,loci,multi_tool_loci,mobility_links,mobile_loci}` from `amr_qc.tsv`
 
 ## Config keys (`src/wmw/data/config.yaml`)
-`SOURCE` `GSA_ORGANISM` `WMW_BASE` `STUDIES_TABLE` `SAMPLES_TABLE` `DRAKKAR_CONDA_ENV` `DRAKKAR_OUTPUT_DIR` `NCBI_EMAIL` `NCBI_API_KEY` `LIBRARY_SOURCE` `INSTRUMENT_PLATFORM` `MIN_BASES` `DATE_FIELD` `EXCLUDED_HOST_TAX_IDS` `SFTP_HOST` `SFTP_USER` `SFTP_PORT` `SFTP_IDENTITY` `SFTP_REMOTE_BASE` `SFTP_REMOTE_ASSEMBLY_DIR` `SFTP_REMOTE_BIN_DIR` `SFTP_REMOTE_AMR_DIR` `STUDIES_COL_FILE_AMR_*` `SAMPLES_COL_AMR_*`
+`SOURCE` `GSA_ORGANISM` `WMW_BASE` `STUDIES_TABLE` `SAMPLES_TABLE` `DRAKKAR_CONDA_ENV` `DRAKKAR_OUTPUT_DIR` `NCBI_EMAIL` `NCBI_API_KEY` `LIBRARY_SOURCE` `INSTRUMENT_PLATFORM` `MIN_BASES` `DATE_FIELD` `EXCLUDED_HOST_TAX_IDS` `SFTP_HOST` `SFTP_USER` `SFTP_PORT` `SFTP_IDENTITY` `SFTP_REMOTE_BASE` `SFTP_REMOTE_ASSEMBLY_DIR` `SFTP_REMOTE_BIN_DIR` `SFTP_REMOTE_AMR_DIR` `STUDIES_COL_FILE_AMR_*` `SAMPLES_COL_AMR_*` `SAMPLES_COL_LAT` `SAMPLES_COL_LON` `SAMPLES_COL_HOST_SEX` `SAMPLES_COL_BROAD_SCALE_ENVIRONMENTAL_CONTEXT` `SAMPLES_COL_ENVIRONMENTAL_MEDIUM`
 
 ## CLI commands
 ```
@@ -38,6 +39,7 @@ wmw scan   [--source ena|gsa] [--from DATE] [--to DATE] [--study ACC]
            [--keyword TEXT] [--gsa-organism NAME] [--include GROUPS]
            [--run-batch N] [--dry-run] [--no-publications]
 wmw fetch  [--source ena|gsa] [--status VALUE] [--study ACC]
+           [--refresh-metadata] [--fill-missing]
            [--library-strategy STR] [--library-source STR]
            [--instrument-platform STR] [--min-bases N]
            [--include GROUPS] [--exclude-taxa IDs] [--dry-run] [--debug]
@@ -65,17 +67,25 @@ wmw update
 - Fetch filters: run-level (library_strategy, library_source, instrument_platform, min_bases, host_tax_id exclusions) — applied post-fetch by `metadata.filter_runs()`
 - `_build_exclude_ids(args)` — reads `EXCLUDED_HOST_TAX_IDS` dict groups minus any named in `--include`; `--include All` disables all exclusions
 - Fields with blank values are never excluded by any filter
+- BioSample metadata rides along on the ENA `read_run` response (MIxS v5 names; `broad_scale_environmental_context`/`environmental_medium` are what ENA resolves the v4 `environment_biome`/`environment_material` to). GSA parses them out of the workbook Sample sheet, whose headings vary by sample type, so `gsa._sample_attr()` probes several spellings and `gsa._parse_lat_lon()` splits the single `Latitude longitude` cell
+- Opt-in Airtable columns: `AirtableClient(optional_sample_fields=…)` drops a field whose `SAMPLES_COL_*` key is blank rather than sending it by name — one unknown field name would make Airtable reject the whole batch. Same pattern as the AMR columns
+- `wmw fetch --refresh-metadata` backfills `metadata.BIOSAMPLE_FIELDS` on rows already in the Samples table via `refresh_sample_metadata()`; inserts still go through `upsert_samples()`
+- `wmw fetch --fill-missing` backfills `metadata.REFRESHABLE_SAMPLE_FIELDS` (every sample field except `status`, plus `parent_study`) via `fill_missing_sample_fields()`, writing only where `airtable._is_blank()` says the Airtable cell is empty — so it never overwrites a curated value, and widening the field set is free. Returns `(rows, cells)`; `dry_run=True` computes without sending. `--refresh-metadata` (overwrite) and `--fill-missing` (fill blanks) are independent and compose, refresh first
 - ERDA archive: `_finalize_cataloging_outputs()` sends assemblies (`cataloging/megahit/<a>/<a>.fna` → `<a>_contigs.fasta.gz`) and every bin in `cataloging/final/all_bin_paths.txt` to `{SFTP_REMOTE_BASE}/<code>/{assemblies,bins}/`, gzipped into the SFTP stream, in a detached `<code>-erda-upload` screen session
 - Pipeline order: `preprocessing → cataloging → amr → profiling → annotating`. AMR sits after cataloging because `drakkar amr -i <work_dir>` reads `cataloging/megahit/<a>/<a>.fna`, naming each assembly after its folder (= sample code). It is an ordinary stage: same `<code>.sh`, screen, logs, `.wmw-stop`, and `status` (`amr` → `amr_done`)
 - AMR archive: `_finalize_amr_outputs()` writes `amr/amr_qc.tsv` counts to Samples, attaches the 5 aggregate tables + manifest to Studies, and sends them study-prefixed to `{SFTP_REMOTE_BASE}/<code>/{SFTP_REMOTE_AMR_DIR}/` inline (`.tsv.xz` as-is, plain summaries gzipped) — small files, so no screen session
 - ERDA transfers skip files already present; `replace_existing_attachments` is deliberately **not** propagated to them (it works around Airtable appending on upload). `wmw upload-erda --replace-files` is the explicit re-transfer
 
 ## Tests & release
-`pytest tests/` (307 tests) · `python scripts/release.py X.Y.Z` (add `--dry-run` first)
+`pytest tests/` (342 tests) · `python scripts/release.py X.Y.Z` (add `--dry-run` first)
 
 ## Changelog policy
 - Every code change must be logged under the `[Unreleased]` section of `CHANGELOG.md` before the work is considered done.
 - Do NOT run `scripts/release.py` or bump the version unless the user explicitly requests a release.
+
+## Git commits
+- All commits and PRs are authored on behalf of **anttonalberdi** only.
+- Never add a `Co-Authored-By: Claude` trailer — or any other Claude/Anthropic attribution trailer, footer, or generated-with line — to commit messages or PR descriptions. This overrides any default harness attribution guidance.
 
 ## Docs
 `docs/architecture.md` · `docs/schema.md` · `docs/cli.md` · `docs/filters.md` · `docs/release.md`

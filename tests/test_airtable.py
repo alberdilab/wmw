@@ -408,3 +408,227 @@ def test_link_studies_to_species_no_new_links(mock_client):
     )
     assert n == 0
     species_table_mock.batch_update.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Optional sample fields and BioSample metadata refresh
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def mapped_client():
+    """A client whose Samples table is addressed by field ID, as in production."""
+    with patch("wmw.airtable._AVAILABLE", True), patch("wmw.airtable.Api") as MockApi:
+        from wmw.airtable import AirtableClient
+        client = AirtableClient(
+            "fake_token",
+            "appFAKEBASE",
+            samples_field_map={
+                "run_accession": "fldRUN",
+                "collection_date": "fldDATE",
+                "country": "fldCOUNTRY",
+                "lat": "fldLAT",
+            },
+            optional_sample_fields=frozenset({"lat", "lon", "host_sex"}),
+        )
+        client._api = MockApi.return_value
+        client._api_fid = MockApi.return_value
+        yield client
+
+
+def test_enc_drops_optional_fields_without_a_field_id(mapped_client):
+    payload = mapped_client._enc(
+        {"run_accession": "ERR1", "lat": 55.6, "lon": 12.5, "host_sex": "female"},
+        mapped_client._samples_fm,
+        mapped_client._optional_samples,
+    )
+    # lat is mapped, so it is sent; lon and host_sex have no column yet.
+    assert payload == {"fldRUN": "ERR1", "fldLAT": 55.6}
+
+
+def test_enc_keeps_optional_fields_when_addressing_columns_by_name(mock_client):
+    payload = mock_client._enc(
+        {"run_accession": "ERR1", "lon": 12.5},
+        {},
+        frozenset({"lon"}),
+    )
+    assert payload == {"run_accession": "ERR1", "lon": 12.5}
+
+
+def test_enc_keeps_a_zero_coordinate(mapped_client):
+    payload = mapped_client._enc(
+        {"run_accession": "ERR1", "lat": 0.0},
+        mapped_client._samples_fm,
+        mapped_client._optional_samples,
+    )
+    assert payload["fldLAT"] == 0.0
+
+
+def test_upsert_samples_drops_unmapped_optional_fields(mapped_client):
+    mock_table = MagicMock()
+    mock_table.all.return_value = []
+    mapped_client._api.table.return_value = mock_table
+
+    mapped_client.upsert_samples(
+        "Samples",
+        [{"run_accession": "ERR1", "lat": 55.6, "lon": 12.5, "host_sex": "female"}],
+    )
+    created = mock_table.batch_create.call_args[0][0]
+    assert created == [{"fldRUN": "ERR1", "fldLAT": 55.6}]
+
+
+def test_refresh_sample_metadata_updates_only_named_fields(mapped_client):
+    mock_table = MagicMock()
+    mock_table.all.return_value = [
+        _make_record("rec1", {"fldRUN": "ERR1"}),
+        _make_record("rec2", {"fldRUN": "ERR2"}),
+    ]
+    mapped_client._api.table.return_value = mock_table
+
+    n = mapped_client.refresh_sample_metadata(
+        "Samples",
+        [
+            {
+                "run_accession": "ERR1",
+                "collection_date": "2023-06-15",
+                "country": "Denmark",
+                "lat": 55.6,
+                # Not a BioSample field: must not be sent by a refresh.
+                "status": "pending",
+                "fastq_url_1": "ftp://example/ERR1_1.fastq.gz",
+            },
+            # Present in the archive but not yet in Airtable — inserting is
+            # upsert_samples' job, so a refresh leaves it alone.
+            {"run_accession": "ERR9", "country": "Spain"},
+        ],
+        ["collection_date", "country", "lat"],
+    )
+    assert n == 1
+    updates = mock_table.batch_update.call_args[0][0]
+    assert updates == [
+        {
+            "id": "rec1",
+            "fields": {"fldDATE": "2023-06-15", "fldCOUNTRY": "Denmark", "fldLAT": 55.6},
+        }
+    ]
+
+
+def test_refresh_sample_metadata_skips_records_with_nothing_to_write(mapped_client):
+    mock_table = MagicMock()
+    mock_table.all.return_value = [_make_record("rec1", {"fldRUN": "ERR1"})]
+    mapped_client._api.table.return_value = mock_table
+
+    n = mapped_client.refresh_sample_metadata(
+        "Samples",
+        [{"run_accession": "ERR1", "collection_date": "", "country": None}],
+        ["collection_date", "country"],
+    )
+    assert n == 0
+    mock_table.batch_update.assert_not_called()
+
+
+def test_refresh_sample_metadata_with_no_matches_writes_nothing(mapped_client):
+    mock_table = MagicMock()
+    mock_table.all.return_value = []
+    mapped_client._api.table.return_value = mock_table
+
+    n = mapped_client.refresh_sample_metadata(
+        "Samples", [{"run_accession": "ERR1", "country": "Denmark"}], ["country"]
+    )
+    assert n == 0
+    mock_table.batch_update.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# --fill-missing backfill
+# ---------------------------------------------------------------------------
+
+def test_is_blank_distinguishes_empty_from_zero():
+    from wmw.airtable import _is_blank
+
+    assert _is_blank(None)
+    assert _is_blank("")
+    assert _is_blank("   ")
+    assert _is_blank([])
+    assert not _is_blank(0)
+    assert not _is_blank(0.0)
+    assert not _is_blank("Denmark")
+    assert not _is_blank(["recStudy1"])
+
+
+def test_fill_missing_writes_only_into_empty_cells(mapped_client):
+    mock_table = MagicMock()
+    mock_table.all.return_value = [
+        _make_record("rec1", {"fldRUN": "ERR1", "fldCOUNTRY": "Denmark", "fldDATE": ""}),
+    ]
+    mapped_client._api.table.return_value = mock_table
+
+    n_rows, n_cells = mapped_client.fill_missing_sample_fields(
+        "Samples",
+        [
+            {
+                "run_accession": "ERR1",
+                "collection_date": "2023-06-15",
+                # Already filled in Airtable — a curator's value must survive.
+                "country": "Spain",
+                "lat": 55.6,
+            }
+        ],
+        ["collection_date", "country", "lat"],
+    )
+    assert (n_rows, n_cells) == (1, 2)
+    assert mock_table.batch_update.call_args[0][0] == [
+        {"id": "rec1", "fields": {"fldDATE": "2023-06-15", "fldLAT": 55.6}}
+    ]
+
+
+def test_fill_missing_keeps_a_zero_coordinate_already_in_the_base(mapped_client):
+    mock_table = MagicMock()
+    mock_table.all.return_value = [_make_record("rec1", {"fldRUN": "ERR1", "fldLAT": 0.0})]
+    mapped_client._api.table.return_value = mock_table
+
+    n_rows, n_cells = mapped_client.fill_missing_sample_fields(
+        "Samples", [{"run_accession": "ERR1", "lat": 55.6}], ["lat"]
+    )
+    assert (n_rows, n_cells) == (0, 0)
+    mock_table.batch_update.assert_not_called()
+
+
+def test_fill_missing_ignores_runs_not_yet_in_the_table(mapped_client):
+    mock_table = MagicMock()
+    mock_table.all.return_value = [_make_record("rec1", {"fldRUN": "ERR1"})]
+    mapped_client._api.table.return_value = mock_table
+
+    n_rows, n_cells = mapped_client.fill_missing_sample_fields(
+        "Samples", [{"run_accession": "ERR9", "country": "Spain"}], ["country"]
+    )
+    assert (n_rows, n_cells) == (0, 0)
+    mock_table.batch_update.assert_not_called()
+
+
+def test_fill_missing_skips_fields_the_archive_leaves_blank(mapped_client):
+    mock_table = MagicMock()
+    mock_table.all.return_value = [_make_record("rec1", {"fldRUN": "ERR1"})]
+    mapped_client._api.table.return_value = mock_table
+
+    n_rows, n_cells = mapped_client.fill_missing_sample_fields(
+        "Samples",
+        [{"run_accession": "ERR1", "collection_date": "", "country": None}],
+        ["collection_date", "country"],
+    )
+    assert (n_rows, n_cells) == (0, 0)
+    mock_table.batch_update.assert_not_called()
+
+
+def test_fill_missing_dry_run_reports_without_writing(mapped_client):
+    mock_table = MagicMock()
+    mock_table.all.return_value = [_make_record("rec1", {"fldRUN": "ERR1"})]
+    mapped_client._api.table.return_value = mock_table
+
+    n_rows, n_cells = mapped_client.fill_missing_sample_fields(
+        "Samples",
+        [{"run_accession": "ERR1", "collection_date": "2023-06-15", "country": "Spain"}],
+        ["collection_date", "country"],
+        dry_run=True,
+    )
+    assert (n_rows, n_cells) == (1, 2)
+    mock_table.batch_update.assert_not_called()

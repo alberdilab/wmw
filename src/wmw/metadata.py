@@ -60,10 +60,54 @@ SAMPLE_FIELDS = (
     "host",
     "host_tax_id",
     "host_scientific_name",
+    "host_sex",
     "country",
+    "lat",
+    "lon",
+    "broad_scale_environmental_context",
+    "environmental_medium",
     "center_name",
     "source",          # "ENA" | "SRA" | "GSA"
     "status",          # default: "pending"
+)
+
+# The MIxS / BioSample attributes ENA carries alongside each run record.
+# `wmw fetch --refresh-metadata` rewrites exactly these on samples already in
+# Airtable, leaving accessions, file paths and processing results untouched.
+BIOSAMPLE_FIELDS = (
+    "collection_date",
+    "geo_loc_name",
+    "country",
+    "lat",
+    "lon",
+    "broad_scale_environmental_context",
+    "environmental_medium",
+    "host",
+    "host_tax_id",
+    "host_scientific_name",
+    "host_sex",
+)
+
+# Sample fields wmw writes only when the matching SAMPLES_COL_* config key
+# names a column. They were added after the Airtable base was built, so a base
+# without the columns must keep working rather than have every batch rejected
+# with UNKNOWN_FIELD_NAME.
+OPTIONAL_SAMPLE_FIELDS = frozenset({
+    "lat",
+    "lon",
+    "broad_scale_environmental_context",
+    "environmental_medium",
+    "host_sex",
+})
+
+# Sample fields a backfill may write: everything wmw derives from an archive
+# run record, plus the link to the parent study. `status` is left out — once a
+# row exists that column belongs to the processing pipeline.
+# `wmw fetch --fill-missing` writes these only into cells that are empty, so
+# widening the set costs nothing: a value already in the base, including a
+# curator's correction, is never overwritten.
+REFRESHABLE_SAMPLE_FIELDS = ("parent_study",) + tuple(
+    f for f in SAMPLE_FIELDS if f != "status"
 )
 
 
@@ -78,6 +122,20 @@ def _int(val: Any) -> int | None:
         return None
     try:
         return int(s)
+    except (ValueError, TypeError):
+        return None
+
+
+def _float(val: Any) -> float | None:
+    """Convert to float, or None if blank/invalid.
+
+    ENA returns lat/lon as strings; Airtable number fields want a number.
+    """
+    s = str(val).strip() if val is not None else ""
+    if not s:
+        return None
+    try:
+        return float(s)
     except (ValueError, TypeError):
         return None
 
@@ -143,7 +201,13 @@ def normalize_ena_run(record: dict[str, Any]) -> dict[str, Any]:
         "host":                 _str(record.get("host")),
         "host_tax_id":          _str(record.get("host_tax_id")),
         "host_scientific_name": _str(record.get("host_scientific_name")),
+        "host_sex":             _str(record.get("host_sex")),
         "country":              _str(record.get("country")),
+        "lat":                  _float(record.get("lat")),
+        "lon":                  _float(record.get("lon")),
+        "broad_scale_environmental_context":
+                                _str(record.get("broad_scale_environmental_context")),
+        "environmental_medium": _str(record.get("environmental_medium")),
         "center_name":          _str(record.get("center_name")),
         "source":               "ENA",
         "status":               "pending",
@@ -205,7 +269,12 @@ def normalize_sra_run(record: dict[str, Any]) -> dict[str, Any]:
         "host":                 "",
         "host_tax_id":          "",
         "host_scientific_name": "",
+        "host_sex":             "",
         "country":              "",
+        "lat":                  None,
+        "lon":                  None,
+        "broad_scale_environmental_context": "",
+        "environmental_medium": "",
         "center_name":          _str(record.get("center_name")),
         "source":               "SRA",
         "status":               "pending",
@@ -270,7 +339,13 @@ def normalize_gsa_run(record: dict[str, Any]) -> dict[str, Any]:
         "host":                 _str(record.get("host")),
         "host_tax_id":          _str(record.get("host_tax_id")),
         "host_scientific_name": _str(record.get("host_scientific_name")) or _str(record.get("host")),
+        "host_sex":             _str(record.get("host_sex")),
         "country":              _str(record.get("country")),
+        "lat":                  _float(record.get("lat")),
+        "lon":                  _float(record.get("lon")),
+        "broad_scale_environmental_context":
+                                _str(record.get("broad_scale_environmental_context")),
+        "environmental_medium": _str(record.get("environmental_medium")),
         "center_name":          _str(record.get("center_name")),
         "source":               "GSA",
         "status":               "pending",

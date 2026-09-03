@@ -628,6 +628,58 @@ def _country_from_location(location: str) -> str:
     return str(location or "").split(":")[0].strip()
 
 
+_LAT_LON_RE = re.compile(
+    r"^\s*(-?\d+(?:\.\d+)?)\s*([NS])?[\s,]+(-?\d+(?:\.\d+)?)\s*([EW])?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _parse_lat_lon(value: str) -> tuple[float | None, float | None]:
+    """Split GSA's ``"26.075 N 119.297 E"`` sample attribute into (lat, lon).
+
+    Submitters also write the pair unsigned without hemispheres, or already
+    signed, so the hemisphere letters are optional and only applied when the
+    number is not already negative. Anything unparseable yields (None, None).
+    """
+    match = _LAT_LON_RE.match(_clean(value))
+    if not match:
+        return None, None
+    lat_raw, ns, lon_raw, ew = match.groups()
+    try:
+        lat, lon = float(lat_raw), float(lon_raw)
+    except ValueError:
+        return None, None
+    if (ns or "").upper() == "S" and lat > 0:
+        lat = -lat
+    if (ew or "").upper() == "W" and lon > 0:
+        lon = -lon
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        return None, None
+    return lat, lon
+
+
+def _clean(value: Any) -> str:
+    """Strip a workbook cell, treating GSA's ``NA`` placeholder as blank."""
+    text = str(value or "").strip()
+    return "" if text.upper() == "NA" else text
+
+
+def _sample_attr(sample: dict[str, Any], *names: str) -> str:
+    """Return the first non-blank value among *names*, matched case-insensitively.
+
+    GSA sample sheets follow the submitter's chosen sample type, so the MIxS
+    attributes appear under whichever heading that template uses (or not at
+    all). Probing a few spellings keeps the lookup working across templates
+    without pinning wmw to one of them.
+    """
+    lowered = {str(k).strip().lower(): v for k, v in sample.items()}
+    for name in names:
+        value = _clean(lowered.get(name.strip().lower()))
+        if value:
+            return value
+    return ""
+
+
 def search_study(study_accession: str) -> list[dict[str, Any]]:
     """Return all run records for one GSA study accession.
 
@@ -679,10 +731,11 @@ def search_study(study_accession: str) -> list[dict[str, Any]]:
         md5s = [m for m in (md5_1, md5_2) if m]
         model = experiment.get("Platform", "")
         location = sample.get("Geographic location", "")
-        host = sample.get("Host", "")
         # GSA writes "NA" where a submitter left an attribute blank.
-        if host.strip().upper() == "NA":
-            host = ""
+        host = _clean(sample.get("Host", ""))
+        lat, lon = _parse_lat_lon(
+            _sample_attr(sample, "Latitude longitude", "Latitude and longitude", "lat_lon")
+        )
 
         records.append(
             {
@@ -704,11 +757,27 @@ def search_study(study_accession: str) -> list[dict[str, Any]]:
                 "file_name_2": name2,
                 "file_size_1": size1,
                 "file_size_2": size2,
-                "collection_date": sample.get("Collection date", ""),
+                "collection_date": _clean(sample.get("Collection date", "")),
                 "first_public": first_public,
                 "geo_loc_name": location,
                 "country": _country_from_location(location),
+                "lat": lat,
+                "lon": lon,
                 "host": host,
+                "host_sex": _sample_attr(sample, "Host sex", "Sex", "host_sex"),
+                "broad_scale_environmental_context": _sample_attr(
+                    sample,
+                    "Broad-scale environmental context",
+                    "Broad scale environmental context",
+                    "Environment (biome)",
+                    "Biome",
+                ),
+                "environmental_medium": _sample_attr(
+                    sample,
+                    "Environmental medium",
+                    "Environment (material)",
+                    "Environmental material",
+                ),
                 # The run title is the submitter's own sample alias, not a
                 # study title; kept for traceability, unused by the schema.
                 "run_title": run.get("Run title", ""),

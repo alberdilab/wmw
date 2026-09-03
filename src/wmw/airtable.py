@@ -36,6 +36,22 @@ def attachment_fits(file_path: str | Path) -> bool:
         return False
 
 
+def _is_blank(value: Any) -> bool:
+    """True when an Airtable cell holds no value.
+
+    A cell that is absent, empty text, or an empty list (an unlinked record or
+    an attachment column with nothing in it) counts as blank. Zero and False do
+    not: a base count of 0 or a latitude of 0.0 is a real value.
+    """
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, (list, dict)):
+        return not value
+    return False
+
+
 def _require() -> None:
     if not _AVAILABLE:
         print("Error: pyairtable is required. Run: pip install pyairtable", file=sys.stderr)
@@ -49,11 +65,13 @@ class AirtableClient:
         base_id: str,
         studies_field_map: dict[str, str] | None = None,
         samples_field_map: dict[str, str] | None = None,
+        optional_sample_fields: frozenset[str] | set[str] | None = None,
     ) -> None:
         _require()
         self._base_id = base_id
         self._studies_fm: dict[str, str] = studies_field_map or {}
         self._samples_fm: dict[str, str] = samples_field_map or {}
+        self._optional_samples: frozenset[str] = frozenset(optional_sample_fields or ())
         self._api = Api(api_key, use_field_ids=False)
         self._api_fid = Api(api_key, use_field_ids=True)
 
@@ -67,12 +85,26 @@ class AirtableClient:
         return self._api_fid.table(self._base_id, table_id)
 
     @staticmethod
-    def _enc(fields: dict[str, Any], fm: dict[str, str]) -> dict[str, Any]:
-        """Translate python field names to Airtable field IDs in an outgoing payload."""
+    def _enc(
+        fields: dict[str, Any],
+        fm: dict[str, str],
+        optional: frozenset[str] | set[str] = frozenset(),
+    ) -> dict[str, Any]:
+        """Translate python field names to Airtable field IDs in an outgoing payload.
+
+        Names in *optional* are dropped when *fm* is a real field map that has
+        no entry for them: those columns may not exist in the base, and one
+        unknown name makes Airtable reject the whole batch. With no field map
+        at all the caller is addressing columns by name, so nothing is dropped.
+        """
         clean = {k: v for k, v in fields.items() if v is not None and v != ""}
         if not fm:
             return clean
-        return {fm.get(k, k): v for k, v in clean.items()}
+        return {
+            fm.get(k, k): v
+            for k, v in clean.items()
+            if k in fm or k not in optional
+        }
 
     @staticmethod
     def _dec(record: dict[str, Any], fm: dict[str, str]) -> dict[str, Any]:
@@ -199,16 +231,26 @@ class AirtableClient:
     # Samples table
     # ------------------------------------------------------------------
 
-    def existing_run_accessions(self, samples_table: str) -> set[str]:
-        """Return the set of run_accession values already in the Samples table."""
+    def _existing_run_records(self, samples_table: str) -> dict[str, dict[str, Any]]:
+        """Return {run_accession: record} for all records in the Samples table."""
         tbl = self._tbl(samples_table, self._samples_fm)
-        records = tbl.all()
         key = self._fld("run_accession", self._samples_fm)
         return {
-            r["fields"].get(key, "")
-            for r in records
+            r["fields"][key]: r
+            for r in tbl.all()
             if r["fields"].get(key)
         }
+
+    def _existing_run_map(self, samples_table: str) -> dict[str, str]:
+        """Return {run_accession: record_id} for all records in the Samples table."""
+        return {
+            acc: record["id"]
+            for acc, record in self._existing_run_records(samples_table).items()
+        }
+
+    def existing_run_accessions(self, samples_table: str) -> set[str]:
+        """Return the set of run_accession values already in the Samples table."""
+        return set(self._existing_run_map(samples_table).keys())
 
     def upsert_samples(
         self,
@@ -223,8 +265,87 @@ class AirtableClient:
         new = [s for s in samples if s.get("run_accession") not in existing]
         if new:
             tbl = self._tbl(samples_table, self._samples_fm)
-            tbl.batch_create([self._enc(s, self._samples_fm) for s in new])
+            tbl.batch_create(
+                [self._enc(s, self._samples_fm, self._optional_samples) for s in new]
+            )
         return len(new), len(samples) - len(new)
+
+    def refresh_sample_metadata(
+        self,
+        samples_table: str,
+        samples: list[dict[str, Any]],
+        fields: Iterable[str],
+    ) -> int:
+        """Rewrite *fields* on Samples rows whose run_accession already exists.
+
+        Only the named fields are sent, so accessions, FASTQ paths, batch
+        assignment, status and every Drakkar result column are left as they
+        are. Runs absent from the table are ignored — `upsert_samples` is what
+        inserts those. Returns the number of records updated.
+        """
+        field_names = list(fields)
+        existing_map = self._existing_run_map(samples_table)
+
+        updates: list[dict[str, Any]] = []
+        for sample in samples:
+            record_id = existing_map.get(sample.get("run_accession", ""))
+            if not record_id:
+                continue
+            payload = self._enc(
+                {k: sample.get(k) for k in field_names},
+                self._samples_fm,
+                self._optional_samples,
+            )
+            if payload:
+                updates.append({"id": record_id, "fields": payload})
+
+        if updates:
+            self._tbl(samples_table, self._samples_fm).batch_update(updates)
+        return len(updates)
+
+    def fill_missing_sample_fields(
+        self,
+        samples_table: str,
+        samples: list[dict[str, Any]],
+        fields: Iterable[str],
+        dry_run: bool = False,
+    ) -> tuple[int, int]:
+        """Write *fields* onto existing Samples rows, but only where the cell is empty.
+
+        This is the backfill for rows created before a column existed: a value
+        already in the base is left exactly as it is, so a curator's correction
+        survives and no processing result is touched. Runs absent from the
+        table are ignored — `upsert_samples` is what inserts those. With
+        *dry_run* the updates are computed but not sent.
+
+        Returns (records updated, cells filled).
+        """
+        field_names = list(fields)
+        existing = self._existing_run_records(samples_table)
+
+        updates: list[dict[str, Any]] = []
+        filled = 0
+        for sample in samples:
+            record = existing.get(sample.get("run_accession", ""))
+            if record is None:
+                continue
+            current = record.get("fields", {})
+            payload = self._enc(
+                {
+                    k: sample.get(k)
+                    for k in field_names
+                    if _is_blank(current.get(self._fld(k, self._samples_fm)))
+                },
+                self._samples_fm,
+                self._optional_samples,
+            )
+            if payload:
+                updates.append({"id": record["id"], "fields": payload})
+                filled += len(payload)
+
+        if updates and not dry_run:
+            self._tbl(samples_table, self._samples_fm).batch_update(updates)
+        return len(updates), filled
 
     def fetch_study_by_code(
         self,

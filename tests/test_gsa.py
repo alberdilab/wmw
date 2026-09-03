@@ -300,11 +300,13 @@ def _build_workbook(sheets: dict[str, list[list[str]]]) -> bytes:
 
 _SAMPLE_ROWS = [
     ["ID", "Sample name", "Accession", "Project accession", "Organism", "Host",
-     "Collection date", "Geographic location"],
+     "Collection date", "Geographic location", "Latitude longitude", "Host sex",
+     "Broad-scale environmental context", "Environmental medium"],
     ["1", "Animal_7_2_1", "SAMC5697416", "PRJCA042537", "organismal metagenomes",
-     "Atelerix albiventris", "2024-05-02", "China: Fujian"],
+     "Atelerix albiventris", "2024-05-02", "China: Fujian", "26.075 N 119.297 E",
+     "female", "forest biome", "feces"],
     ["2", "Animal_7_2_2", "SAMC5697417", "PRJCA042537", "organismal metagenomes",
-     "NA", "", ""],
+     "NA", "", "", "", "NA", "", ""],
 ]
 
 _EXPERIMENT_ROWS = [
@@ -537,3 +539,57 @@ def test_search_study_accessions_honours_limit():
         gsa.search_study_accessions("2025-09-01", "2025-09-30", limit=500)
     assert search.call_count == 1
     assert search.call_args[1]["page_size"] == 500
+
+
+# ---------------------------------------------------------------------------
+# BioSample metadata
+# ---------------------------------------------------------------------------
+
+def test_search_study_parses_lat_lon(study_runs):
+    assert study_runs[0]["lat"] == 26.075
+    assert study_runs[0]["lon"] == 119.297
+
+
+def test_search_study_reads_mixs_sample_attributes(study_runs):
+    run = study_runs[0]
+    assert run["host_sex"] == "female"
+    assert run["broad_scale_environmental_context"] == "forest biome"
+    assert run["environmental_medium"] == "feces"
+
+
+def test_search_study_leaves_missing_biosample_attributes_blank(study_runs):
+    run = study_runs[1]
+    assert run["lat"] is None
+    assert run["lon"] is None
+    # "NA" is GSA's blank placeholder, not a sex.
+    assert run["host_sex"] == ""
+    assert run["broad_scale_environmental_context"] == ""
+    assert run["environmental_medium"] == ""
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("26.075 N 119.297 E", (26.075, 119.297)),
+        ("26.075 S 119.297 W", (-26.075, -119.297)),
+        ("-26.075 119.297", (-26.075, 119.297)),
+        ("26.075,119.297", (26.075, 119.297)),
+        # An already-signed value keeps its sign rather than being negated twice.
+        ("-26.075 S -119.297 W", (-26.075, -119.297)),
+        ("not collected", (None, None)),
+        ("", (None, None)),
+        ("NA", (None, None)),
+        # Out of range, so not a coordinate pair.
+        ("126.0 N 19.0 E", (None, None)),
+    ],
+)
+def test_parse_lat_lon(value, expected):
+    assert gsa._parse_lat_lon(value) == expected
+
+
+def test_sample_attr_matches_case_insensitively_and_falls_back():
+    sample = {"host sex": "male", "Environmental medium": "soil"}
+    assert gsa._sample_attr(sample, "Host sex") == "male"
+    assert gsa._sample_attr(sample, "Environmental medium", "Environmental material") == "soil"
+    assert gsa._sample_attr(sample, "Environment (material)", "Environmental medium") == "soil"
+    assert gsa._sample_attr(sample, "Broad-scale environmental context") == ""

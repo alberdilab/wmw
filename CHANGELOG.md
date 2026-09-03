@@ -8,6 +8,83 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.6.1] - 2026-09-03
+
+### Added
+
+- **BioSample metadata on every sample.** `wmw fetch` now records the MIxS
+  attributes of the sample each run was sequenced from: collection date,
+  geographic location (country and/or sea), latitude, longitude, broad-scale
+  environmental context, environmental medium and host sex. ENA joins the
+  registered sample's attributes onto each `read_run` record, so all seven
+  arrive on the call that already supplies the FASTQ paths — no separate
+  BioSample lookup and no extra request per sample.
+- `collection_date` and `country` were already written; the new Samples columns
+  are `lat`, `lon`, `host_sex`, `broad_scale_environmental_context` and
+  `environmental_medium`, with config keys `SAMPLES_COL_LAT`,
+  `SAMPLES_COL_LON`, `SAMPLES_COL_HOST_SEX`,
+  `SAMPLES_COL_BROAD_SCALE_ENVIRONMENTAL_CONTEXT` and
+  `SAMPLES_COL_ENVIRONMENTAL_MEDIUM`. All five ship blank, so the write is
+  opt-in the way the AMR columns are: while a key is blank wmw never sends that
+  column, and a base without the field keeps working. Add the column in
+  Airtable (`LAT`/`LON` as Number with 6 decimal places, the rest as single
+  line text) and paste its field ID into the config to switch it on.
+- The MIxS v5 names are used. ENA resolves the older v4 `environment_biome` and
+  `environment_material` to `broad_scale_environmental_context` and
+  `environmental_medium`, so a sample registered under either checklist version
+  comes back the same way.
+- **`wmw fetch --fill-missing` backfills every empty cell on samples that were
+  created before a column existed.** `fetch` skips run accessions already in
+  the Samples table, so rows written by an earlier version of wmw keep their
+  blanks however often it runs. `--fill-missing` adds a pass over those rows
+  that writes only where the Airtable cell is empty:
+
+      wmw fetch --fill-missing --status indexed              # every indexed study
+      wmw fetch --fill-missing --study PRJEB12345            # one study
+      wmw fetch --fill-missing --status indexed --dry-run    # count the cells first
+
+  It covers every column wmw can supply from an archive run record — accessions,
+  FASTQ paths and checksums, instrument and library fields, counts, dates, the
+  new BioSample/MIxS attributes and the link to the parent study — but never
+  `status`, and never a cell that already holds a value. A curator's correction
+  and every Drakkar result column therefore survive untouched, so the pass is
+  safe against studies that are already processed. A cell holding `0`, or a
+  latitude of `0.0`, counts as filled rather than empty. New runs are still
+  inserted as usual, and the summary reports how many cells were filled on how
+  many rows.
+- Use `--fill-missing` after adding a column in Airtable or upgrading to a wmw
+  that fetches a field it did not fetch before; use `--refresh-metadata` when
+  the archive record is what you trust and existing values should be replaced.
+  The two are independent and can be combined — the refresh runs first, then
+  the fill covers whatever is still empty.
+- `wmw fetch --refresh-metadata` backfills those columns on samples already in
+  the table, which a plain `fetch` skips. It rewrites only the BioSample
+  fields — collection date, location, coordinates, environmental context and
+  medium, host, host taxon and host sex — leaving accessions, FASTQ paths,
+  batch assignment, status and every Drakkar result column untouched, so it is
+  safe to run against studies that are already processed:
+  `wmw fetch --refresh-metadata --status indexed`.
+- GSA (`--source gsa`) supplies the same fields from its metadata workbook.
+  `lat`/`lon` are parsed from the single `Latitude longitude` cell
+  (`"26.075 N 119.297 E"`, also accepted signed or comma-separated), and the
+  remaining attributes are matched case-insensitively across the headings the
+  various GSA sample-type templates use. GSA's `NA` placeholder now reads as
+  blank for every sample attribute, not just `host`.
+
+### Fixed
+
+- `geo_loc_name` is documented as GSA-only. It was listed as an ENA field, but
+  ENA's run endpoint has no such column, so it has always been empty for ENA
+  records; `country` is the ENA equivalent.
+
+### Notes
+
+- `collection_date` still only accepts a full `YYYY-MM-DD` value. Submitters
+  also register year-only (`2019`) and year-month (`2019-06`) dates, and those
+  are dropped rather than written to what is a date-typed Airtable column.
+- SRA records leave all five new fields blank, as they already do for host and
+  location: SRA would need a separate BioSample lookup, which wmw does not
+  implement.
 ## [0.6.0] - 2026-09-03
 
 ### Added

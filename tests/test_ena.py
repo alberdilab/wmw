@@ -283,3 +283,17 @@ def test_get_raises_on_404():
         with patch("wmw.ena.time.sleep"):
             with pytest.raises(_req.exceptions.HTTPError):
                 ena.search_runs(date_from="2024-01-01", date_to="2024-12-31")
+
+
+def test_run_fields_include_biosample_attributes():
+    """ENA joins the sample's MIxS attributes onto each run, so no extra call."""
+    fields = set(ena.RUN_FIELDS.split(","))
+    assert {
+        "collection_date",
+        "country",
+        "lat",
+        "lon",
+        "host_sex",
+        "broad_scale_environmental_context",
+        "environmental_medium",
+    } <= fields

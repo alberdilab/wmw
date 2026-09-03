@@ -118,6 +118,8 @@ Fetch run/sample data from ENA (or GSA) for studies the user has approved, and p
 wmw fetch [--source ARCHIVE]             # ena (default) | gsa; config: SOURCE
           [--status VALUE]               # default: "approved"
           [--study ACCESSION]            # bypass status filter; fetch one study directly
+          [--refresh-metadata]           # also rewrite BioSample columns on existing rows
+          [--fill-missing]               # fill only the empty cells on existing rows
           [--library-strategy STRATEGY]  # default: WGS,METAGENOMIC
           [--library-source SOURCE]      # e.g. METAGENOMIC; config: LIBRARY_SOURCE
           [--instrument-platform PLATFORM] # e.g. ILLUMINA; config: INSTRUMENT_PLATFORM
@@ -139,6 +141,7 @@ wmw fetch [--source ARCHIVE]             # ena (default) | gsa; config: SOURCE
 **Notes:**
 - Host taxon exclusions (`EXCLUDED_HOST_TAX_IDS` groups) are active by default. Use `--include Human` etc. to re-enable specific groups, or `--include All` to disable all exclusions.
 - `--exclude-taxa` appends individual taxon IDs on top of the group-based exclusions.
+- Each run record carries the registered sample's BioSample/MIxS attributes — collection date, country/sea, latitude, longitude, broad-scale environmental context, environmental medium and host sex. ENA returns them on the same `read_run` call, so they cost no extra request. See [schema.md](schema.md#biosample-metadata) for the opt-in `SAMPLES_COL_*` keys they need.
 
 **Execution order:**
 1. Read approved studies from Airtable Studies table (or use `--study` directly)
@@ -147,7 +150,55 @@ wmw fetch [--source ARCHIVE]             # ena (default) | gsa; config: SOURCE
 3. Normalize → deduplicate
 4. Post-fetch `filter_runs()`: host taxon exclusions (`--include` / `--exclude-taxa`), min_bases, library_strategy, library_source, instrument_platform
 5. Upsert Samples into Airtable (unless `--dry-run`)
-6. Update study `status = "indexed"` for successfully fetched studies
+6. With `--refresh-metadata`, rewrite the BioSample columns on rows that already existed
+7. With `--fill-missing`, fill the empty cells on rows that already existed
+8. Update study `status = "indexed"` for successfully fetched studies
+
+### Backfilling empty columns (`--fill-missing`)
+
+`fetch` skips run accessions already in the Samples table, so rows written before a column
+existed keep their blanks — and they stay blank however often `fetch` runs.
+`--fill-missing` adds a pass over those rows that writes **only where the Airtable cell is
+empty**:
+
+```
+wmw fetch --fill-missing --status indexed              # every already-indexed study
+wmw fetch --fill-missing --study PRJEB12345            # one study
+wmw fetch --fill-missing --status indexed --dry-run    # count the cells first
+```
+
+It covers every column wmw can supply from an archive run record — accessions, FASTQ paths
+and checksums, instrument and library fields, counts, dates, the BioSample/MIxS attributes,
+and the link to the parent study — but never `status`, and never a cell that already holds
+a value. A curator's correction and every Drakkar result column therefore survive
+untouched, which makes the pass safe to run against studies that are already processed. A
+cell holding `0` or a latitude of `0.0` counts as filled, not empty. New runs are still
+inserted as usual, and the summary line reports how many cells were filled on how many
+rows.
+
+Use `--fill-missing` after adding a column in Airtable, or after upgrading wmw to a version
+that fetches a field it did not fetch before. Use `--refresh-metadata` instead when the
+archive record is what you trust and you want existing values replaced.
+
+### Rewriting BioSample metadata (`--refresh-metadata`)
+
+`fetch` skips run accessions already in the Samples table, so rows written before a
+BioSample column existed keep their blanks. `--refresh-metadata` adds an update pass over
+those rows:
+
+```
+wmw fetch --refresh-metadata --status indexed      # every already-indexed study
+wmw fetch --refresh-metadata --study PRJEB12345    # one study
+```
+
+Only the BioSample fields are written — `collection_date`, `geo_loc_name`, `country`,
+`lat`, `lon`, `broad_scale_environmental_context`, `environmental_medium`, `host`,
+`host_tax_id`, `host_scientific_name`, `host_sex`. Accessions, FASTQ paths, batch
+assignment, status and Drakkar results are left untouched, so the pass is safe against
+studies that are already processed. New runs are still inserted as usual.
+
+Unlike `--fill-missing`, this pass **overwrites** BioSample values already in the base. The
+two can be combined: the refresh runs first, then the fill covers whatever is still empty.
 
 ### Fetching from GSA (`--source gsa`)
 
