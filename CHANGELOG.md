@@ -6,7 +6,89 @@ All notable changes to wmw are documented here.
 
 ### Added
 
-- No unreleased changes yet.
+- **Assemblies and binette-refined bins are archived on ERDA.** When cataloging
+  outputs are finalised, wmw now transfers the per-assembly contigs
+  (`cataloging/megahit/<assembly>/<assembly>.fna`) and every final bin listed in
+  `cataloging/final/all_bin_paths.txt` to ERDA over SFTP, using the same
+  paramiko connection layer as ehio. Files are laid out study-first as
+  `{SFTP_REMOTE_BASE}/<study code>/{SFTP_REMOTE_ASSEMBLY_DIR}/<assembly>_contigs.fasta.gz`
+  and `{SFTP_REMOTE_BASE}/<study code>/{SFTP_REMOTE_BIN_DIR}/<genome>.fa.gz`.
+- New `wmw.transfer` module with `SFTPTransfer` (connect, `remote_exists`,
+  `ensure_remote_dir`, `upload_stream`, `upload_gzipped`, `remove_remote_dir`)
+  and `gzip_into`. Both assemblies and bins are gzipped straight into the SFTP
+  connection, so a multi-GB assembly never needs a temporary `.gz` on local
+  disk, and every transfer is staged through a `.part` name that is renamed only
+  once the write completes — an interrupted upload leaves no file that looks
+  finished.
+- New `wmw upload-erda --study CODE` command to run or retry the transfer by
+  hand, with `--sftp-host/--sftp-user/--sftp-identity/--sftp-remote-base`
+  overrides, `--replace-files` and `--verbose`.
+- The transfer is launched automatically from `_finalize_cataloging_outputs` —
+  so from both `wmw process` (resume) and
+  `wmw set-status --workflow cataloging --status cataloged` — in a detached
+  `<code>-erda-upload` `screen` session, falling back to an inline transfer when
+  `screen` is unavailable or wmw is already running inside one. `wmw stop CODE`
+  now also kills that session.
+- New config keys: `SFTP_HOST` (`io.erda.dk`), `SFTP_USER`, `SFTP_PORT` (22),
+  `SFTP_IDENTITY`, `SFTP_REMOTE_BASE` (`/WMW`), `SFTP_REMOTE_ASSEMBLY_DIR`
+  (`assemblies`) and `SFTP_REMOTE_BIN_DIR` (`bins`). Leaving `SFTP_HOST`,
+  `SFTP_REMOTE_BASE` or `SFTP_USER` empty disables the transfer; so does having
+  no `paramiko` installed. All three cases warn and continue.
+- `wmw upload-erda` exits 0 when the study's outputs are on ERDA — whether it
+  sent them or found them already there — and non-zero when the archive is
+  incomplete (nothing found, not configured, connection refused, or one or more
+  files failed), so it can be driven from a retry loop.
+- `paramiko>=3` is now a runtime dependency.
+
+### Changed
+
+- Every bin listed in `all_bin_paths.txt` is archived on ERDA, including bins
+  below the completeness/contamination thresholds that gate the Airtable Genomes
+  table — the ERDA copy is an archive of what binette produced, not a curated
+  set.
+- ERDA transfers always skip files already present on the remote. The
+  attachment-replacement flag that drives Airtable uploads is not propagated:
+  it exists because Airtable appends rather than replaces on upload, which has
+  no equivalent over SFTP, and re-sending multi-GB assemblies on every rerun
+  would be pure cost. `wmw upload-erda --replace-files` forces a re-transfer by
+  clearing the study's remote `assemblies/` and `bins/` folders first.
+- The ERDA transfer runs after the Airtable writes in cataloging finalisation,
+  so a failed transfer never costs the metadata; failures on individual files
+  are collected and reported rather than aborting the run.
+
+### Fixed
+
+- **Genome annotation counts are read from Drakkar 2.x tables.** Drakkar 2.0.0
+  turned the per-genome `annotating/final/<genome>_genes.tsv` into a long-form
+  hit table — one row per annotation hit, with the database named in a `source`
+  column — replacing the 1.x layout of one row per gene with a column per
+  database. Against that table the old parser counted every hit as a gene,
+  reported every gene as annotated (because the new `mag` and `contig` columns
+  are always populated), and returned zero for every per-database count, since
+  `kegg`, `pfam`, `cazy` and the rest are no longer columns. Each Airtable count
+  is now the number of distinct genes carrying at least one hit from that
+  source, `number_genes` counts distinct genes, and `number_annotated` counts
+  the genes with at least one non-`prodigal` hit. EC numbers, which no longer
+  have a column, are read from the `details` JSON of each KEGG hit.
+- The Drakkar 1.x wide layout is still detected from the header and parsed, so
+  an output directory written by an older Drakkar can be finalised without
+  rerunning annotation.
+
+### Removed
+
+- `number_antidefence` is no longer written to the Genomes table: Drakkar 2.x
+  reports no antidefense systems. The `GENOMES_COL_NUMBER_ANTIDEFENCE` config
+  key is kept, and the legacy 1.x parser still fills it.
+- `drakkar.build_manifest()` and `MANIFEST_HEADER`, which wrote a `sample`/`R1`/
+  `R2` sample sheet that Drakkar 2.x rejects. `build_input_tsv()` writes the
+  manifest `wmw process` actually uses.
+- `drakkar.run_workflow()`, which invoked `drakkar <workflow> --manifest ...
+  --output ... --slurm`; none of those flags exist in Drakkar's CLI, which takes
+  `-f/--file`, `-o/--output` and `-p/--profile`.
+- `drakkar.parse_preprocessing_stats()`, which read
+  `preprocessing/<run>/stats.tsv`. Drakkar 2.x does not write that file; the
+  same statistics are parsed from `preprocessing.tsv` by
+  `parse_preprocessing_tsv()`.
 
 ## [0.5.3] - 2026-06-05
 

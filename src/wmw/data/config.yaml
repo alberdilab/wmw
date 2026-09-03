@@ -148,12 +148,27 @@ GENOMES_COL_NUMBER_AMR: "fldliCzefQVcIA0PL"
 GENOMES_COL_NUMBER_PFAM: "fldb4mhMo5iwNViDi"
 GENOMES_COL_NUMBER_SIGNALP: "fldbM7AMFJndBsj2R"
 GENOMES_COL_NUMBER_DEFENCE: "fldovE8YVB3sgI71z"
+# Drakkar 2.x does not report antidefense systems, so wmw never writes this field.
 GENOMES_COL_NUMBER_ANTIDEFENCE: "fld4M8BePUjfh0Rux"
 
 # --- Drakkar ---
 WMW_CONDA_ENV: "/projects/alberdilab/data/environments/conda/wmw" # Conda env name or path containing wmw; leave blank to use $PATH
 DRAKKAR_CONDA_ENV: "/projects/alberdilab/data/environments/conda/drakkar" # Conda env name or path containing drakkar; leave blank to use $PATH
 DRAKKAR_OUTPUT_DIR: "/projects/alberdilab/scratch/jpl786/wmw"  # Root output directory for drakkar runs
+
+# --- ERDA transfer (SFTP) ---
+# Assemblies and the binette-refined final bins are transferred to ERDA when
+# cataloging outputs are finalised. Remote paths are built per study code as:
+#   {SFTP_REMOTE_BASE}/{code}/{SFTP_REMOTE_ASSEMBLY_DIR}  assemblies, gzipped
+#   {SFTP_REMOTE_BASE}/{code}/{SFTP_REMOTE_BIN_DIR}       bin FASTAs, gzipped
+# Leave SFTP_HOST or SFTP_REMOTE_BASE empty to disable ERDA transfers entirely.
+SFTP_HOST: "io.erda.dk"
+SFTP_USER: "antton.alberdi@snm.ku.dk"   # ERDA account used for the transfer
+SFTP_PORT: 22
+SFTP_IDENTITY: ""                       # Path to SSH private key (leave empty to use SSH agent)
+SFTP_REMOTE_BASE: "/WMW"                # Top-level ERDA folder holding the wmw archive
+SFTP_REMOTE_ASSEMBLY_DIR: "assemblies"  # Per-study subfolder for assembly FASTAs
+SFTP_REMOTE_BIN_DIR: "bins"             # Per-study subfolder for bin FASTAs
 
 # --- NCBI / ENA ---
 NCBI_EMAIL: ""              # Used as contact email for Unpaywall PDF lookup (optional)

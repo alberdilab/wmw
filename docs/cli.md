@@ -138,6 +138,10 @@ wmw process [--batch BATCH]
    `screen` is unavailable, upload falls back to the current process
 10. Genomes are only created/updated and uploaded when completeness is above 50
    and contamination is below 10
+11. Assemblies and the binette-refined final bins are transferred to ERDA in a
+   detached `{code}-erda-upload` `screen` session (see
+   [wmw upload-erda](#wmw-upload-erda)); the transfer runs after the Airtable
+   writes, so a failed transfer never costs the metadata
 
 ## wmw stop
 
@@ -153,8 +157,9 @@ wmw stop --batch CODE                 # --study CODE is an alias
 **Execution order:**
 1. Look up the Study by its `code` field and set Study `status = "stopped"`
 2. Write `{output_dir}/{code}/.wmw-stop` so generated script traps report `stopped`
-3. Stop the detached `screen` session named `{code}` and any
-   `{code}-genome-upload` attachment-upload session
+3. Stop the detached `screen` session named `{code}`, any
+   `{code}-genome-upload` attachment-upload session, and any
+   `{code}-erda-upload` ERDA transfer session
 4. Best-effort cancel matching Slurm jobs. Matches include the study output path and Drakkar COMMENT values like `rule_fastp_wildcards_SA000022`, where `SA000022` is a sample `code` in that study.
 
 ---
@@ -172,6 +177,58 @@ wmw upload-genome-files --study CODE
                         [--samples-table TABLE] [--genomes-table TABLE]
                         [--airtable-token TOKEN] [--base-id BASE_ID]
 ```
+
+---
+
+## wmw upload-erda
+
+Transfer the assemblies and the binette-refined final bins of one study to
+ERDA. This is normally launched automatically in a detached
+`{code}-erda-upload` `screen` session when cataloging outputs are finalized —
+by both `wmw process` (resume) and
+`wmw set-status --workflow cataloging --status cataloged`. Run it by hand to
+retry a failed transfer.
+
+```
+wmw upload-erda --study CODE
+                [--output-dir DIR]           # or config DRAKKAR_OUTPUT_DIR
+                [--sftp-host HOST]           # or config SFTP_HOST
+                [--sftp-user USER]           # or config SFTP_USER
+                [--sftp-identity PATH]       # or config SFTP_IDENTITY
+                [--sftp-remote-base PATH]    # or config SFTP_REMOTE_BASE
+                [--replace-files] [--verbose]
+```
+
+**What is transferred**
+
+| Local | ERDA |
+|---|---|
+| `cataloging/megahit/{assembly}/{assembly}.fna` | `{SFTP_REMOTE_BASE}/{code}/{SFTP_REMOTE_ASSEMBLY_DIR}/{assembly}_contigs.fasta.gz` |
+| every path in `cataloging/final/all_bin_paths.txt` | `{SFTP_REMOTE_BASE}/{code}/{SFTP_REMOTE_BIN_DIR}/{genome}.fa.gz` |
+
+With the shipped defaults that is `/WMW/{code}/assemblies/` and
+`/WMW/{code}/bins/`.
+
+**Notes**
+- Both assemblies and bins are gzipped straight into the SFTP connection, so a
+  multi-GB assembly never needs a temporary `.gz` on the local disk. Each
+  transfer is staged through a `.part` name and renamed only once the write
+  completes, so an interrupted upload leaves no file that looks finished.
+- Every bin in `all_bin_paths.txt` is archived, including bins below the
+  completeness/contamination thresholds that gate the Airtable Genomes table.
+  The ERDA copy is an archive of what binette produced, not a curated set.
+- Files already on ERDA are skipped. `--replace-files` clears the study's remote
+  `assemblies/` and `bins/` folders first and re-sends everything; it is never
+  set automatically, not even on a rerun.
+- The transfer is skipped with a warning — never an error — when `SFTP_HOST`,
+  `SFTP_REMOTE_BASE` or `SFTP_USER` is empty, or when `paramiko` is not
+  installed. Individual file failures are collected and reported at the end
+  rather than aborting the run.
+- Authentication uses the SSH agent unless `SFTP_IDENTITY` names a private key.
+- Exit code is 0 when the study's outputs are on ERDA, whether this run sent
+  them or found them already there, and non-zero when the archive is incomplete
+  (nothing found, not configured, connection refused, or a file failed) — so it
+  can be driven from a retry loop.
 
 ---
 

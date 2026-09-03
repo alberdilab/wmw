@@ -18,15 +18,16 @@ Discovers wild-animal shotgun metagenome studies in ENA, populates Airtable, and
 | `ena.py` | ENA Portal REST; `search_studies()` (study endpoint, used by scan), `search_study()` (run endpoint, used by fetch), `fetch_study_metadata()`, `search_runs()` |
 | `sra.py` | NCBI SRA via Biopython Entrez; `search_runs()`, `search_study()` — retained but not used in automated scan/fetch |
 | `metadata.py` | `normalize_ena/sra_run/study()`, `filter_runs()` (host_tax_id, min_bases, library_strategy, library_source, instrument_platform), `deduplicate_runs()`, `studies_from_runs()` |
-| `drakkar.py` | `build_manifest()` → TSV; `run_workflow()` → subprocess; `parse_preprocessing_stats()` |
+| `drakkar.py` | Drakkar 2.x bridge; `build_input_tsv()` → sample detail TSV; `generate_*_script()` → bash launch scripts; `parse_*_tsv()` → Airtable fields |
 | `publications.py` | `fetch_from_pubmed()`, `fetch_from_crossref()`, `fetch_pdf_url()` (Unpaywall), `resolve_batch()` |
+| `transfer.py` | ERDA SFTP via paramiko; `SFTPTransfer` (`upload_stream()`, `upload_gzipped()`, `remote_exists()`, `remove_remote_dir()`), `gzip_into()` |
 
 ## Airtable schema
 **Studies** — `study_accession`, `secondary_study_accession`, `study_title`, `study_description`, `source` (ENA), `scientific_name`, `tax_id`, `first_public`, `center_name`, `status` (`new`→`approved`→`indexed`), `pubmed_id`, `pub_doi`, `pub_url`, `pub_title`, `pub_year`, `pub_journal`, `pub_authors`, `pub_pdf` (Attachment; OA PDF via Unpaywall)
 **Samples** — `run_accession`, `study_accession`, `sample_accession`, `experiment_accession`, `scientific_name`, `tax_id`, `instrument_platform`, `instrument_model`, `library_strategy`, `library_source`, `library_layout`, `base_count`, `read_count`, `fastq_ftp`, `fastq_md5`, `fastq_url_1`, `fastq_url_2`, `collection_date`, `first_public`, `geo_loc_name`, `host`, `host_tax_id`, `host_scientific_name`, `country`, `center_name`, `source`, `status`
 
 ## Config keys (`src/wmw/data/config.yaml`)
-`WMW_BASE` `STUDIES_TABLE` `SAMPLES_TABLE` `DRAKKAR_CONDA_ENV` `DRAKKAR_OUTPUT_DIR` `NCBI_EMAIL` `NCBI_API_KEY` `LIBRARY_SOURCE` `INSTRUMENT_PLATFORM` `MIN_BASES` `DATE_FIELD` `EXCLUDED_HOST_TAX_IDS`
+`WMW_BASE` `STUDIES_TABLE` `SAMPLES_TABLE` `DRAKKAR_CONDA_ENV` `DRAKKAR_OUTPUT_DIR` `NCBI_EMAIL` `NCBI_API_KEY` `LIBRARY_SOURCE` `INSTRUMENT_PLATFORM` `MIN_BASES` `DATE_FIELD` `EXCLUDED_HOST_TAX_IDS` `SFTP_HOST` `SFTP_USER` `SFTP_PORT` `SFTP_IDENTITY` `SFTP_REMOTE_BASE` `SFTP_REMOTE_ASSEMBLY_DIR` `SFTP_REMOTE_BIN_DIR`
 
 ## CLI commands
 ```
@@ -39,6 +40,9 @@ wmw fetch  [--status VALUE] [--study ACC]
            [--instrument-platform STR] [--min-bases N]
            [--include GROUPS] [--exclude-taxa IDs] [--dry-run]
 wmw process --batch BATCH [--workflow preprocessing|cataloging|...] [--slurm] [--output-dir DIR]
+wmw upload-erda --study CODE [--output-dir DIR] [--sftp-host H] [--sftp-user U]
+                [--sftp-identity PATH] [--sftp-remote-base PATH]
+                [--replace-files] [--verbose]
 wmw status  [--batch BATCH]
 wmw config  --view | --edit
 wmw update
@@ -52,9 +56,11 @@ wmw update
 - Fetch filters: run-level (library_strategy, library_source, instrument_platform, min_bases, host_tax_id exclusions) — applied post-fetch by `metadata.filter_runs()`
 - `_build_exclude_ids(args)` — reads `EXCLUDED_HOST_TAX_IDS` dict groups minus any named in `--include`; `--include All` disables all exclusions
 - Fields with blank values are never excluded by any filter
+- ERDA archive: `_finalize_cataloging_outputs()` sends assemblies (`cataloging/megahit/<a>/<a>.fna` → `<a>_contigs.fasta.gz`) and every bin in `cataloging/final/all_bin_paths.txt` to `{SFTP_REMOTE_BASE}/<code>/{assemblies,bins}/`, gzipped into the SFTP stream, in a detached `<code>-erda-upload` screen session
+- ERDA transfers skip files already present; `replace_existing_attachments` is deliberately **not** propagated to them (it works around Airtable appending on upload). `wmw upload-erda --replace-files` is the explicit re-transfer
 
 ## Tests & release
-`pytest tests/` (74 tests) · `python scripts/release.py X.Y.Z` (add `--dry-run` first)
+`pytest tests/` (193 tests) · `python scripts/release.py X.Y.Z` (add `--dry-run` first)
 
 ## Changelog policy
 - Every code change must be logged under the `[Unreleased]` section of `CHANGELOG.md` before the work is considered done.

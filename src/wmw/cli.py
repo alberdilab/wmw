@@ -35,6 +35,7 @@ from wmw import config as cfg
 from wmw import output as out
 
 _GENOME_UPLOAD_SCREEN_SUFFIX = "-genome-upload"
+_ERDA_UPLOAD_SCREEN_SUFFIX = "-erda-upload"
 _GENOME_MIN_COMPLETENESS = 50.0
 _GENOME_MAX_CONTAMINATION = 10.0
 _LOW_PRIORITY_SLURM_PARTITION = "lazyqueue"
@@ -1158,8 +1159,16 @@ def _genome_upload_screen_name(code: str) -> str:
     return f"{code}{_GENOME_UPLOAD_SCREEN_SUFFIX}"
 
 
+def _erda_upload_screen_name(code: str) -> str:
+    return f"{code}{_ERDA_UPLOAD_SCREEN_SUFFIX}"
+
+
 def _screen_session_matches_code(session_name: str, code: str) -> bool:
-    return session_name in {code, _genome_upload_screen_name(code)}
+    return session_name in {
+        code,
+        _genome_upload_screen_name(code),
+        _erda_upload_screen_name(code),
+    }
 
 
 def _screen_sessions_for_code(screen_ls_output: str, code: str) -> list[str]:
@@ -1825,6 +1834,299 @@ def _launch_genome_file_upload_screen(
     return True
 
 
+# ---------------------------------------------------------------------------
+# ERDA transfer
+# ---------------------------------------------------------------------------
+
+# Assemblies are archived under the name the lab's ERDA shares already use:
+# drakkar writes {assembly}.fna, ERDA holds {assembly}_contigs.fasta.gz.
+_ASSEMBLY_REMOTE_SUFFIX = "_contigs.fasta.gz"
+
+
+def _assembly_remote_name(fasta: Path) -> str:
+    """Return the ERDA filename for an assembly FASTA ({assembly}.fna)."""
+    return f"{fasta.stem}{_ASSEMBLY_REMOTE_SUFFIX}"
+
+
+def _find_assembly_fastas(work_dir: Path) -> list[Path]:
+    """Return the assembly FASTAs of a drakkar cataloging run.
+
+    Drakkar writes one per assembly as
+    cataloging/megahit/{assembly}/{assembly}.fna — the renamed contigs, not
+    megahit's own final.contigs.raw.fa, which keeps the .fa suffix.
+    """
+    megahit_dir = work_dir / "cataloging" / "megahit"
+    if not megahit_dir.is_dir():
+        return []
+    return sorted(p for p in megahit_dir.glob("*/*.fna") if p.is_file())
+
+
+def _erda_settings(args: argparse.Namespace) -> dict[str, Any] | None:
+    """Return ERDA connection settings, or None when the transfer is not configured."""
+    host = _conf(args, "sftp_host", "SFTP_HOST")
+    remote_base = _conf(args, "sftp_remote_base", "SFTP_REMOTE_BASE")
+    if not host or not remote_base:
+        return None
+    port_raw = _conf(args, "sftp_port", "SFTP_PORT") or "22"
+    try:
+        port = int(port_raw)
+    except ValueError:
+        out.warn(f"SFTP_PORT {port_raw!r} is not a number — falling back to 22.")
+        port = 22
+    return {
+        "host": host,
+        "user": _conf(args, "sftp_user", "SFTP_USER"),
+        "port": port,
+        "identity": _conf(args, "sftp_identity", "SFTP_IDENTITY") or None,
+        "remote_base": remote_base.rstrip("/"),
+        "assembly_dir": _conf(args, "sftp_assembly_dir", "SFTP_REMOTE_ASSEMBLY_DIR") or "assemblies",
+        "bin_dir": _conf(args, "sftp_bin_dir", "SFTP_REMOTE_BIN_DIR") or "bins",
+    }
+
+
+def _upload_cataloging_outputs_to_erda(
+    args: argparse.Namespace,
+    study_code: str,
+    output_root: Path,
+    *,
+    prefix: str = "",
+    replace_existing: bool = False,
+) -> bool:
+    """Transfer assemblies and binette-refined bins of one study to ERDA.
+
+    Assemblies go to {base}/{code}/{assemblies}/{assembly}_contigs.fasta.gz and
+    the final bins listed in all_bin_paths.txt to {base}/{code}/{bins}/
+    {genome}.fa.gz, both gzipped into the SFTP connection so a multi-GB assembly
+    never needs a temporary copy on the local disk. Files already present are
+    skipped unless `replace_existing` is set, which clears both remote
+    subfolders first.
+
+    Returns True when the study's outputs are on ERDA — whether this call sent
+    them or found them already there — and False when the archive is incomplete.
+    """
+    from wmw import drakkar
+    from wmw.transfer import SFTPTransfer, gzip_into, paramiko_available
+
+    label = f"{prefix}: " if prefix else ""
+    settings = _erda_settings(args)
+    if settings is None:
+        out.info(f"{label}SFTP_HOST or SFTP_REMOTE_BASE not configured — skipping ERDA transfer.")
+        return False
+    if not settings["user"]:
+        out.warn(f"{label}SFTP_USER is not configured — skipping ERDA transfer.")
+        return False
+    if not paramiko_available():
+        out.warn(f"{label}paramiko is not installed — skipping ERDA transfer (pip install paramiko).")
+        return False
+
+    work_dir = output_root / study_code
+    assemblies = _find_assembly_fastas(work_dir)
+    bin_paths = drakkar.parse_bin_paths_txt(
+        work_dir / "cataloging" / "final" / "all_bin_paths.txt"
+    )
+    existing_bins = {name: p for name, p in bin_paths.items() if p.exists()}
+    if len(existing_bins) < len(bin_paths):
+        out.warn(
+            f"{label}{_pl(len(bin_paths) - len(existing_bins), 'bin FASTA')} listed in "
+            f"all_bin_paths.txt could not be found on disk — not transferred."
+        )
+    if not assemblies:
+        out.warn(
+            f"{label}no assembly FASTA found under {work_dir / 'cataloging' / 'megahit'}."
+        )
+    if not assemblies and not existing_bins:
+        out.warn(f"{label}nothing to transfer to ERDA.")
+        return False
+
+    study_root = f"{settings['remote_base']}/{study_code}"
+    remote_assembly_dir = f"{study_root}/{settings['assembly_dir']}"
+    remote_bin_dir = f"{study_root}/{settings['bin_dir']}"
+    verbose = bool(getattr(args, "verbose", False))
+    timeout = float(getattr(args, "connect_timeout", 300.0) or 300.0)
+
+    out.info(
+        f"{label}transferring {_pl(len(assemblies), 'assembly', 'assemblies')} and "
+        f"{_pl(len(existing_bins), 'bin')} → "
+        f"{settings['user']}@{settings['host']}:{study_root} …"
+    )
+
+    uploaded = skipped = 0
+    failed: list[str] = []
+    try:
+        with SFTPTransfer(
+            host=settings["host"],
+            username=settings["user"],
+            port=settings["port"],
+            key_path=settings["identity"],
+            timeout=timeout,
+        ) as xfer:
+            if replace_existing:
+                xfer.remove_remote_dir(remote_assembly_dir)
+                xfer.remove_remote_dir(remote_bin_dir)
+                out.info(f"{label}cleared {remote_assembly_dir} and {remote_bin_dir} for replacement.")
+
+            for fasta in assemblies:
+                remote_path = f"{remote_assembly_dir}/{_assembly_remote_name(fasta)}"
+                if xfer.remote_exists(remote_path):
+                    skipped += 1
+                    continue
+                size_mb = fasta.stat().st_size / (1024 * 1024)
+                out.info(
+                    f"{label}  compressing and uploading {fasta.name} ({size_mb:.0f} MB) "
+                    f"→ {_assembly_remote_name(fasta)} …"
+                )
+                try:
+                    xfer.upload_stream(
+                        remote_path,
+                        lambda handle, src=fasta: gzip_into(src, handle),
+                        verbose=verbose,
+                    )
+                except Exception as exc:
+                    failed.append(f"{fasta.name} ({exc})")
+                else:
+                    uploaded += 1
+
+            for genome_name, fasta in sorted(existing_bins.items()):
+                remote_path = f"{remote_bin_dir}/{genome_name}.fa.gz"
+                try:
+                    if xfer.upload_gzipped(fasta, remote_path, verbose=verbose):
+                        uploaded += 1
+                    else:
+                        skipped += 1
+                except Exception as exc:
+                    failed.append(f"{genome_name} ({exc})")
+    except Exception as exc:
+        out.warn(f"{label}ERDA transfer failed: {exc}")
+        return False
+
+    skip_msg = f", {skipped} already present (skipped)" if skipped else ""
+    if uploaded:
+        out.success(f"{label}transferred {_pl(uploaded, 'file')} to {study_root}{skip_msg}.")
+    else:
+        out.info(f"{label}nothing new to transfer to {study_root}{skip_msg}.")
+    if failed:
+        preview = "; ".join(failed[:5])
+        suffix = "…" if len(failed) > 5 else "."
+        out.warn(f"{label}could not transfer {_pl(len(failed), 'file')}: {preview}{suffix}")
+
+    # True means "the study's outputs are on ERDA", so a re-run over a study
+    # that is already fully archived succeeds instead of looking like a failure.
+    return bool(uploaded or skipped) and not failed
+
+
+def _launch_erda_upload_screen(
+    args: argparse.Namespace,
+    study_code: str,
+    output_root: Path,
+    *,
+    prefix: str = "",
+    replace_files: bool = False,
+) -> bool:
+    """Launch the slow ERDA transfer in a detached screen session."""
+    label = f"{prefix}: " if prefix else ""
+    if os.environ.get("STY"):
+        return False
+
+    import shutil
+    import subprocess as sp
+
+    if shutil.which("screen") is None:
+        out.warn(f"{label}'screen' not found — transferring to ERDA inline.")
+        return False
+
+    work_dir = output_root / study_code
+    work_dir.mkdir(parents=True, exist_ok=True)
+    session_name = _erda_upload_screen_name(study_code)
+    script_path = work_dir / f"{study_code}_upload_erda.sh"
+    stdout_path = work_dir / f"{study_code}_upload_erda.out"
+    stderr_path = work_dir / f"{study_code}_upload_erda.err"
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "wmw",
+        "upload-erda",
+        "--study",
+        study_code,
+        "--output-dir",
+        str(output_root),
+    ]
+    if replace_files:
+        cmd.append("--replace-files")
+
+    script = "\n".join(
+        [
+            "#!/usr/bin/env bash",
+            f"# wmw-generated script — batch {study_code} ERDA transfer",
+            "# Do not edit manually; re-run wmw process or wmw set-status to regenerate.",
+            "",
+            "set -euo pipefail",
+            f"cd {shlex.quote(str(Path.cwd()))}",
+            f"exec >> {shlex.quote(str(stdout_path))} 2>> {shlex.quote(str(stderr_path))}",
+            'echo ""',
+            "echo \"=== $(date '+%Y-%m-%d %H:%M:%S') ===\"",
+            "echo \"=== $(date '+%Y-%m-%d %H:%M:%S') ===\" >&2",
+            shlex.join(cmd),
+            "",
+        ]
+    )
+    try:
+        script_path.write_text(script, encoding="utf-8")
+        script_path.chmod(0o755)
+    except OSError as exc:
+        out.warn(
+            f"{label}could not write ERDA upload screen script at {script_path}: {exc}. "
+            "Transferring inline."
+        )
+        return False
+
+    try:
+        sp.run(
+            ["screen", "-dmS", session_name, "bash", str(script_path)],
+            check=True,
+            env=os.environ.copy(),
+        )
+    except Exception as exc:
+        out.warn(
+            f"{label}could not start ERDA upload screen session {session_name!r}: {exc}. "
+            "Transferring inline."
+        )
+        return False
+
+    out.success(f"{label}ERDA transfer started in screen session '{session_name}'.")
+    out.info(f"{label}transfer logs: {stdout_path} and {stderr_path}")
+    return True
+
+
+def _transfer_cataloging_outputs_to_erda(
+    args: argparse.Namespace | None,
+    study_code: str,
+    output_root: Path,
+    *,
+    prefix: str = "",
+    replace_existing: bool = False,
+    in_screen: bool = False,
+) -> None:
+    """Detach the ERDA transfer into a screen session, or run it inline."""
+    if args is None or not study_code:
+        return
+    if in_screen and _launch_erda_upload_screen(
+        args,
+        study_code,
+        output_root,
+        prefix=prefix,
+        replace_files=replace_existing,
+    ):
+        return
+    _upload_cataloging_outputs_to_erda(
+        args,
+        study_code,
+        output_root,
+        prefix=prefix,
+        replace_existing=replace_existing,
+    )
+
+
 def _finalize_preprocessing_outputs(
     client: Any,
     studies_table: str,
@@ -2227,6 +2529,22 @@ def _finalize_cataloging_outputs(
         output_root=output_root,
         replace_existing_attachments=replace_existing_attachments,
     )
+
+    # Assemblies and the binette-refined bins are archived on ERDA. This runs
+    # after the Airtable work so a transfer failure never costs the metadata.
+    # Files already on ERDA are always skipped rather than re-sent: the
+    # attachment-replacement flag works around Airtable appending on upload,
+    # which has no equivalent over SFTP, and re-pushing multi-GB assemblies on
+    # every rerun would be pure cost. 'wmw upload-erda --replace-files' forces it.
+    if has_cataloging_output:
+        _transfer_cataloging_outputs_to_erda(
+            screen_args,
+            study_code,
+            output_root,
+            prefix=prefix,
+            in_screen=screen_args is not None,
+        )
+
     return has_cataloging_output or genomes_processed
 
 
@@ -2327,6 +2645,22 @@ def cmd_upload_genome_files(args: argparse.Namespace) -> int:
         replace_existing_attachments=replace_files,
     )
     return 0 if processed else 1
+
+
+def cmd_upload_erda(args: argparse.Namespace) -> int:
+    output_dir_str = _conf(args, "output_dir", "DRAKKAR_OUTPUT_DIR", required=True)
+    study_code = args.study
+
+    out.section("WMW ERDA TRANSFER")
+    output_root = Path(output_dir_str).expanduser().resolve()
+    transferred = _upload_cataloging_outputs_to_erda(
+        args,
+        study_code,
+        output_root,
+        prefix=study_code,
+        replace_existing=getattr(args, "replace_files", False),
+    )
+    return 0 if transferred else 1
 
 
 # ---------------------------------------------------------------------------
@@ -2872,6 +3206,68 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Replace existing FASTA attachments instead of skipping them.",
     )
     p_upload_genomes.set_defaults(func=cmd_upload_genome_files)
+
+    # ---- upload-erda ----
+    p_upload_erda = sub.add_parser(
+        "upload-erda",
+        help="Transfer assemblies and final bins of one study to ERDA.",
+        description=(
+            "Transfer the assemblies and the binette-refined final bins of one "
+            "study to ERDA. Normally launched automatically in a detached "
+            "'{code}-erda-upload' screen session when cataloging outputs are "
+            "finalised; run it by hand to retry a failed transfer."
+        ),
+    )
+    p_upload_erda.add_argument(
+        "--study",
+        metavar="CODE",
+        required=True,
+        help="Study code (batch label) whose assemblies and bins should be transferred.",
+    )
+    p_upload_erda.add_argument(
+        "--output-dir",
+        metavar="DIR",
+        default="",
+        help="Override DRAKKAR_OUTPUT_DIR from config.",
+    )
+    p_upload_erda.add_argument(
+        "--sftp-host",
+        metavar="HOST",
+        default="",
+        help="Override SFTP_HOST from config (default: io.erda.dk).",
+    )
+    p_upload_erda.add_argument(
+        "--sftp-user",
+        metavar="USER",
+        default="",
+        help="Override SFTP_USER from config.",
+    )
+    p_upload_erda.add_argument(
+        "--sftp-identity",
+        metavar="PATH",
+        default="",
+        help="Override SFTP_IDENTITY from config (SSH private key path).",
+    )
+    p_upload_erda.add_argument(
+        "--sftp-remote-base",
+        metavar="PATH",
+        default="",
+        help="Override SFTP_REMOTE_BASE from config (default: /WMW).",
+    )
+    p_upload_erda.add_argument(
+        "--replace-files",
+        dest="replace_files",
+        action="store_true",
+        default=False,
+        help="Clear the remote assemblies/ and bins/ folders before transferring.",
+    )
+    p_upload_erda.add_argument(
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="Print every file transferred.",
+    )
+    p_upload_erda.set_defaults(func=cmd_upload_erda)
 
     # ---- status ----
     p_status = sub.add_parser(

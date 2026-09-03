@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import csv
 import gzip
+import json
 import shlex
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -49,48 +49,6 @@ def _annotation_output_check_lines(work_dir: Path) -> list[str]:
         "    exit 1",
         "fi",
     ]
-
-# ---------------------------------------------------------------------------
-# Sample sheet
-# ---------------------------------------------------------------------------
-
-MANIFEST_HEADER = "\t".join(["sample", "R1", "R2"])
-
-
-def build_manifest(
-    samples: list[dict[str, Any]],
-    output_path: Path,
-) -> Path:
-    """Write a Drakkar-compatible TSV manifest from Airtable sample records.
-
-    Each record must have: run_accession, fastq_url_1, fastq_url_2 (or fastq_ftp).
-    Returns the path to the written manifest.
-    """
-    lines = [MANIFEST_HEADER]
-    for rec in samples:
-        fields = rec.get("fields", rec)
-        sample_id = fields.get("run_accession", "")
-        r1 = fields.get("fastq_url_1", "") or _first_url(fields.get("fastq_ftp", ""))
-        r2 = fields.get("fastq_url_2", "") or _second_url(fields.get("fastq_ftp", ""))
-        if not sample_id or not r1:
-            continue
-        lines.append(f"{sample_id}\t{r1}\t{r2}")
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return output_path
-
-
-def _first_url(fastq_ftp: str) -> str:
-    parts = [p.strip() for p in fastq_ftp.split(";") if p.strip()]
-    url = parts[0] if parts else ""
-    return ("ftp://" + url) if url and "://" not in url else url
-
-
-def _second_url(fastq_ftp: str) -> str:
-    parts = [p.strip() for p in fastq_ftp.split(";") if p.strip()]
-    url = parts[1] if len(parts) > 1 else ""
-    return ("ftp://" + url) if url and "://" not in url else url
-
 
 # ---------------------------------------------------------------------------
 # Drakkar input TSV (new format for wmw process)
@@ -717,46 +675,17 @@ def generate_cataloging_script(
 # Drakkar invocation
 # ---------------------------------------------------------------------------
 
-def _drakkar_cmd(subcommand: str, extra: list[str]) -> list[str]:
-    """Build the drakkar command, optionally wrapped in conda run."""
+def get_drakkar_version() -> str:
+    """Return the installed drakkar version string, or 'unknown'."""
+    import re
+
     conda_env = str(cfg.get("DRAKKAR_CONDA_ENV") or "").strip()
     if conda_env:
         flag = "-p" if conda_env.startswith(("/", "~", ".")) else "-n"
         prefix = ["conda", "run", flag, conda_env]
     else:
         prefix = []
-    env_args = ["--env_path", DRAKKAR_ENV_PATH] if subcommand != "--version" else []
-    return [*prefix, "drakkar", subcommand, *env_args, *extra]
-
-
-def run_workflow(
-    workflow: str,
-    manifest: Path,
-    output_dir: Path,
-    *,
-    slurm: bool = False,
-    extra_args: list[str] | None = None,
-) -> int:
-    """Invoke drakkar <workflow> and return the process exit code."""
-    cmd = _drakkar_cmd(
-        workflow,
-        [
-            "--manifest", str(manifest),
-            "--output", str(output_dir),
-            *(["--slurm"] if slurm else []),
-            *(extra_args or []),
-        ],
-    )
-    rendered = shlex.join(cmd)
-    print(f"Running: {rendered}", file=sys.stderr)
-    result = subprocess.run(cmd, check=False)
-    return result.returncode
-
-
-def get_drakkar_version() -> str:
-    """Return the installed drakkar version string, or 'unknown'."""
-    import re
-    cmd = _drakkar_cmd("--version", [])
+    cmd = [*prefix, "drakkar", "--version"]
     try:
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         raw = res.stdout.strip() or res.stderr.strip() or ""
@@ -817,7 +746,34 @@ _BIN_METADATA_CSV_COLS: list[tuple[str, str, str]] = [
     ("contig_count",  "GENOMES_COL_CONTIGS",        "int"),
 ]
 
-_GENOME_ANNOTATION_COUNT_COLS: list[tuple[str, tuple[str, ...]]] = [
+# Drakkar >= 2.0 writes ``<genome>_genes.tsv`` as a long-form hit table: one row
+# per annotation hit, naming the database that produced it in a ``source``
+# column. Each Airtable count is therefore the number of distinct genes carrying
+# at least one hit from that source.
+_GENOME_ANNOTATION_SOURCES: list[tuple[str, str]] = [
+    # (config_key,                      `source` value)
+    ("GENOMES_COL_NUMBER_KEGG",         "kegg"),
+    ("GENOMES_COL_NUMBER_CAZY",         "cazy"),
+    ("GENOMES_COL_NUMBER_VF",           "vfdb"),
+    ("GENOMES_COL_NUMBER_AMR",          "ncbi_amrfinder"),
+    ("GENOMES_COL_NUMBER_PFAM",         "pfam"),
+    ("GENOMES_COL_NUMBER_SIGNALP",      "signalp"),
+    ("GENOMES_COL_NUMBER_DEFENCE",      "defensefinder"),
+]
+
+# Drakkar keeps every predicted gene in the table under this source, whether or
+# not it carries a functional annotation, so unannotated genes still get a row.
+_GENE_CALL_SOURCE = "prodigal"
+
+# EC numbers no longer have a column of their own; they ride in the ``details``
+# JSON of each KEGG hit.
+_EC_SOURCE = "kegg"
+_EC_DETAILS_KEY = "ec"
+
+# Drakkar 1.x wrote one row per gene with a column per database. Output
+# directories written by that version are still parsed so an in-flight study can
+# be finalised without rerunning annotation.
+_LEGACY_ANNOTATION_COUNT_COLS: list[tuple[str, tuple[str, ...]]] = [
     # (config_key,                         annotation TSV column(s))
     ("GENOMES_COL_NUMBER_KEGG",           ("kegg",)),
     ("GENOMES_COL_NUMBER_CAZY",           ("cazy",)),
@@ -856,7 +812,7 @@ _GENOME_TAXONOMY_NAME_COLS = (
     "mag",
 )
 
-_GENOME_ANNOTATION_NON_ANNOTATION_COLS = {"gene", "start", "end", "strand"}
+_LEGACY_NON_ANNOTATION_COLS = {"gene", "start", "end", "strand"}
 
 _MISSING_VALUES = {"", "NA", "N/A", "NONE", "NULL", "NAN"}
 
@@ -1050,7 +1006,7 @@ def _row_has_value(row: dict[str, Any], columns: tuple[str, ...]) -> bool:
 
 def _row_has_any_annotation(row: dict[str, Any], columns: list[str]) -> bool:
     for column in columns:
-        if column in _GENOME_ANNOTATION_NON_ANNOTATION_COLS:
+        if column in _LEGACY_NON_ANNOTATION_COLS:
             continue
         value = row.get(column)
         if value is None:
@@ -1113,38 +1069,94 @@ def _parse_taxonomy_classification(raw: str) -> dict[str, str]:
     return fields
 
 
-def parse_genome_annotation_tsv(tsv_path: Path) -> dict[str, int]:
-    """Parse a per-genome ``*_genes.tsv`` and return Airtable field-ID counts."""
-    if not tsv_path.exists():
-        return {}
+def _details_has_value(raw: Any, key: str) -> bool:
+    """Return True when *raw* is a Drakkar ``details`` JSON object holding *key*."""
+    text = str(raw or "").strip()
+    if not text:
+        return False
+    try:
+        details = json.loads(text)
+    except ValueError:
+        return False
+    if not isinstance(details, dict):
+        return False
+    value = details.get(key)
+    if value is None:
+        return False
+    if isinstance(value, (list, tuple, set, dict)):
+        return bool(value)
+    return not _is_missing(str(value))
 
+
+def _parse_long_annotation_rows(reader: csv.DictReader) -> dict[str, int]:
+    """Count genes and per-source annotations in a Drakkar >= 2.0 hit table."""
     genes_fid = _config_field_id("GENOMES_COL_NUMBER_GENES")
     annotated_fid = _config_field_id("GENOMES_COL_NUMBER_ANNOTATED")
-    count_fields = [
-        (fid, columns)
-        for config_key, columns in _GENOME_ANNOTATION_COUNT_COLS
+    ec_fid = _config_field_id("GENOMES_COL_NUMBER_EC")
+    source_fields = [
+        (fid, source)
+        for config_key, source in _GENOME_ANNOTATION_SOURCES
         if (fid := _config_field_id(config_key))
     ]
 
-    with tsv_path.open(encoding="utf-8", newline="") as fh:
-        reader = csv.DictReader(fh, delimiter="\t")
-        columns = list(reader.fieldnames or [])
-        if not columns:
-            return {}
+    genes: set[str] = set()
+    annotated: set[str] = set()
+    ec_genes: set[str] = set()
+    genes_by_source: dict[str, set[str]] = {}
 
-        n_genes = 0
-        n_annotated = 0
-        counts: dict[str, int] = {fid: 0 for fid, _columns in count_fields}
+    for row in reader:
+        gene = str(row.get("gene") or "").strip()
+        if not gene:
+            continue
+        genes.add(gene)
 
-        for row in reader:
-            if not str(row.get("gene") or "").strip():
-                continue
-            n_genes += 1
-            if _row_has_any_annotation(row, columns):
-                n_annotated += 1
-            for fid, annotation_columns in count_fields:
-                if _row_has_value(row, annotation_columns):
-                    counts[fid] += 1
+        source = str(row.get("source") or "").strip().lower()
+        if not source or source == _GENE_CALL_SOURCE:
+            continue
+        annotated.add(gene)
+        genes_by_source.setdefault(source, set()).add(gene)
+
+        if source == _EC_SOURCE and _details_has_value(row.get("details"), _EC_DETAILS_KEY):
+            ec_genes.add(gene)
+
+    fields: dict[str, int] = {}
+    if genes_fid:
+        fields[genes_fid] = len(genes)
+    if annotated_fid:
+        fields[annotated_fid] = len(annotated)
+    if ec_fid:
+        fields[ec_fid] = len(ec_genes)
+    for fid, source in source_fields:
+        fields[fid] = len(genes_by_source.get(source, ()))
+    return fields
+
+
+def _parse_wide_annotation_rows(
+    reader: csv.DictReader,
+    columns: list[str],
+) -> dict[str, int]:
+    """Count genes and annotations in a Drakkar 1.x one-row-per-gene table."""
+    genes_fid = _config_field_id("GENOMES_COL_NUMBER_GENES")
+    annotated_fid = _config_field_id("GENOMES_COL_NUMBER_ANNOTATED")
+    count_fields = [
+        (fid, annotation_columns)
+        for config_key, annotation_columns in _LEGACY_ANNOTATION_COUNT_COLS
+        if (fid := _config_field_id(config_key))
+    ]
+
+    n_genes = 0
+    n_annotated = 0
+    counts: dict[str, int] = {fid: 0 for fid, _columns in count_fields}
+
+    for row in reader:
+        if not str(row.get("gene") or "").strip():
+            continue
+        n_genes += 1
+        if _row_has_any_annotation(row, columns):
+            n_annotated += 1
+        for fid, annotation_columns in count_fields:
+            if _row_has_value(row, annotation_columns):
+                counts[fid] += 1
 
     fields: dict[str, int] = {}
     if genes_fid:
@@ -1153,6 +1165,26 @@ def parse_genome_annotation_tsv(tsv_path: Path) -> dict[str, int]:
         fields[annotated_fid] = n_annotated
     fields.update(counts)
     return fields
+
+
+def parse_genome_annotation_tsv(tsv_path: Path) -> dict[str, int]:
+    """Parse a per-genome ``*_genes.tsv`` and return Airtable field-ID counts.
+
+    Drakkar >= 2.0 writes one row per annotation hit and names the database in a
+    ``source`` column; Drakkar 1.x wrote one row per gene with a column per
+    database. The layout is detected from the header so both can be read.
+    """
+    if not tsv_path.exists():
+        return {}
+
+    with tsv_path.open(encoding="utf-8", newline="") as fh:
+        reader = csv.DictReader(fh, delimiter="\t")
+        columns = list(reader.fieldnames or [])
+        if not columns:
+            return {}
+        if "source" in columns:
+            return _parse_long_annotation_rows(reader)
+        return _parse_wide_annotation_rows(reader, columns)
 
 
 def parse_genome_taxonomy_tsv(tsv_path: Path) -> dict[str, dict[str, Any]]:
@@ -1350,20 +1382,3 @@ def parse_bin_metadata_csv(csv_path: Path) -> list[dict[str, Any]]:
                     }
                 )
     return result
-
-
-def parse_preprocessing_stats(output_dir: Path, run_accession: str) -> dict[str, Any]:
-    """Extract key QC metrics from drakkar preprocessing output for a given run.
-
-    Returns a dict suitable for updating Airtable fields; empty dict on failure.
-    """
-    stats_file = output_dir / "preprocessing" / run_accession / "stats.tsv"
-    if not stats_file.exists():
-        return {}
-    try:
-        with stats_file.open(encoding="utf-8") as fh:
-            header = fh.readline().rstrip("\n").split("\t")
-            values = fh.readline().rstrip("\n").split("\t")
-        return dict(zip(header, values))
-    except Exception:
-        return {}

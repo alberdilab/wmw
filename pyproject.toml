@@ -16,6 +16,7 @@ dependencies = [
   "rich>=13",
   "rich-argparse>=1.4",
   "pandas>=2",
+  "paramiko>=3",
 ]
 
 [project.optional-dependencies]

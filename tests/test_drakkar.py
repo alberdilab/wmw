@@ -1,4 +1,4 @@
-"""Tests for wmw.drakkar — manifest generation and version detection."""
+"""Tests for wmw.drakkar — input tables, launch scripts, and output parsing."""
 
 from __future__ import annotations
 
@@ -8,67 +8,6 @@ from pathlib import Path
 import pytest
 from wmw import config as cfg
 from wmw import drakkar
-
-
-def _sample_record(run_acc: str, r1: str = "", r2: str = "", ftp: str = "") -> dict:
-    return {
-        "id": f"rec_{run_acc}",
-        "fields": {
-            "run_accession": run_acc,
-            "fastq_url_1": r1,
-            "fastq_url_2": r2,
-            "fastq_ftp": ftp,
-        },
-    }
-
-
-def test_build_manifest_paired(tmp_path):
-    samples = [
-        _sample_record("ERR001", r1="ftp://host/ERR001_1.fastq.gz", r2="ftp://host/ERR001_2.fastq.gz"),
-        _sample_record("ERR002", r1="ftp://host/ERR002_1.fastq.gz", r2="ftp://host/ERR002_2.fastq.gz"),
-    ]
-    out = tmp_path / "manifest.tsv"
-    drakkar.build_manifest(samples, out)
-
-    lines = out.read_text().splitlines()
-    assert lines[0] == "sample\tR1\tR2"
-    assert lines[1].startswith("ERR001\t")
-    assert "ERR001_1.fastq.gz" in lines[1]
-    assert lines[2].startswith("ERR002\t")
-
-
-def test_build_manifest_skips_missing_r1(tmp_path):
-    samples = [
-        _sample_record("ERR003"),  # no URLs at all
-        _sample_record("ERR004", r1="ftp://host/ERR004_1.fastq.gz"),
-    ]
-    out = tmp_path / "manifest.tsv"
-    drakkar.build_manifest(samples, out)
-    lines = out.read_text().splitlines()
-    # Only ERR004 should appear
-    assert len(lines) == 2  # header + 1 row
-    assert "ERR004" in lines[1]
-
-
-def test_build_manifest_falls_back_to_fastq_ftp(tmp_path):
-    samples = [
-        _sample_record(
-            "ERR005",
-            ftp="ftp.sra.ebi.ac.uk/vol1/ERR005_1.fastq.gz;ftp.sra.ebi.ac.uk/vol1/ERR005_2.fastq.gz",
-        )
-    ]
-    out = tmp_path / "manifest.tsv"
-    drakkar.build_manifest(samples, out)
-    lines = out.read_text().splitlines()
-    assert "ERR005" in lines[1]
-    assert "ERR005_1.fastq.gz" in lines[1]
-
-
-def test_build_manifest_creates_parent_dirs(tmp_path):
-    samples = [_sample_record("ERR006", r1="ftp://host/ERR006_1.fastq.gz")]
-    out = tmp_path / "nested" / "deep" / "manifest.tsv"
-    drakkar.build_manifest(samples, out)
-    assert out.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -328,7 +267,8 @@ def test_generate_annotation_script_checks_required_outputs(tmp_path):
     assert "wmw set-status --study PRJ001 --workflow annotating --status completed" in script
 
 
-def test_parse_genome_annotation_tsv_counts_annotation_types(tmp_path):
+def test_parse_genome_annotation_tsv_reads_legacy_wide_table(tmp_path):
+    """Drakkar 1.x wrote one row per gene with a column per database."""
     path = tmp_path / "SA000022_bin_1_genes.tsv"
     path.write_text(
         "\t".join(
@@ -372,6 +312,82 @@ def test_parse_genome_annotation_tsv_counts_annotation_types(tmp_path):
     assert stats[str(cfg.get("GENOMES_COL_NUMBER_SIGNALP"))] == 1
     assert stats[str(cfg.get("GENOMES_COL_NUMBER_DEFENCE"))] == 1
     assert stats[str(cfg.get("GENOMES_COL_NUMBER_ANTIDEFENCE"))] == 1
+
+
+_LONG_ANNOTATION_HEADER = (
+    "mag\tgene\tcontig\tstart\tend\tstrand\tsource\tmethod\tevidence"
+    "\thit_rank\tis_primary\tannotation_id\tannotation\tannotation_type\tdetails"
+)
+
+
+def _annotation_hit(gene, source, annotation_id="", details="{}"):
+    """One row of a Drakkar >= 2.0 long-form ``<genome>_genes.tsv``."""
+    return "\t".join(
+        [
+            "SA000022_bin_1", gene, "c1", "1", "100", "+",
+            source, "hmmscan", "sequence_homology", "1", "True",
+            annotation_id, "", "ko", details,
+        ]
+    )
+
+
+def test_parse_genome_annotation_tsv_counts_sources_in_long_table(tmp_path):
+    """Drakkar >= 2.0 writes one row per hit, so counts are of distinct genes."""
+    rows = [
+        # Every predicted gene gets a prodigal row, annotated or not.
+        _annotation_hit("gene1", "prodigal"),
+        _annotation_hit("gene2", "prodigal"),
+        _annotation_hit("gene3", "prodigal"),
+        # gene1 has two KEGG hits and must still count once; only one has an EC.
+        _annotation_hit("gene1", "kegg", "K00001", '{"ec":"1.1.1.1"}'),
+        _annotation_hit("gene1", "kegg", "K00002", '{"hmm_description":"none"}'),
+        _annotation_hit("gene1", "pfam", "PF00001"),
+        # gene3 draws one hit from every remaining source.
+        _annotation_hit("gene3", "kegg", "K00003"),
+        _annotation_hit("gene3", "cazy", "GH1"),
+        _annotation_hit("gene3", "vfdb", "VF0001"),
+        _annotation_hit("gene3", "ncbi_amrfinder", "NF000001"),
+        _annotation_hit("gene3", "signalp", "SP"),
+        _annotation_hit("gene3", "defensefinder", "AbiEii"),
+    ]
+    path = tmp_path / "SA000022_bin_1_genes.tsv"
+    path.write_text(
+        "\n".join([_LONG_ANNOTATION_HEADER, *rows]) + "\n",
+        encoding="utf-8",
+    )
+
+    stats = drakkar.parse_genome_annotation_tsv(path)
+
+    # gene2 has only a prodigal row, so it is a gene but not an annotated one.
+    assert stats[str(cfg.get("GENOMES_COL_NUMBER_GENES"))] == 3
+    assert stats[str(cfg.get("GENOMES_COL_NUMBER_ANNOTATED"))] == 2
+    assert stats[str(cfg.get("GENOMES_COL_NUMBER_KEGG"))] == 2
+    assert stats[str(cfg.get("GENOMES_COL_NUMBER_PFAM"))] == 1
+    assert stats[str(cfg.get("GENOMES_COL_NUMBER_CAZY"))] == 1
+    assert stats[str(cfg.get("GENOMES_COL_NUMBER_VF"))] == 1
+    assert stats[str(cfg.get("GENOMES_COL_NUMBER_AMR"))] == 1
+    assert stats[str(cfg.get("GENOMES_COL_NUMBER_SIGNALP"))] == 1
+    assert stats[str(cfg.get("GENOMES_COL_NUMBER_DEFENCE"))] == 1
+    # EC now rides in the details JSON of a KEGG hit rather than its own column.
+    assert stats[str(cfg.get("GENOMES_COL_NUMBER_EC"))] == 1
+    # Drakkar 2.x reports no antidefense systems, so the field is left untouched.
+    assert str(cfg.get("GENOMES_COL_NUMBER_ANTIDEFENCE")) not in stats
+
+
+def test_parse_genome_annotation_tsv_long_table_without_annotations(tmp_path):
+    path = tmp_path / "SA000022_bin_2_genes.tsv"
+    path.write_text(
+        "mag\tgene\tsource\tdetails\n"
+        "SA000022_bin_2\tgene1\tprodigal\t{}\n"
+        "SA000022_bin_2\tgene2\tprodigal\t{}\n",
+        encoding="utf-8",
+    )
+
+    stats = drakkar.parse_genome_annotation_tsv(path)
+
+    assert stats[str(cfg.get("GENOMES_COL_NUMBER_GENES"))] == 2
+    assert stats[str(cfg.get("GENOMES_COL_NUMBER_ANNOTATED"))] == 0
+    assert stats[str(cfg.get("GENOMES_COL_NUMBER_KEGG"))] == 0
 
 
 def test_parse_genome_taxonomy_tsv_extracts_classification_and_ani(tmp_path):

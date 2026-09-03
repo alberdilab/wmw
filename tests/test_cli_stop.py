@@ -430,16 +430,32 @@ def test_cmd_set_status_cataloged_launches_genome_upload_screen(tmp_path):
     client.create_genome_records_with_response.assert_called_once()
     client.upload_genome_file.assert_not_called()
     assert not bin_path.with_suffix(".fa.gz").exists()
-    run.assert_called_once()
-    assert run.call_args[0][0] == [
+
+    # Two detached sessions: the Airtable attachment upload and the ERDA transfer.
+    assert run.call_count == 2
+    genome_call, erda_call = run.call_args_list
+    assert genome_call[0][0] == [
         "screen",
         "-dmS",
         "ST001-genome-upload",
         "bash",
         str(script_path),
     ]
-    assert run.call_args.kwargs["check"] is True
-    assert run.call_args.kwargs["env"]["AIRTABLE_TOKEN"] == "secret-token"
+    assert genome_call.kwargs["check"] is True
+    assert genome_call.kwargs["env"]["AIRTABLE_TOKEN"] == "secret-token"
+
+    erda_script = work_dir / "ST001_upload_erda.sh"
+    assert erda_script.exists()
+    erda_text = erda_script.read_text(encoding="utf-8")
+    assert "upload-erda" in erda_text
+    assert "secret-token" not in erda_text
+    assert erda_call[0][0] == [
+        "screen",
+        "-dmS",
+        "ST001-erda-upload",
+        "bash",
+        str(erda_script),
+    ]
 
 
 def test_populate_genomes_skips_records_and_files_below_quality_thresholds(tmp_path):

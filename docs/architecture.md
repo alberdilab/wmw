@@ -22,6 +22,9 @@ ENA Portal API ──► wmw fetch ──► normalize ──► filter ──�
                                                   study status → "indexed"
 
 Airtable ──► wmw process ──► build manifest ──► drakkar <workflow> ──► update status
+                                                          │
+                            cataloging outputs ──► Airtable (stats, Genomes, attachments)
+                                                          └──► ERDA (assemblies + final bins)
 ```
 
 ## Module responsibilities
@@ -72,11 +75,34 @@ and `instrument_platform` on already-normalized records. Fields with empty value
 excluded by a filter (unknown ≠ excluded).
 
 ### `drakkar.py`
-`build_manifest()` writes a three-column TSV (`sample`, `R1`, `R2`) from Airtable sample
-records. `fastq_url_1`/`fastq_url_2` are used first; falls back to parsing `fastq_ftp`.
-`run_workflow()` invokes `drakkar <workflow>` as a subprocess, optionally wrapped in
-`conda run -n <env>` when `DRAKKAR_CONDA_ENV` is set. Exit code is returned and used to
-update Airtable status.
+Targets Drakkar 2.x. `build_input_tsv()` writes the Drakkar sample detail file
+(`sample`, `rawreads1`, `rawreads2`, `reference_name`, `reference_path`, plus `assembly`
+and `coverage` when any row sets them) from Airtable sample records. The
+`generate_*_script()` functions emit the bash script that `wmw process` launches: it runs
+`drakkar preprocessing → cataloging → profiling → annotating` in sequence, wrapped in
+`conda run -n <env>` when `DRAKKAR_CONDA_ENV` is set, with `wmw set-status` calls and an
+`EXIT` trap around each stage so a failure or a `.wmw-stop` file is reflected in Airtable.
+
+The `parse_*` functions read Drakkar's output tables back into Airtable field IDs:
+`preprocessing.tsv`, `cataloging.tsv` and `profiling_genomes.tsv` at the output root,
+`cataloging/final/all_bin_metadata.csv`, `annotating/genome_taxonomy.tsv`, and the
+per-genome `annotating/final/<genome>_genes.tsv`. Since Drakkar 2.0 the gene table is
+long-form — one row per annotation hit, with the database named in a `source` column and
+EC numbers inside the `details` JSON — so the per-database Airtable counts are counts of
+*distinct genes* carrying at least one hit from that source. The Drakkar 1.x wide layout
+(one row per gene, one column per database) is still detected from the header and parsed,
+so an output directory written by an older Drakkar can still be finalised.
+
+### `transfer.py`
+ERDA transfers over SFTP, ported from the ehio transfer layer so both tools reach ERDA
+the same way. `SFTPTransfer` is a paramiko-backed context manager that creates remote
+directories on demand (`ensure_remote_dir`), checks for existing files
+(`remote_exists`), and writes through `upload_stream` / `upload_gzipped`. `gzip_into`
+compresses a local file straight into the open remote handle, so a multi-GB assembly is
+never staged as a temporary `.gz` on local disk. Every write goes to a `.part` name that
+is renamed only once the writer returns, so an interrupted transfer leaves behind no file
+that looks complete. `paramiko` is imported defensively — `paramiko_available()` lets the
+caller skip the transfer with a warning rather than failing the run.
 
 ### `publications.py`
 `resolve_batch()` iterates study records and calls `resolve()` per study. `resolve()`
@@ -96,3 +122,8 @@ between requests. Returns empty dict on any failure (publication metadata is opt
 | No Click/Typer | Matches ehio and drakkar; no extra dependency. |
 | Dedup by accession | Re-running scan or fetch over overlapping accessions is safe. |
 | Config in package dir | Consistent with ehio; single location, editable in-place. |
+| ERDA layout is study-first | `{base}/{code}/assemblies/` and `{base}/{code}/bins/` keeps everything for one study under one folder, so a study can be archived or shared whole. ehio's `ASB/{batch}` + `MAG/{batch}` split predates wmw and is kept there for link stability. |
+| ERDA transfer runs last | Airtable writes happen first in `_finalize_cataloging_outputs()`, so a failed or slow transfer never costs the metadata. Per-file failures are collected and reported instead of aborting. |
+| ERDA transfer never auto-replaces | The attachment-replacement flag exists because Airtable *appends* on upload; SFTP has no such quirk, and re-sending multi-GB assemblies on every rerun would be pure cost. Files already present are skipped; `wmw upload-erda --replace-files` is the explicit override. |
+| All bins archived, not just the good ones | The Airtable Genomes table is curated (completeness > 50, contamination < 10); the ERDA copy is an archive of what binette actually produced. |
+| Transfer detached into its own `screen` | A multi-GB upload must not hold up status updates or the next Drakkar stage, and `{code}-erda-upload` can be killed independently by `wmw stop`. |
