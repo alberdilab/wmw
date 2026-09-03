@@ -21,16 +21,18 @@ wmw stop    → stop an ongoing processing run
 
 ## wmw scan
 
-Search ENA for wild-animal studies and populate the **Studies** table. Run-level sample data is **not** fetched — that is deferred to `wmw fetch` after manual review.
+Search ENA (or GSA) for wild-animal studies and populate the **Studies** table. Run-level sample data is **not** fetched — that is deferred to `wmw fetch` after manual review.
 
 ```
-wmw scan [--from DATE] [--to DATE]
+wmw scan [--source ARCHIVE]              # ena (default) | gsa; config: SOURCE
+         [--from DATE] [--to DATE]
          [--year YEAR[,YEAR]]             # e.g. 2025 or 2024,2026
          [--month MONTH[,MONTH]]          # e.g. March or March,June
          [--study ACCESSION]
          [--host-tax-id TAXON_ID]
          [--date-field FIELD]             # first_public|last_updated; config: DATE_FIELD
          [--keyword TEXT]
+         [--gsa-organism NAME]            # GSA only; config: GSA_ORGANISM
          [--include GROUPS]              # Human,Livestock,Aquaculture,Laboratory or All
          [--dry-run]
          [--no-publications]
@@ -71,14 +73,50 @@ Month names are full English names, case-insensitive (e.g. `January`, `march`). 
 5. Print summary table
 6. Upsert Studies into Airtable (unless `--dry-run`)
 
+### Scanning GSA (`--source gsa`)
+
+Queries the Genome Sequence Archive (NGDC/CNCB) instead of ENA. Studies are written with
+`source = "GSA"`, `study_accession` set to the GSA accession (`CRA…`) and
+`secondary_study_accession` to the NGDC BioProject (`PRJCA…`).
+
+```
+wmw scan --source gsa --from 2025-09-01 --to 2025-09-30
+wmw scan --source gsa --study CRA028180
+```
+
+**Differences from the ENA path:**
+
+| Flag | Behaviour under `--source gsa` |
+|---|---|
+| `--from` / `--to` | Matched against GSA's release date. `--date-field` has no effect. |
+| `--gsa-organism` | Organism label to match; default `organismal metagenomes`, the label GSA files metagenome submissions under. Comma- or pipe-separated values are OR'd. |
+| `--keyword` | Applied **after** study lookup, against study title and description. GSA's searchable `title` field holds experiment titles (per-sample aliases), so querying it directly would not match study-level keywords. |
+| `--taxonomy` | Ignored with a warning — GSA has no `tax_tree()` subtree expansion. |
+| `--host-tax-id` | Ignored — GSA's search does not expose host taxonomy. Host filtering happens at fetch time. |
+| `--library-strategy`, `--library-source`, `--instrument-platform` | Applied in the query. |
+
+Every GSA query is restricted to `"NGDC"[center]`, so the INSDC records GSA mirrors from
+SRA are excluded and ENA-sourced studies are not duplicated.
+
+**Execution order:**
+1. `POST /gsa/search/` with the composed query; page through the experiment hits and collect
+   the distinct parent study of each
+2. For each study, merge `GET /gsa/browse/<CRA>` with the linked `/bioproject/browse/<PRJCA>`
+   record for title, description, organism, release date and submitting organization
+3. Apply the `--keyword` filter to the resolved study records
+4. Resolve publications (unless `--no-publications`)
+5. Print summary table
+6. Upsert Studies into Airtable (unless `--dry-run`)
+
 ---
 
 ## wmw fetch
 
-Fetch run/sample data from ENA for studies the user has approved, and populate the **Samples** table. Study status is updated to `"indexed"` after a successful fetch.
+Fetch run/sample data from ENA (or GSA) for studies the user has approved, and populate the **Samples** table. Study status is updated to `"indexed"` after a successful fetch.
 
 ```
-wmw fetch [--status VALUE]               # default: "approved"
+wmw fetch [--source ARCHIVE]             # ena (default) | gsa; config: SOURCE
+          [--status VALUE]               # default: "approved"
           [--study ACCESSION]            # bypass status filter; fetch one study directly
           [--library-strategy STRATEGY]  # default: WGS,METAGENOMIC
           [--library-source SOURCE]      # e.g. METAGENOMIC; config: LIBRARY_SOURCE
@@ -87,6 +125,7 @@ wmw fetch [--status VALUE]               # default: "approved"
           [--include GROUPS]             # Human,Livestock,Aquaculture,Laboratory or All
           [--exclude-taxa IDS]           # comma-sep extra taxon IDs to also exclude
           [--dry-run]
+          [--debug]                      # print every archive request
           [--airtable-token TOKEN]       # or $AIRTABLE_TOKEN env var
           [--base-id BASE_ID]            # or config WMW_BASE
           [--studies-table TABLE]        # or config STUDIES_TABLE
@@ -103,11 +142,34 @@ wmw fetch [--status VALUE]               # default: "approved"
 
 **Execution order:**
 1. Read approved studies from Airtable Studies table (or use `--study` directly)
-2. For each study, call `ena.search_study(accession)` to fetch all run records
+2. For each study, call `ena.search_study(accession)` — or `gsa.search_study(accession)` under
+   `--source gsa` — to fetch all run records
 3. Normalize → deduplicate
 4. Post-fetch `filter_runs()`: host taxon exclusions (`--include` / `--exclude-taxa`), min_bases, library_strategy, library_source, instrument_platform
 5. Upsert Samples into Airtable (unless `--dry-run`)
 6. Update study `status = "indexed"` for successfully fetched studies
+
+### Fetching from GSA (`--source gsa`)
+
+```
+wmw fetch --source gsa --study CRA028180
+```
+
+Run records come from the study's metadata workbook
+(`POST /gsa/file/exportExcelFile`), whose Run, Experiment and Sample sheets are joined to
+produce the same sample schema as ENA — including file names, sizes, MD5 checksums, host,
+collection date and geographic location.
+
+- **Taxonomy is resolved first.** GSA publishes taxon *names* but no taxon IDs, and the
+  host-exclusion filter keys off `host_tax_id`. Each distinct organism and host name is
+  resolved through the NCBI/ENA taxonomy service (cached per run of the command) before
+  filtering, so the `EXCLUDED_HOST_TAX_IDS` groups behave as they do for ENA. A name that
+  will not resolve leaves the ID blank, and blank fields are never excluded.
+- **`--min-bases` does not apply.** GSA publishes no base counts, so `base_count` stays
+  empty. The command warns when the filter is set rather than filtering silently.
+- **Download URLs are HTTPS.** GSA's FTP paths are rewritten to
+  `https://download.cncb.ac.cn/…`, which supports range requests and so resumes. The raw
+  FTP paths are kept in `fastq_ftp`. `wmw process` consumes these like any other URL.
 
 ---
 
@@ -117,7 +179,7 @@ Pull ready studies from Airtable and launch a Drakkar workflow in detached `scre
 
 ```
 wmw process [--batch BATCH]
-            [--workflow {preprocessing,cataloging,profiling,annotating}]   # default: preprocessing
+            [--workflow {preprocessing,cataloging,amr,profiling,annotating}]   # default: preprocessing
             [--slurm]
             [--output-dir DIR]   # or config DRAKKAR_OUTPUT_DIR
             [--studies-table TABLE] [--samples-table TABLE] [--genomes-table TABLE]
@@ -132,7 +194,7 @@ wmw process [--batch BATCH]
 5. Write `{output_dir}/{code}/{code}.sh`
 6. Studies with `Priority = Low` add `--slurm-partition lazyqueue --slurm-qos lazy` to generated Drakkar commands
 7. Launch the script in a detached `screen` session named `{code}`
-8. Generated scripts update the Study status through `preprocessing`, `preprocessed`, `cataloging`, `cataloged`, `quantifying`, `quantified`, `annotating`, `Done`, `error`, or `stopped`
+8. Generated scripts update the Study status through `preprocessing`, `preprocessed`, `cataloging`, `cataloged`, `amr`, `amr_done`, `quantifying`, `quantified`, `annotating`, `Done`, `error`, or `stopped`
 9. Genome FASTA attachment uploads are detached into a `{code}-genome-upload`
    `screen` session when finalization is run outside an existing `screen`; if
    `screen` is unavailable, upload falls back to the current process
@@ -142,6 +204,57 @@ wmw process [--batch BATCH]
    detached `{code}-erda-upload` `screen` session (see
    [wmw upload-erda](#wmw-upload-erda)); the transfer runs after the Airtable
    writes, so a failed transfer never costs the metadata
+12. AMR runs between cataloging and profiling — see
+   [the AMR workflow](#the-amr-workflow)
+
+---
+
+## The AMR workflow
+
+`drakkar amr` calls antimicrobial resistance loci per assembly with
+AMRFinderPlus and CARD/RGI and attaches geNomad plasmid or virus mobility
+context. It needs the assemblies cataloging produces and nothing profiling or
+annotating adds, so it runs between the two:
+
+```
+preprocessing → cataloging → amr → profiling → annotating
+```
+
+It is an ordinary stage in every other respect: the same `{code}.sh` script, the
+same `{code}` screen session, the same `{code}.out`/`.err` logs, the same
+`.wmw-stop` marker, and the same study `status` field, which it moves through
+`amr` → `amr_done` (or `stopped`/`error`). `drakkar amr -i` discovers the
+assemblies under `cataloging/megahit/{assembly}/{assembly}.fna` and names each
+one after its folder — the wmw sample code — so no manifest is needed.
+
+**Running it on its own**
+
+```
+wmw process --batch CODE --workflow amr [--slurm]
+```
+
+A study with status `resume` also launches AMR automatically when cataloging
+output exists and `amr/amr_qc.tsv` does not, before it would launch profiling.
+
+**Outputs**
+
+Per-assembly counts from `amr/amr_qc.tsv` go to the Samples rows, keyed by
+`assembly_id`. The two `*_without_coordinates` columns are caller diagnostics
+rather than results and are never written.
+
+| `amr_qc.tsv` column | Samples config key |
+|---|---|
+| `amrfinder_hits` | `SAMPLES_COL_AMR_AMRFINDER_HITS` |
+| `rgi_hits` | `SAMPLES_COL_AMR_RGI_HITS` |
+| `mobility_regions` | `SAMPLES_COL_AMR_MOBILITY_REGIONS` |
+| `amr_loci` | `SAMPLES_COL_AMR_LOCI` |
+| `multi_tool_loci` | `SAMPLES_COL_AMR_MULTI_TOOL_LOCI` |
+| `mobility_links` | `SAMPLES_COL_AMR_MOBILITY_LINKS` |
+| `mobile_loci` | `SAMPLES_COL_AMR_MOBILE_LOCI` |
+
+The five aggregate tables and the manifest are attached to the study record and
+archived on ERDA — see [wmw upload-erda](#wmw-upload-erda). A table over
+Airtable's 5 MB encoded attachment limit is reported and left on ERDA only.
 
 ## wmw stop
 
@@ -183,23 +296,25 @@ wmw upload-genome-files --study CODE
 ## wmw upload-erda
 
 Transfer the assemblies and the binette-refined final bins of one study to
-ERDA. This is normally launched automatically in a detached
-`{code}-erda-upload` `screen` session when cataloging outputs are finalized —
-by both `wmw process` (resume) and
-`wmw set-status --workflow cataloging --status cataloged`. Run it by hand to
-retry a failed transfer.
+ERDA, or its AMR result tables. The cataloging transfer is normally launched
+automatically in a detached `{code}-erda-upload` `screen` session when
+cataloging outputs are finalized; the AMR tables are small and are transferred
+inline when AMR outputs are finalized. Both happen from `wmw process` (resume)
+and from `wmw set-status`. Run this by hand to retry a failed transfer.
 
 ```
 wmw upload-erda --study CODE
+                [--what {cataloging,amr,all}]  # default: cataloging
                 [--output-dir DIR]           # or config DRAKKAR_OUTPUT_DIR
                 [--sftp-host HOST]           # or config SFTP_HOST
                 [--sftp-user USER]           # or config SFTP_USER
                 [--sftp-identity PATH]       # or config SFTP_IDENTITY
                 [--sftp-remote-base PATH]    # or config SFTP_REMOTE_BASE
+                [--sftp-amr-dir NAME]        # or config SFTP_REMOTE_AMR_DIR
                 [--replace-files] [--verbose]
 ```
 
-**What is transferred**
+**What is transferred — `--what cataloging`**
 
 | Local | ERDA |
 |---|---|
@@ -209,6 +324,26 @@ wmw upload-erda --study CODE
 With the shipped defaults that is `/WMW/{code}/assemblies/` and
 `/WMW/{code}/bins/`.
 
+**What is transferred — `--what amr`**
+
+All from `amr/`, to `{SFTP_REMOTE_BASE}/{code}/{SFTP_REMOTE_AMR_DIR}/`
+(`/WMW/{code}/amr/` by default), study-prefixed so a table stays identifiable
+once it is downloaded away from its folder:
+
+| Local | ERDA | Sent as |
+|---|---|---|
+| `amr_hits.tsv.xz` | `{code}_amr_hits.tsv.xz` | as-is |
+| `amr_loci.tsv.xz` | `{code}_amr_loci.tsv.xz` | as-is |
+| `amr_drug_classes.tsv.xz` | `{code}_amr_drug_classes.tsv.xz` | as-is |
+| `amr_mobility.tsv.xz` | `{code}_amr_mobility.tsv.xz` | as-is |
+| `mobility_regions.tsv.xz` | `{code}_mobility_regions.tsv.xz` | as-is |
+| `amr_qc.tsv` | `{code}_amr_qc.tsv.gz` | gzipped |
+| `assembly_summary.tsv` | `{code}_assembly_summary.tsv.gz` | gzipped |
+| `manifest.yaml` | `{code}_amr_manifest.yaml` | as-is |
+
+The `.tsv.xz` tables drakkar writes are already compressed, so they go up
+byte-for-byte; only the plain-text summaries are gzipped into the connection.
+
 **Notes**
 - Both assemblies and bins are gzipped straight into the SFTP connection, so a
   multi-GB assembly never needs a temporary `.gz` on the local disk. Each
@@ -217,9 +352,9 @@ With the shipped defaults that is `/WMW/{code}/assemblies/` and
 - Every bin in `all_bin_paths.txt` is archived, including bins below the
   completeness/contamination thresholds that gate the Airtable Genomes table.
   The ERDA copy is an archive of what binette produced, not a curated set.
-- Files already on ERDA are skipped. `--replace-files` clears the study's remote
-  `assemblies/` and `bins/` folders first and re-sends everything; it is never
-  set automatically, not even on a rerun.
+- Files already on ERDA are skipped. `--replace-files` clears the remote folders
+  selected by `--what` first and re-sends everything; it is never set
+  automatically, not even on a rerun.
 - The transfer is skipped with a warning — never an error — when `SFTP_HOST`,
   `SFTP_REMOTE_BASE` or `SFTP_USER` is empty, or when `paramiko` is not
   installed. Individual file failures are collected and reported at the end

@@ -211,10 +211,212 @@ def _resolve_scan_dates(args: argparse.Namespace) -> None:
 # wmw scan  (phase 1 — study discovery, ENA only)
 # ---------------------------------------------------------------------------
 
+def _resolve_study_publications(studies: list[dict]) -> None:
+    """Fill pub_* fields on study records from PubMed/CrossRef, with a progress bar."""
+    from wmw import publications
+    api_key = os.environ.get("NCBI_TOKEN", "").strip() or cfg.get("NCBI_API_KEY", "").strip() or None
+    email = cfg.get("NCBI_EMAIL", "").strip() or None
+    out.info(f"Resolving publication metadata for {len(studies)} studies…")
+    _pub_pg = None
+    _pub_task = None
+    try:
+        from rich.progress import (
+            BarColumn,
+            MofNCompleteColumn,
+            Progress,
+            SpinnerColumn,
+            TextColumn,
+        )
+        from rich.console import Console as _PubConsole
+        if sys.stdout.isatty():
+            _pub_pg = Progress(
+                SpinnerColumn(style="#5f9ea0"),
+                TextColumn("[#5f9ea0]Resolving publications"),
+                BarColumn(bar_width=None, style="#b7c7d3", complete_style="#5f9ea0"),
+                MofNCompleteColumn(),
+                TextColumn("[#b7c7d3]studies  ·  [#e6edf3]{task.fields[summary]}"),
+                console=_PubConsole(theme=out.WMW_THEME, highlight=False, soft_wrap=True),
+                transient=False,
+            )
+            _pub_pg.start()
+            _pub_task = _pub_pg.add_task("", total=len(studies), summary="")
+    except ImportError:
+        pass
+    _pub_found = [0]
+
+    def _pub_progress(study: dict) -> None:
+        if study.get("pub_title"):
+            _pub_found[0] += 1
+        if _pub_pg is not None:
+            _pub_pg.update(
+                _pub_task,
+                advance=1,
+                summary=f"{_pub_found[0]} resolved",
+            )
+
+    publications.resolve_batch(studies, api_key=api_key, email=email, on_progress=_pub_progress)
+    if _pub_pg is not None:
+        _pub_pg.stop()
+    out.success(f"Publications resolved: {_pub_found[0]}/{len(studies)}.")
+
+
+def _resolve_source(args: argparse.Namespace) -> str:
+    """Return the archive to query: CLI flag → config SOURCE → 'ENA'."""
+    source = (_conf(args, "source", "SOURCE") or "ENA").strip().upper()
+    if source not in {"ENA", "GSA"}:
+        _die(f"--source must be one of ena, gsa; got: {source.lower()!r}")
+    return source
+
+
+def _gsa_organism(args: argparse.Namespace) -> str:
+    """Return the GSA organism term: CLI flag → config GSA_ORGANISM → default."""
+    from wmw.gsa import DEFAULT_ORGANISM
+    return _conf(args, "gsa_organism", "GSA_ORGANISM") or DEFAULT_ORGANISM
+
+
+def _scan_gsa(args: argparse.Namespace, studies_table: str, dry_run: bool, client=None) -> int:
+    """Scan GSA for studies in a date window and upsert them into Airtable.
+
+    GSA indexes experiments rather than studies and exposes neither base counts
+    nor host taxonomy in its search, so only the study-level filters that GSA
+    supports are applied here: release date, organism, title keyword, library
+    strategy/source and platform. Host-taxon exclusion happens at fetch time,
+    once the metadata workbook has supplied the host names.
+    """
+    from wmw import gsa, metadata
+
+    gsa.DEBUG = getattr(args, "debug", False)
+    organism = _gsa_organism(args)
+    keyword = (getattr(args, "keyword", "") or "").strip()
+    if not keyword:
+        keyword = str(cfg.get("SCAN_KEYWORDS") or "").strip()
+    library_strategy = (
+        (getattr(args, "library_strategy", "") or "").strip()
+        or _conf(args, "library_strategy", "LIBRARY_STRATEGY")
+        or "WGS,METAGENOMIC"
+    )
+    library_source = _conf(args, "library_source", "LIBRARY_SOURCE") or ""
+
+    if args.study:
+        return _scan_single_gsa_study(args, args.study, studies_table, dry_run, client=client)
+
+    if not args.date_from or not args.date_to:
+        _die("Provide --from and --to dates, or a --study accession.")
+
+    out.section("WMW SCAN — GSA")
+    out.info(f"Date range: {args.date_from} → {args.date_to}  (field: release date)")
+    out.info(f"Organism: {organism}")
+    out.info(f"Library strategy: {library_strategy}")
+    if library_source:
+        out.info(f"Library source: {library_source}")
+    if keyword:
+        out.info(
+            f'Keyword filter: "{keyword}" (study title and description, '
+            "applied after study lookup)"
+        )
+    if getattr(args, "taxonomy", ""):
+        out.warn("--taxonomy has no GSA equivalent and is ignored; use --gsa-organism instead.")
+    out.info("Database: GSA (advanced search → study discovery; INSDC mirror excluded)")
+
+    try:
+        # The keyword is deliberately not part of the query: GSA's title field
+        # indexes experiment titles, not study titles. It is applied below,
+        # against the study records this search resolves to.
+        accessions = gsa.search_study_accessions(
+            date_from=args.date_from,
+            date_to=args.date_to,
+            organism=organism,
+            library_strategy=library_strategy,
+            library_source=library_source,
+            instrument_platform=_conf(args, "instrument_platform", "INSTRUMENT_PLATFORM"),
+        )
+    except Exception as exc:
+        _die(f"GSA search failed: {exc}")
+        return 1
+
+    out.success(f"GSA: {_pl(len(accessions), 'unique study', 'unique studies')}.")
+    if not accessions:
+        out.info("Nothing to insert.")
+        return 0
+
+    out.info(f"Fetching study metadata for {len(accessions)} studies…")
+    raw_studies = gsa.fetch_studies_batch(accessions)
+    studies = [metadata.normalize_gsa_study(s) for s in raw_studies]
+    n_missing = len(accessions) - len(studies)
+    if n_missing:
+        out.warn(f"{_pl(n_missing, 'study', 'studies')} could not be resolved and were skipped.")
+
+    if keyword:
+        before = len(studies)
+        studies = [s for s in studies if gsa.keyword_matches(s, keyword)]
+        removed = before - len(studies)
+        if removed:
+            out.info(f"  Keyword filter removed {_pl(removed, 'study', 'studies')}.")
+
+    if not studies:
+        out.info("Nothing to insert.")
+        return 0
+
+    if not args.no_publications:
+        _resolve_study_publications(studies)
+
+    _print_scan_summary(studies)
+
+    if dry_run:
+        out.info("Dry-run mode — no changes written to Airtable.")
+        return 0
+
+    if client is None:
+        client = _require_airtable(args, studies_table)
+    s_inserted, s_updated = client.upsert_studies(studies_table, studies)
+    out.success(f"Studies: {s_inserted} inserted, {s_updated} updated.")
+    return 0
+
+
+def _scan_single_gsa_study(
+    args: argparse.Namespace,
+    study_accession: str,
+    studies_table: str,
+    dry_run: bool,
+    client=None,
+) -> int:
+    from wmw import gsa, metadata
+
+    out.section(f"WMW SCAN — {study_accession} (GSA)")
+    out.info("Fetching study metadata from GSA…")
+
+    record = gsa.fetch_study_metadata(study_accession)
+    if not record:
+        out.warn(f"Study {study_accession} not found in GSA.")
+        return 0
+
+    study = metadata.normalize_gsa_study(record)
+
+    if not args.no_publications:
+        _resolve_study_publications([study])
+
+    _print_scan_summary([study])
+
+    if dry_run:
+        out.info("Dry-run — no Airtable writes.")
+        return 0
+
+    if client is None:
+        client = _require_airtable(args, studies_table)
+    s_inserted, s_updated = client.upsert_studies(studies_table, [study])
+    out.success(f"Studies: {s_inserted} inserted, {s_updated} updated.")
+    return 0
+
+
 def cmd_scan(args: argparse.Namespace) -> int:
     from wmw import ena, metadata
     ena.DEBUG = getattr(args, "debug", False)
     _resolve_scan_dates(args)
+
+    if _resolve_source(args) == "GSA":
+        studies_table = _conf(args, "studies_table", "STUDIES_TABLE") or "Studies"
+        client = _require_airtable(args, studies_table) if not args.dry_run else None
+        return _scan_gsa(args, studies_table, args.dry_run, client=client)
 
     studies_table = _conf(args, "studies_table", "STUDIES_TABLE") or "Studies"
     dry_run = args.dry_run
@@ -454,51 +656,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         return 0
 
     if not args.no_publications:
-        from wmw import publications
-        api_key = os.environ.get("NCBI_TOKEN", "").strip() or cfg.get("NCBI_API_KEY", "").strip() or None
-        email = cfg.get("NCBI_EMAIL", "").strip() or None
-        out.info(f"Resolving publication metadata for {len(studies)} studies…")
-        _pub_pg = None
-        _pub_task = None
-        try:
-            from rich.progress import (
-                BarColumn,
-                MofNCompleteColumn,
-                Progress,
-                SpinnerColumn,
-                TextColumn,
-            )
-            from rich.console import Console as _PubConsole
-            if sys.stdout.isatty():
-                _pub_pg = Progress(
-                    SpinnerColumn(style="#5f9ea0"),
-                    TextColumn("[#5f9ea0]Resolving publications"),
-                    BarColumn(bar_width=None, style="#b7c7d3", complete_style="#5f9ea0"),
-                    MofNCompleteColumn(),
-                    TextColumn("[#b7c7d3]studies  ·  [#e6edf3]{task.fields[summary]}"),
-                    console=_PubConsole(theme=out.WMW_THEME, highlight=False, soft_wrap=True),
-                    transient=False,
-                )
-                _pub_pg.start()
-                _pub_task = _pub_pg.add_task("", total=len(studies), summary="")
-        except ImportError:
-            pass
-        _pub_found = [0]
-
-        def _pub_progress(study: dict) -> None:
-            if study.get("pub_title"):
-                _pub_found[0] += 1
-            if _pub_pg is not None:
-                _pub_pg.update(
-                    _pub_task,
-                    advance=1,
-                    summary=f"{_pub_found[0]} resolved",
-                )
-
-        publications.resolve_batch(studies, api_key=api_key, email=email, on_progress=_pub_progress)
-        if _pub_pg is not None:
-            _pub_pg.stop()
-        out.success(f"Publications resolved: {_pub_found[0]}/{len(studies)}.")
+        _resolve_study_publications(studies)
 
     run_stats: dict[str, dict] = {}
     for run in raw_runs:
@@ -691,8 +849,16 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     samples_table = _conf(args, "samples_table", "SAMPLES_TABLE") or "Samples"
     dry_run = args.dry_run
     params = _resolve_fetch_params(args)
+    source = _resolve_source(args)
 
-    out.section("WMW FETCH")
+    if source == "GSA":
+        from wmw import gsa
+        gsa.DEBUG = getattr(args, "debug", False)
+        archive = gsa
+    else:
+        archive = ena
+
+    out.section(f"WMW FETCH — {source}")
 
     record_id_map: dict[str, str] = {}
 
@@ -728,7 +894,13 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     if params["instrument_platform"]:
         out.info(f"Instrument platform filter: {params['instrument_platform']}")
     if params["min_bases"]:
-        out.info(f"Minimum base count: {params['min_bases']:,}")
+        if source == "GSA":
+            out.warn(
+                f"Minimum base count ({params['min_bases']:,}) is ignored for GSA: "
+                "the archive publishes no base counts."
+            )
+        else:
+            out.info(f"Minimum base count: {params['min_bases']:,}")
 
     all_runs: list[dict] = []
     fetched_accessions: list[str] = []
@@ -736,8 +908,14 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     for acc in studies_to_fetch:
         out.info(f"Fetching runs for {acc}…")
         try:
-            runs = ena.search_study(acc)
-            normalized = metadata.normalize_runs(runs, "ENA")
+            runs = archive.search_study(acc)
+            if source == "GSA":
+                # GSA carries taxon names but no taxon IDs, and the host
+                # exclusion filter keys off host_tax_id.
+                n_resolved = archive.resolve_taxonomy(runs)
+                if n_resolved:
+                    out.info(f"  {acc}: resolved taxonomy for {_pl(n_resolved, 'run')}.")
+            normalized = metadata.normalize_runs(runs, source)
             study_rec_id = record_id_map.get(acc)
             if study_rec_id:
                 for run in normalized:
@@ -962,6 +1140,20 @@ def cmd_process(args: argparse.Namespace) -> int:
                     screen_args=args,
                 ) or finalized_this_study
 
+            has_amr = drakkar.amr_outputs_present(work_dir)
+            if has_amr:
+                finalized_this_study = _finalize_amr_outputs(
+                    client,
+                    studies_table,
+                    samples_table,
+                    study,
+                    output_dir,
+                    set_status=True,
+                    skip_existing_attachments=True,
+                    prefix=code,
+                    transfer_args=args,
+                ) or finalized_this_study
+
             has_profiling = (
                 (work_dir / "profiling_genomes.tsv").exists()
                 or (work_dir / "profiling_genomes" / "final" / "bases.tsv").exists()
@@ -1021,8 +1213,25 @@ def cmd_process(args: argparse.Namespace) -> int:
                 n_generated += 1
                 continue
 
-            if has_cataloging and not has_profiling:
-                out.info(f"{code}: cataloging done, profiling output absent — launching profiling task.")
+            if has_cataloging and not has_amr:
+                out.info(f"{code}: cataloging done, AMR output absent — launching AMR task.")
+                script_path = work_dir / f"{code}.sh"
+                script = drakkar.generate_amr_script(
+                    code=code,
+                    work_dir=work_dir,
+                    conda_env=conda_env,
+                    slurm=slurm,
+                    wmw_conda_env=wmw_conda_env,
+                    memory_multiplier=fields.get("memory_boost") or None,
+                    time_multiplier=fields.get("time_boost") or None,
+                    **priority_drakkar_kwargs,
+                )
+                _write_and_maybe_launch_script(code, script_path, script)
+                n_generated += 1
+                continue
+
+            if has_amr and not has_profiling:
+                out.info(f"{code}: AMR done, profiling output absent — launching profiling task.")
                 script_path = work_dir / f"{code}.sh"
                 script = drakkar.generate_profiling_script(
                     code=code,
@@ -1116,6 +1325,17 @@ def cmd_process(args: argparse.Namespace) -> int:
                 conda_env=conda_env,
                 slurm=slurm,
                 wmw_conda_env=wmw_conda_env,
+                **priority_drakkar_kwargs,
+            )
+        elif workflow == "amr":
+            script = drakkar.generate_amr_script(
+                code=code,
+                work_dir=work_dir,
+                conda_env=conda_env,
+                slurm=slurm,
+                wmw_conda_env=wmw_conda_env,
+                memory_multiplier=fields.get("memory_boost") or None,
+                time_multiplier=fields.get("time_boost") or None,
                 **priority_drakkar_kwargs,
             )
         elif workflow == "annotating":
@@ -1407,7 +1627,13 @@ _PROCESS_STATUS_MAP: dict[tuple[str, str], str] = {
     ("annotating",   "Done"):          "Done",
     ("annotating",   "stopped"):       "stopped",
     ("annotating",   "error"):         "error",
+    ("amr",          "amr"):           "amr",
+    ("amr",          "amr_done"):      "amr_done",
+    ("amr",          "completed"):     "amr_done",
+    ("amr",          "stopped"):       "stopped",
+    ("amr",          "error"):         "error",
 }
+
 
 
 def _upload_study_tsv_attachment(
@@ -1881,6 +2107,7 @@ def _erda_settings(args: argparse.Namespace) -> dict[str, Any] | None:
         "remote_base": remote_base.rstrip("/"),
         "assembly_dir": _conf(args, "sftp_assembly_dir", "SFTP_REMOTE_ASSEMBLY_DIR") or "assemblies",
         "bin_dir": _conf(args, "sftp_bin_dir", "SFTP_REMOTE_BIN_DIR") or "bins",
+        "amr_dir": _conf(args, "sftp_amr_dir", "SFTP_REMOTE_AMR_DIR") or "amr",
     }
 
 
@@ -2011,6 +2238,124 @@ def _upload_cataloging_outputs_to_erda(
 
     # True means "the study's outputs are on ERDA", so a re-run over a study
     # that is already fully archived succeeds instead of looking like a failure.
+    return bool(uploaded or skipped) and not failed
+
+
+def _amr_erda_files(work_dir: Path, study_code: str) -> list[tuple[Path, str, bool]]:
+    """Return the AMR result tables to archive as (local path, remote name, gzip).
+
+    Remote names carry the study code so a table stays identifiable once it is
+    downloaded away from its folder. The .tsv.xz tables drakkar writes are
+    already compressed and go up as they are; the two plain-text summaries and
+    the manifest are gzipped into the connection.
+    """
+    from wmw import drakkar
+
+    amr_dir = drakkar.amr_results_dir(work_dir)
+    files: list[tuple[Path, str, bool]] = []
+    for file_name in drakkar.AMR_TABLE_FILES:
+        source = amr_dir / file_name
+        if source.is_file():
+            files.append((source, f"{study_code}_{file_name}", False))
+    for file_name in drakkar.AMR_PLAIN_FILES:
+        source = amr_dir / file_name
+        if source.is_file():
+            files.append((source, f"{study_code}_{file_name}.gz", True))
+    manifest = amr_dir / drakkar.AMR_MANIFEST_FILE
+    if manifest.is_file():
+        files.append((manifest, f"{study_code}_amr_{drakkar.AMR_MANIFEST_FILE}", False))
+    return files
+
+
+def _upload_amr_outputs_to_erda(
+    args: argparse.Namespace,
+    study_code: str,
+    output_root: Path,
+    *,
+    prefix: str = "",
+    replace_existing: bool = False,
+) -> bool:
+    """Transfer the aggregate AMR result tables of one study to ERDA.
+
+    They go to {base}/{code}/{amr}/{code}_{table}, study-prefixed. Files already
+    present are skipped unless `replace_existing` is set, which clears the remote
+    folder first.
+
+    Returns True when the study's AMR tables are on ERDA — whether this call
+    sent them or found them already there — and False when the archive is
+    incomplete.
+    """
+    from wmw.transfer import SFTPTransfer, paramiko_available
+
+    label = f"{prefix}: " if prefix else ""
+    settings = _erda_settings(args)
+    if settings is None:
+        out.info(f"{label}SFTP_HOST or SFTP_REMOTE_BASE not configured — skipping ERDA transfer.")
+        return False
+    if not settings["user"]:
+        out.warn(f"{label}SFTP_USER is not configured — skipping ERDA transfer.")
+        return False
+    if not paramiko_available():
+        out.warn(f"{label}paramiko is not installed — skipping ERDA transfer (pip install paramiko).")
+        return False
+
+    work_dir = output_root / study_code
+    from wmw import drakkar
+
+    files = _amr_erda_files(work_dir, study_code)
+    if not files:
+        out.warn(
+            f"{label}no AMR result table found under {drakkar.amr_results_dir(work_dir)}."
+        )
+        return False
+
+    remote_amr_dir = f"{settings['remote_base']}/{study_code}/{settings['amr_dir']}"
+    verbose = bool(getattr(args, "verbose", False))
+    timeout = float(getattr(args, "connect_timeout", 300.0) or 300.0)
+
+    out.info(
+        f"{label}transferring {_pl(len(files), 'AMR table')} → "
+        f"{settings['user']}@{settings['host']}:{remote_amr_dir} …"
+    )
+
+    uploaded = skipped = 0
+    failed: list[str] = []
+    try:
+        with SFTPTransfer(
+            host=settings["host"],
+            username=settings["user"],
+            port=settings["port"],
+            key_path=settings["identity"],
+            timeout=timeout,
+        ) as xfer:
+            if replace_existing:
+                xfer.remove_remote_dir(remote_amr_dir)
+                out.info(f"{label}cleared {remote_amr_dir} for replacement.")
+
+            for source, remote_name, compress in files:
+                remote_path = f"{remote_amr_dir}/{remote_name}"
+                send = xfer.upload_gzipped if compress else xfer.upload_file
+                try:
+                    if send(source, remote_path, verbose=verbose):
+                        uploaded += 1
+                    else:
+                        skipped += 1
+                except Exception as exc:
+                    failed.append(f"{source.name} ({exc})")
+    except Exception as exc:
+        out.warn(f"{label}ERDA transfer failed: {exc}")
+        return False
+
+    skip_msg = f", {skipped} already present (skipped)" if skipped else ""
+    if uploaded:
+        out.success(f"{label}transferred {_pl(uploaded, 'AMR table')} to {remote_amr_dir}{skip_msg}.")
+    else:
+        out.info(f"{label}nothing new to transfer to {remote_amr_dir}{skip_msg}.")
+    if failed:
+        preview = "; ".join(failed[:5])
+        suffix = "…" if len(failed) > 5 else "."
+        out.warn(f"{label}could not transfer {_pl(len(failed), 'AMR table')}: {preview}{suffix}")
+
     return bool(uploaded or skipped) and not failed
 
 
@@ -2548,6 +2893,175 @@ def _finalize_cataloging_outputs(
     return has_cataloging_output or genomes_processed
 
 
+def _upload_amr_table_attachments(
+    client: Any,
+    studies_table: str,
+    study_record: dict[str, Any],
+    work_dir: Path,
+    study_code: str,
+    *,
+    prefix: str = "",
+    skip_existing: bool = False,
+    replace_existing: bool = False,
+) -> int:
+    """Attach the aggregate AMR tables to the study record, study-prefixed.
+
+    Airtable takes the attachment filename from the path, so each table is
+    uploaded through a study-prefixed hard link (a copy where hard links are not
+    available) that is removed again afterwards. A table over the Airtable
+    attachment limit is reported and left on ERDA only — the transfer is never
+    the step that fails because of it.
+    """
+    from wmw import drakkar
+    from wmw.airtable import ATTACHMENT_MAX_BYTES, attachment_fits
+
+    label = f"{prefix}: " if prefix else ""
+    amr_dir = drakkar.amr_results_dir(work_dir)
+    study_fields = study_record.get("fields", {}) or {}
+
+    targets: list[tuple[str, str, str]] = [
+        (file_name, config_key, "application/x-xz")
+        for file_name, config_key in drakkar.AMR_TABLE_FILES.items()
+    ]
+    targets.append(
+        (drakkar.AMR_MANIFEST_FILE, drakkar.AMR_MANIFEST_CONFIG_KEY, "application/yaml")
+    )
+
+    attached = 0
+    for file_name, config_key, content_type in targets:
+        if not str(cfg.get(config_key) or "").strip():
+            continue
+        source = amr_dir / file_name
+        if not source.is_file():
+            out.info(f"{label}{file_name} not found in {amr_dir} — not attached.")
+            continue
+
+        field_name = config_key[len("STUDIES_COL_"):].lower()
+        has_existing = bool(study_fields.get(field_name))
+        if skip_existing and has_existing:
+            out.info(f"{label}{file_name} is already attached — skipping upload.")
+            continue
+        if not attachment_fits(source):
+            size_mb = source.stat().st_size / (1024 * 1024)
+            out.info(
+                f"{label}{file_name} is {size_mb:.1f} MB, over the "
+                f"{ATTACHMENT_MAX_BYTES // (1024 * 1024)} MB Airtable attachment limit "
+                "— left on ERDA only."
+            )
+            continue
+
+        prefixed = "amr_manifest.yaml" if file_name == drakkar.AMR_MANIFEST_FILE else file_name
+        alias = amr_dir / f"{study_code}_{prefixed}"
+        try:
+            alias.unlink(missing_ok=True)
+            try:
+                os.link(source, alias)
+            except OSError:
+                import shutil as _shutil
+
+                _shutil.copy2(source, alias)
+        except OSError as exc:
+            out.warn(f"{label}could not stage {file_name} for upload: {exc}")
+            continue
+
+        try:
+            # Airtable's upload endpoint appends rather than replaces, so a
+            # rerun clears the field instead of stacking a second copy on it.
+            if replace_existing and has_existing:
+                try:
+                    client.clear_study_file(studies_table, study_record["id"], field_name)
+                except Exception as exc:
+                    out.warn(f"{label}could not clear existing {field_name} attachment: {exc}")
+            client.upload_study_file(
+                studies_table,
+                study_record["id"],
+                field_name,
+                alias,
+                content_type=content_type,
+            )
+        except Exception as exc:
+            out.warn(f"{label}could not attach {alias.name}: {exc}")
+        else:
+            attached += 1
+            out.success(f"{label}attached {alias.name}.")
+        finally:
+            alias.unlink(missing_ok=True)
+
+    return attached
+
+
+def _finalize_amr_outputs(
+    client: Any,
+    studies_table: str,
+    samples_table: str,
+    study_record: dict[str, Any],
+    output_root: Path,
+    *,
+    set_status: bool = False,
+    skip_existing_attachments: bool = False,
+    replace_existing_attachments: bool = False,
+    prefix: str = "",
+    transfer_args: argparse.Namespace | None = None,
+) -> bool:
+    """Write AMR stats to the Samples rows, attach the tables, archive on ERDA."""
+    from wmw import drakkar
+
+    fields = study_record.get("fields", {}) or {}
+    study_code = str(fields.get("code", "") or "").strip()
+    work_dir = output_root / study_code
+    qc_path = drakkar.amr_qc_path(work_dir)
+    label = f"{prefix}: " if prefix else ""
+
+    if not qc_path.exists():
+        out.warn(
+            f"{label}{qc_path.name} not found at {qc_path} — the AMR run is not "
+            "finished; stats and files not uploaded."
+        )
+        return False
+
+    if set_status:
+        client.set_study_status(studies_table, [study_record["id"]], "amr_done")
+        out.success(f"{label}study status → 'amr_done'.")
+
+    stats = drakkar.parse_amr_qc_tsv(qc_path)
+    if not stats:
+        out.warn(
+            f"{label}no AMR stats parsed from {qc_path} — check that at least one "
+            "SAMPLES_COL_AMR_* field ID is set in the config."
+        )
+    else:
+        n = client.update_sample_amr_stats(samples_table, stats)
+        if n:
+            out.success(f"{label}uploaded AMR stats for {_pl(n, 'assembly', 'assemblies')}.")
+        else:
+            out.warn(
+                f"{label}{qc_path.name} parsed ({len(stats)} assembly row(s)) but no matching "
+                f"Airtable records found — stats not uploaded. "
+                f"Check that the sample 'code' field values match the assembly_id column."
+            )
+
+    _upload_amr_table_attachments(
+        client,
+        studies_table,
+        study_record,
+        work_dir,
+        study_code,
+        prefix=prefix,
+        skip_existing=skip_existing_attachments,
+        replace_existing=replace_existing_attachments,
+    )
+
+    # The result tables are archived on ERDA after the Airtable work, so a
+    # transfer failure never costs the metadata. Unlike the multi-GB assemblies,
+    # these are small compressed tables, so the transfer runs inline rather than
+    # in a screen session of its own. Files already there are skipped;
+    # 'wmw upload-erda --what amr --replace-files' forces a re-transfer.
+    if transfer_args is not None:
+        _upload_amr_outputs_to_erda(transfer_args, study_code, output_root, prefix=prefix)
+
+    return True
+
+
 def cmd_set_status(args: argparse.Namespace) -> int:
     studies_table = _conf(args, "studies_table", "STUDIES_TABLE") or "Studies"
     samples_table = _conf(args, "samples_table", "SAMPLES_TABLE") or "Samples"
@@ -2568,6 +3082,19 @@ def cmd_set_status(args: argparse.Namespace) -> int:
 
     client.set_study_status(studies_table, [study_record["id"]], airtable_status)
     out.success(f"Study {study_code} status → {airtable_status!r}.")
+
+    if workflow == "amr" and status in ("amr_done", "completed"):
+        output_dir_str = _conf(args, "output_dir", "DRAKKAR_OUTPUT_DIR")
+        if output_dir_str:
+            _finalize_amr_outputs(
+                client,
+                studies_table,
+                samples_table,
+                study_record,
+                Path(output_dir_str).expanduser().resolve(),
+                replace_existing_attachments=True,
+                transfer_args=args,
+            )
 
     if workflow == "preprocessing" and status in ("completed", "preprocessed"):
         output_dir_str = _conf(args, "output_dir", "DRAKKAR_OUTPUT_DIR")
@@ -2650,17 +3177,28 @@ def cmd_upload_genome_files(args: argparse.Namespace) -> int:
 def cmd_upload_erda(args: argparse.Namespace) -> int:
     output_dir_str = _conf(args, "output_dir", "DRAKKAR_OUTPUT_DIR", required=True)
     study_code = args.study
+    what = getattr(args, "what", "cataloging")
+    replace_existing = getattr(args, "replace_files", False)
 
     out.section("WMW ERDA TRANSFER")
     output_root = Path(output_dir_str).expanduser().resolve()
-    transferred = _upload_cataloging_outputs_to_erda(
-        args,
-        study_code,
-        output_root,
-        prefix=study_code,
-        replace_existing=getattr(args, "replace_files", False),
-    )
-    return 0 if transferred else 1
+
+    uploaders = {
+        "cataloging": _upload_cataloging_outputs_to_erda,
+        "amr": _upload_amr_outputs_to_erda,
+    }
+    selected = list(uploaders) if what == "all" else [what]
+    results = [
+        uploaders[name](
+            args,
+            study_code,
+            output_root,
+            prefix=study_code,
+            replace_existing=replace_existing,
+        )
+        for name in selected
+    ]
+    return 0 if all(results) else 1
 
 
 # ---------------------------------------------------------------------------
@@ -2905,6 +3443,22 @@ def _build_parser() -> argparse.ArgumentParser:
         default="",
         help="Override Studies table name from config.",
     )
+    p_scan.add_argument(
+        "--source",
+        metavar="ARCHIVE",
+        default="",
+        choices=["", "ena", "gsa", "ENA", "GSA"],
+        help="Archive to query: ena (default) or gsa (Genome Sequence Archive, NGDC/CNCB).",
+    )
+    p_scan.add_argument(
+        "--gsa-organism",
+        metavar="NAME",
+        default="",
+        help=(
+            "GSA organism name(s) to match, comma-separated for OR "
+            "(default: 'organismal metagenomes'). Only used with --source gsa."
+        ),
+    )
     p_scan.set_defaults(func=cmd_scan)
 
     # ---- fetch ----
@@ -2989,6 +3543,18 @@ def _build_parser() -> argparse.ArgumentParser:
         default="",
         help="Override Samples table name from config.",
     )
+    p_fetch.add_argument(
+        "--source",
+        metavar="ARCHIVE",
+        default="",
+        choices=["", "ena", "gsa", "ENA", "GSA"],
+        help="Archive to query: ena (default) or gsa (Genome Sequence Archive, NGDC/CNCB).",
+    )
+    p_fetch.add_argument(
+        "--debug",
+        action="store_true",
+        help="Print every archive request URL (useful for diagnosing query issues).",
+    )
     p_fetch.set_defaults(func=cmd_fetch)
 
     # ---- process ----
@@ -3018,10 +3584,15 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=[
             "preprocessing",
             "cataloging",
-            "annotating",
+            "amr",
             "profiling",
+            "annotating",
         ],
-        help="Drakkar workflow stage to generate a script for (default: preprocessing).",
+        help=(
+            "Drakkar workflow stage to generate a script for (default: preprocessing, "
+            "which runs the whole chain preprocessing → cataloging → amr → profiling "
+            "→ annotating). The other values run that stage on its own."
+        ),
     )
     p_process.add_argument(
         "--slurm",
@@ -3117,7 +3688,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--workflow",
         metavar="STAGE",
         required=True,
-        choices=["preprocessing", "cataloging", "annotating", "profiling"],
+        choices=["preprocessing", "cataloging", "amr", "profiling", "annotating"],
         help="Workflow stage that is reporting its status.",
     )
     p_setstatus.add_argument(
@@ -3136,6 +3707,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "annotating",
             "annotated",
             "Done",
+            "amr",
+            "amr_done",
             "stopped",
             "error",
         ],
@@ -3210,19 +3783,31 @@ def _build_parser() -> argparse.ArgumentParser:
     # ---- upload-erda ----
     p_upload_erda = sub.add_parser(
         "upload-erda",
-        help="Transfer assemblies and final bins of one study to ERDA.",
+        help="Transfer assemblies, final bins or AMR result tables of one study to ERDA.",
         description=(
             "Transfer the assemblies and the binette-refined final bins of one "
-            "study to ERDA. Normally launched automatically in a detached "
-            "'{code}-erda-upload' screen session when cataloging outputs are "
-            "finalised; run it by hand to retry a failed transfer."
+            "study to ERDA, or its AMR result tables. Both are normally sent "
+            "automatically when the corresponding outputs are finalised — the "
+            "cataloging ones in a detached '{code}-erda-upload' screen session, "
+            "the small AMR tables inline. Run this by hand to retry a failed "
+            "transfer."
         ),
     )
     p_upload_erda.add_argument(
         "--study",
         metavar="CODE",
         required=True,
-        help="Study code (batch label) whose assemblies and bins should be transferred.",
+        help="Study code (batch label) whose outputs should be transferred.",
+    )
+    p_upload_erda.add_argument(
+        "--what",
+        metavar="OUTPUTS",
+        default="cataloging",
+        choices=["cataloging", "amr", "all"],
+        help=(
+            "Which outputs to transfer: 'cataloging' (assemblies and bins, the "
+            "default), 'amr' (the aggregate AMR result tables), or 'all'."
+        ),
     )
     p_upload_erda.add_argument(
         "--output-dir",
@@ -3255,11 +3840,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Override SFTP_REMOTE_BASE from config (default: /WMW).",
     )
     p_upload_erda.add_argument(
+        "--sftp-amr-dir",
+        metavar="NAME",
+        default="",
+        help="Override SFTP_REMOTE_AMR_DIR from config (default: amr).",
+    )
+    p_upload_erda.add_argument(
         "--replace-files",
         dest="replace_files",
         action="store_true",
         default=False,
-        help="Clear the remote assemblies/ and bins/ folders before transferring.",
+        help="Clear the remote folders selected by --what before transferring.",
     )
     p_upload_erda.add_argument(
         "--verbose",

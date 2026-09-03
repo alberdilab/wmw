@@ -9,6 +9,9 @@ Filters are divided between two commands that operate at different levels:
 
 Both commands share the same `--include` flag for controlling host taxon exclusions.
 
+Under `--source gsa` the same two levels apply, but the query-time half is expressed in GSA's
+own grammar and some filters have no GSA equivalent — see [GSA differences](#gsa-differences).
+
 ---
 
 ## Study-level filters (`wmw scan`)
@@ -31,8 +34,8 @@ field but remove unwanted groups after normalization.
 
 ## Run-level filters (`wmw fetch`)
 
-Applied post-fetch by `metadata.filter_runs()` after `ena.search_study()` returns all runs
-for each approved study.
+Applied post-fetch by `metadata.filter_runs()` after `ena.search_study()` (or
+`gsa.search_study()`) returns all runs for each approved study.
 
 | Parameter | CLI flag | Config key | Applied as |
 |---|---|---|---|
@@ -105,6 +108,25 @@ exclude_ids = [
 For `wmw scan`, exclusions are applied to the `tax_id` field of normalized study records
 after deduplication. For `wmw fetch`, exclusions are passed to `metadata.filter_runs()`
 which checks the `host_tax_id` field on each run.
+
+Under `--source gsa`, `gsa.resolve_taxonomy()` runs first and fills `host_tax_id` from the
+host *name* GSA supplies, so the exclusion set works unchanged. A host name that cannot be
+resolved leaves the field blank, and blank fields are never excluded.
+
+### GSA differences
+
+| Filter | Under `--source gsa` |
+|---|---|
+| Date range | Matched against GSA's release date. `--date-field` has no effect — GSA indexes only the release date. |
+| Organism | `--gsa-organism` (config `GSA_ORGANISM`, default `organismal metagenomes`) replaces `--host-tax-id` at scan time; GSA's search has no host-taxonomy field. |
+| Keyword | Applied **after** study lookup, against study title and description. GSA's `title` field indexes experiment titles (per-sample aliases), not study titles. |
+| Taxonomy subtree | `--taxonomy` is ignored with a warning — GSA has no `tax_tree()` equivalent. |
+| Library strategy / source / platform | Applied in the GSA query and again post-fetch, as for ENA. |
+| Minimum base count | **Not applicable.** GSA publishes no base counts, so `base_count` is always blank and — by the unknown-≠-excluded rule — `--min-bases` would silently keep every run. `wmw fetch` warns instead. |
+| Host taxon exclusion | Works as for ENA, after `gsa.resolve_taxonomy()` fills `host_tax_id` from the host name. |
+
+Every GSA query also carries an implicit `"NGDC"[center]` clause, which excludes the INSDC
+records GSA mirrors from SRA so ENA-sourced studies are not fetched twice.
 
 ### Adding or removing taxa
 

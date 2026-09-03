@@ -47,6 +47,12 @@ def gzip_into(source: Path, handle: Any) -> None:
         shutil.copyfileobj(fin, gz)
 
 
+def _copy_into(source: Path, handle: Any) -> None:
+    """Copy `source` verbatim into an open remote file handle."""
+    with Path(source).open("rb") as fin:
+        shutil.copyfileobj(fin, handle)
+
+
 class SFTPTransfer:
     """Per-file SFTP transfers to a remote host (ERDA)."""
 
@@ -140,6 +146,29 @@ class SFTPTransfer:
         except OSError:
             pass
         self._sftp.rename(part_path, remote_path)
+
+    def upload_file(
+        self,
+        source: Path,
+        remote_path: str,
+        verbose: bool = False,
+        skip_existing: bool = True,
+    ) -> bool:
+        """Copy `source` to remote_path unchanged. Returns True if it was uploaded.
+
+        For content that is already compressed — the .tsv.xz result tables of a
+        drakkar amr run — where a second gzip layer would only cost time.
+        """
+        if skip_existing and self.remote_exists(remote_path):
+            if verbose:
+                out.info(f"  SKIP {source.name} (already on ERDA)")
+            return False
+        self.upload_stream(
+            remote_path,
+            lambda handle: _copy_into(source, handle),
+            verbose=verbose,
+        )
+        return True
 
     def upload_gzipped(
         self,

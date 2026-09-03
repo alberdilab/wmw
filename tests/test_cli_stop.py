@@ -668,8 +668,8 @@ def test_cmd_process_resume_launches_annotation_when_taxonomy_missing(tmp_path):
     run.assert_not_called()
 
 
-def test_cmd_process_resume_launches_profiling_when_cataloging_done(tmp_path):
-    """Resume with cataloging done but no profiling_genomes.tsv → generate profiling script."""
+def test_cmd_process_resume_launches_amr_when_cataloging_done(tmp_path):
+    """Resume with cataloging done but no amr/amr_qc.tsv → generate AMR script."""
     work_dir = tmp_path / "ST001"
     final_dir = work_dir / "cataloging" / "final"
     final_dir.mkdir(parents=True)
@@ -726,6 +726,82 @@ def test_cmd_process_resume_launches_profiling_when_cataloging_done(tmp_path):
 
     with (
         patch("wmw.cli._require_airtable", return_value=client),
+        patch("shutil.which", return_value=None),
+        patch("subprocess.run") as run,
+    ):
+        assert cli.cmd_process(args) == 0
+
+    script_path = work_dir / "ST001.sh"
+    assert script_path.exists(), "AMR script should have been written"
+    script_text = script_path.read_text()
+    assert "drakkar amr" in script_text
+    assert "--workflow amr" in script_text
+    run.assert_not_called()  # screen not available, script written but not launched
+
+
+def test_cmd_process_resume_launches_profiling_when_amr_done(tmp_path):
+    """Resume with AMR done but no profiling_genomes.tsv → generate profiling script."""
+    work_dir = tmp_path / "ST001"
+    final_dir = work_dir / "cataloging" / "final"
+    final_dir.mkdir(parents=True)
+    (work_dir / "ST001_preprocessing.tsv").write_text(
+        "sample\treads_pre_fastp\nSA000022\t1000\n", encoding="utf-8"
+    )
+    (work_dir / "ST001_cataloging.tsv").write_text(
+        "assembly\tassembly_N50\nSA000022\t12345\n", encoding="utf-8"
+    )
+    (final_dir / "all_bin_metadata.csv").write_text(
+        "genome,completeness,contamination,score,size,N50,contig_count\n"
+        "SA000022_bin_1.fa,99.0,0.5,98.5,2500000,80000,45\n",
+        encoding="utf-8",
+    )
+    bin_path = final_dir / "SA000022" / "SA000022_bin_1.fa"
+    bin_path.parent.mkdir()
+    bin_path.write_text(">contig1\nACGT\n", encoding="utf-8")
+    (final_dir / "all_bin_paths.txt").write_text(
+        "cataloging/final/SA000022/SA000022_bin_1.fa\n", encoding="utf-8"
+    )
+    amr_dir = work_dir / "amr"
+    amr_dir.mkdir()
+    (amr_dir / "amr_qc.tsv").write_text("assembly_id\namrfinder_hits\n", encoding="utf-8")
+    # profiling_genomes.tsv is intentionally absent
+
+    args = argparse.Namespace(
+        batch="",
+        workflow="preprocessing",
+        slurm=False,
+        output_dir=str(tmp_path),
+        studies_table="Studies",
+        samples_table="Samples",
+        genomes_table="Genomes",
+        airtable_token="",
+        base_id="",
+    )
+
+    client = MagicMock()
+    resume_study = {
+        "id": "recStudy",
+        "fields": {"code": "ST001", "study_accession": "PRJEB001", "status": "resume"},
+    }
+
+    def fetch_by_status(_table, status):
+        return [resume_study] if status == "resume" else []
+
+    client.fetch_studies_by_status.side_effect = fetch_by_status
+    client.update_sample_preprocessing_stats.return_value = 1
+    client.update_sample_cataloging_stats.return_value = 1
+    client.update_sample_amr_stats.return_value = 0
+    client.fetch_sample_record_ids_by_code.return_value = {"SA000022": "recSample"}
+    client.fetch_genome_records_by_name.return_value = {}
+    client.update_genome_records.return_value = 0
+    name_fid = str(cfg.get("GENOMES_COL_NAME"))
+    client.create_genome_records_with_response.return_value = [
+        {"id": "recGenome", "fields": {name_fid: "SA000022_bin_1"}}
+    ]
+
+    with (
+        patch("wmw.cli._require_airtable", return_value=client),
+        patch("wmw.cli._upload_amr_outputs_to_erda"),
         patch("shutil.which", return_value=None),
         patch("subprocess.run") as run,
     ):

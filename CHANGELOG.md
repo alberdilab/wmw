@@ -6,6 +6,105 @@ All notable changes to wmw are documented here.
 
 ### Added
 
+- No unreleased changes yet.
+
+## [0.6.0] - 2026-09-03
+
+### Added
+
+- **GSA support.** wmw can now scan and fetch from the Genome Sequence Archive
+  (NGDC/CNCB) as well as ENA, via `--source gsa` on `wmw scan` and `wmw fetch`
+  (or `SOURCE: "GSA"` in the config). New module `gsa.py`; new normalizers
+  `metadata.normalize_gsa_run()` / `normalize_gsa_study()`; `source` is written
+  to Airtable as `GSA`.
+- GSA publishes no JSON API, so `gsa.py` drives the three session-free endpoints
+  behind the web interface: `POST /gsa/search/` (PubMed-style query grammar,
+  HTML results), `GET /gsa/browse/<CRA>` (study header, download root) and
+  `POST /gsa/file/exportExcelFile` (the submitter metadata workbook). The
+  workbook is the source for run records — it carries file names, sizes, MD5s
+  and download URLs alongside host, collection date and geographic location,
+  none of which appear on the HTML pages. It is parsed with the standard
+  library, so no new dependency.
+- Every GSA query is pinned to `"NGDC"[center]` and result rows are matched on
+  `/gsa/browse/<CRA>/<CRX>`, so the INSDC mirror GSA also serves is excluded and
+  ENA-sourced studies are not duplicated.
+- `wmw scan --source gsa` accepts `--gsa-organism` (config `GSA_ORGANISM`,
+  default `organismal metagenomes`) to pick the organism label GSA files
+  metagenome submissions under. Comma- or pipe-separated values become an OR
+  group.
+- Download URLs are rewritten from GSA's FTP paths to the HTTPS mirror
+  (`https://download.cncb.ac.cn/`), which supports range requests and so
+  resumes; the raw FTP paths stay in `fastq_ftp`. `wmw process` needs no
+  changes — the URLs go into the Drakkar input TSV like any other.
+- `wmw fetch --source gsa` resolves the host and organism *names* GSA supplies
+  into NCBI taxon IDs (cached in-process, through the existing ENA taxonomy
+  helper), so the `EXCLUDED_HOST_TAX_IDS` groups filter GSA runs the same way
+  they filter ENA runs.
+- New config keys `SOURCE` and `GSA_ORGANISM`; new `--source` flag on `wmw scan`
+  and `wmw fetch`, and `--debug` on `wmw fetch`.
+- GSA limitations, all reported rather than applied silently:
+  - GSA publishes no base or read counts, so `base_count` and `read_count` stay
+    blank for GSA samples and `MIN_BASES` cannot exclude a GSA run. `wmw fetch`
+    warns when the filter is set against GSA rather than filtering silently.
+  - `--taxonomy` has no GSA equivalent (GSA offers no `tax_tree()` subtree
+    expansion); it is ignored with a warning under `--source gsa`.
+  - GSA's searchable `title` field holds *experiment* titles, usually a
+    submitter's per-sample alias. `--keyword` / `SCAN_KEYWORDS` is therefore
+    applied after study lookup, against the study title and description from the
+    linked BioProject record, matching the ENA behaviour.
+  - GSA is a scraped web interface, not an API: form fields and page structure can
+    change without notice.
+- **AMR workflow.** wmw now drives `drakkar amr`, which calls antimicrobial
+  resistance loci per assembly with AMRFinderPlus and CARD/RGI and attaches
+  geNomad plasmid/virus mobility context. The Airtable and ERDA structure
+  mirrors the ehio AMR module.
+- AMR runs as an ordinary stage between cataloging and profiling — it needs the
+  assemblies cataloging produces and nothing profiling or annotating adds — so
+  the full pipeline is now `preprocessing → cataloging → amr → profiling →
+  annotating`, in one script and one screen session as before. It reports study
+  status `amr` → `amr_done` (plus `stopped`/`error`) through the same
+  `wmw set-status` calls as every other stage.
+- `wmw process --workflow amr` runs the stage on its own, and a study with
+  status `resume` launches it when cataloging output exists and
+  `amr/amr_qc.tsv` does not, before it would launch profiling.
+- Per-assembly AMR counts from `amr/amr_qc.tsv` are written to the Samples rows,
+  keyed by `assembly_id` (which `drakkar amr -i` names after the
+  `cataloging/megahit` folder, i.e. the wmw sample code): new config keys
+  `SAMPLES_COL_AMR_AMRFINDER_HITS`, `SAMPLES_COL_AMR_RGI_HITS`,
+  `SAMPLES_COL_AMR_MOBILITY_REGIONS`, `SAMPLES_COL_AMR_LOCI`,
+  `SAMPLES_COL_AMR_MULTI_TOOL_LOCI`, `SAMPLES_COL_AMR_MOBILITY_LINKS` and
+  `SAMPLES_COL_AMR_MOBILE_LOCI`. The two `*_without_coordinates` columns are
+  caller diagnostics rather than results and are never written.
+- **AMR result tables are archived on ERDA**, study-prefixed, at
+  `{SFTP_REMOTE_BASE}/<code>/{SFTP_REMOTE_AMR_DIR}/`. The five aggregate tables
+  (`amr_hits`, `amr_loci`, `amr_drug_classes`, `amr_mobility`,
+  `mobility_regions`, all `.tsv.xz`) go up as they are — they are already
+  compressed — and `amr_qc.tsv`, `assembly_summary.tsv` and the `manifest.yaml`
+  provenance record are gzipped into the connection. New config key
+  `SFTP_REMOTE_AMR_DIR` (`amr`). These are small files, so unlike the multi-GB
+  assemblies the transfer runs inline rather than in a screen session.
+- The same five tables and the manifest are attached to the study record via
+  `STUDIES_COL_FILE_AMR_HITS`, `_LOCI`, `_DRUG_CLASSES`, `_MOBILITY`,
+  `_MOBILITY_REGIONS` and `STUDIES_COL_FILE_AMR_MANIFEST`; a blank key disables
+  that upload. A table over Airtable's 5 MB encoded attachment limit is reported
+  and left on ERDA only, so the transfer is never the step that fails.
+- `wmw upload-erda` gained `--what {cataloging,amr,all}` (default `cataloging`,
+  preserving the previous behaviour) and `--sftp-amr-dir`, to retry an AMR
+  transfer by hand.
+- `wmw set-status --workflow amr --status amr_done` finalises the AMR outputs,
+  the same way the cataloging and annotating stages do.
+- `SFTPTransfer.upload_file()` uploads a file unchanged, for content that is
+  already compressed; `wmw.airtable` gained `ATTACHMENT_MAX_BYTES`,
+  `attachment_encoded_size()` and `attachment_fits()`.
+
+### Fixed
+
+- The test suite no longer opens a real SFTP connection to `io.erda.dk`. Any
+  test reaching a finaliser fell through to the ERDA transfer, which used the
+  shipped config's live host and blocked for the 300 s connect timeout whenever
+  that host was unreachable. An autouse fixture now reports paramiko as absent,
+  so transfers are no-ops unless a test patches it back on.
+
 - **Assemblies and binette-refined bins are archived on ERDA.** When cataloging
   outputs are finalised, wmw now transfers the per-assembly contigs
   (`cataloging/megahit/<assembly>/<assembly>.fna`) and every final bin listed in
@@ -42,6 +141,8 @@ All notable changes to wmw are documented here.
 
 ### Changed
 
+- The publication-resolution block in `cmd_scan` is now
+  `_resolve_study_publications()`, shared by the ENA and GSA scan paths.
 - Every bin listed in `all_bin_paths.txt` is archived on ERDA, including bins
   below the completeness/contamination thresholds that gate the Airtable Genomes
   table — the ERDA copy is an archive of what binette produced, not a curated
@@ -89,7 +190,6 @@ All notable changes to wmw are documented here.
   `preprocessing/<run>/stats.tsv`. Drakkar 2.x does not write that file; the
   same statistics are parsed from `preprocessing.tsv` by
   `parse_preprocessing_tsv()`.
-
 ## [0.5.3] - 2026-06-05
 
 ### Changed

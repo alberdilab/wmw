@@ -157,8 +157,27 @@ def test_generate_full_pipeline_script_slurm_partition_and_qos_for_each_stage(tm
         slurm_qos="lazy",
     )
 
-    assert script.count("--slurm-partition lazyqueue") == 4
-    assert script.count("--slurm-qos lazy") == 4
+    assert script.count("--slurm-partition lazyqueue") == 5
+    assert script.count("--slurm-qos lazy") == 5
+
+
+def test_generate_full_pipeline_script_runs_amr_between_cataloging_and_profiling(tmp_path):
+    script = drakkar.generate_full_pipeline_script(
+        code="PRJ002",
+        tsv_path=tmp_path / "PRJ002.tsv",
+        work_dir=tmp_path,
+        conda_env="",
+    )
+    order = [
+        script.index("drakkar preprocessing"),
+        script.index("drakkar cataloging"),
+        script.index("drakkar amr"),
+        script.index("drakkar profiling"),
+        script.index("drakkar annotating"),
+    ]
+    assert order == sorted(order)
+    # The AMR stage fails the run when it leaves no summary behind.
+    assert str(drakkar.amr_qc_path(tmp_path)) in script
 
 
 def test_generate_preprocessing_script_no_conda(tmp_path):

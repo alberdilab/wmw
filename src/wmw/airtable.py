@@ -14,6 +14,28 @@ except ImportError:
     _AVAILABLE = False
 
 
+# Airtable takes an attachment upload base64-encoded and caps the request at
+# 5 MB, so a file of roughly 3.7 MB is the largest that fits.
+ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024
+
+
+def attachment_encoded_size(size_bytes: int) -> int:
+    """Return the base64 length Airtable counts for a file of `size_bytes`.
+
+    Lets a caller decide whether a file fits without reading it into memory
+    first, which matters for the compressed AMR result tables of a large study.
+    """
+    return 4 * ((size_bytes + 2) // 3)
+
+
+def attachment_fits(file_path: str | Path) -> bool:
+    """Return True when `file_path` is small enough for an Airtable attachment."""
+    try:
+        return attachment_encoded_size(Path(file_path).stat().st_size) <= ATTACHMENT_MAX_BYTES
+    except OSError:
+        return False
+
+
 def _require() -> None:
     if not _AVAILABLE:
         print("Error: pyairtable is required. Run: pip install pyairtable", file=sys.stderr)
@@ -332,6 +354,14 @@ class AirtableClient:
         """Write profiling stats to sample records, keyed by sample code."""
         return self._update_sample_stats_by_code(samples_table, stats_by_sample)
 
+    def update_sample_amr_stats(
+        self,
+        samples_table: str,
+        stats_by_assembly: dict[str, dict[str, Any]],
+    ) -> int:
+        """Write AMR assembly stats to sample records, keyed by sample code."""
+        return self._update_sample_stats_by_code(samples_table, stats_by_assembly)
+
     def fetch_sample_record_ids_by_code(
         self,
         samples_table: str,
@@ -467,6 +497,7 @@ class AirtableClient:
         record_id: str,
         field_name: str,
         file_path: str | Path,
+        content_type: str = "text/tab-separated-values",
     ) -> dict[str, Any]:
         """Upload a local file to a Studies-table attachment field."""
         field = self._fld(field_name, self._studies_fm)
@@ -475,7 +506,7 @@ class AirtableClient:
             record_id,
             field,
             Path(file_path),
-            content_type="text/tab-separated-values",
+            content_type=content_type,
         )
 
     def clear_study_file(

@@ -1,4 +1,4 @@
-"""Normalize ENA / SRA run records to the wmw shared schema."""
+"""Normalize ENA / SRA / GSA run records to the wmw shared schema."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ STUDY_FIELDS = (
     "secondary_study_accession",
     "study_title",
     "study_description",
-    "source",          # "ENA" | "SRA"
+    "source",          # "ENA" | "SRA" | "GSA"
     "scientific_name",
     "tax_id",
     "first_public",
@@ -62,7 +62,7 @@ SAMPLE_FIELDS = (
     "host_scientific_name",
     "country",
     "center_name",
-    "source",          # "ENA" | "SRA"
+    "source",          # "ENA" | "SRA" | "GSA"
     "status",          # default: "pending"
 )
 
@@ -236,14 +236,97 @@ def normalize_sra_study(record: dict[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# GSA normalization
+# ---------------------------------------------------------------------------
+
+def normalize_gsa_run(record: dict[str, Any]) -> dict[str, Any]:
+    """Map a GSA run record (already flat dict from gsa.py) to the wmw sample schema.
+
+    GSA publishes no base or read counts, so those stay blank — which also
+    means MIN_BASES never excludes a GSA run, since ``filter_runs`` treats a
+    blank field as passing.
+    """
+    return {
+        "run_accession":        _str(record.get("run_accession")),
+        "study_accession":      _str(record.get("study_accession")),
+        "sample_accession":     _str(record.get("sample_accession")),
+        "experiment_accession": _str(record.get("experiment_accession")),
+        "scientific_name":      _str(record.get("scientific_name")),
+        "tax_id":               _str(record.get("tax_id")),
+        "instrument_platform":  _str(record.get("instrument_platform")),
+        "instrument_model":     _str(record.get("instrument_model")),
+        "library_strategy":     _str(record.get("library_strategy")),
+        "library_source":       _str(record.get("library_source")),
+        "library_layout":       _str(record.get("library_layout")),
+        "base_count":           None,
+        "read_count":           None,
+        "fastq_ftp":            _str(record.get("fastq_ftp")),
+        "fastq_md5":            _str(record.get("fastq_md5")),
+        "fastq_url_1":          _str(record.get("fastq_url_1")),
+        "fastq_url_2":          _str(record.get("fastq_url_2")),
+        "collection_date":      _date(record.get("collection_date")),
+        "first_public":         _date(record.get("first_public")),
+        "geo_loc_name":         _str(record.get("geo_loc_name")),
+        "host":                 _str(record.get("host")),
+        "host_tax_id":          _str(record.get("host_tax_id")),
+        "host_scientific_name": _str(record.get("host_scientific_name")) or _str(record.get("host")),
+        "country":              _str(record.get("country")),
+        "center_name":          _str(record.get("center_name")),
+        "source":               "GSA",
+        "status":               "pending",
+    }
+
+
+def normalize_gsa_study(record: dict[str, Any]) -> dict[str, Any]:
+    """Map a GSA study record (from gsa.fetch_study_metadata) to the wmw study schema.
+
+    ``study_accession`` holds the GSA accession (CRA…) and
+    ``secondary_study_accession`` the NGDC BioProject (PRJCA…), mirroring the
+    ENA PRJEB/ERP pairing.
+    """
+    return {
+        "study_accession":           _str(record.get("study_accession")),
+        "secondary_study_accession": _str(record.get("secondary_study_accession")),
+        "study_title":               _str(record.get("study_title")),
+        "study_description":         _str(record.get("study_description")),
+        "source":                    "GSA",
+        "scientific_name":           _str(record.get("scientific_name")),
+        "tax_id":                    _str(record.get("tax_id")),
+        "first_public":              _str(record.get("first_public")),
+        "center_name":               _str(record.get("center_name")),
+        "status":                    "new",
+        "pubmed_id":                 _str(record.get("pubmed_id")),
+        "pub_doi":                   _str(record.get("pub_doi")),
+        "pub_url":                   _str(record.get("pub_url")),
+        "pub_title":                 _str(record.get("pub_title")),
+        "pub_year":                  _str(record.get("pub_year")),
+        "pub_journal":               _str(record.get("pub_journal")),
+        "pub_authors":               _str(record.get("pub_authors")),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Batch normalization helpers
 # ---------------------------------------------------------------------------
+
+_RUN_NORMALIZERS = {
+    "ENA": normalize_ena_run,
+    "SRA": normalize_sra_run,
+    "GSA": normalize_gsa_run,
+}
+
+_STUDY_NORMALIZERS = {
+    "ENA": normalize_ena_study,
+    "SRA": normalize_sra_study,
+    "GSA": normalize_gsa_study,
+}
+
 
 def normalize_runs(
     records: list[dict[str, Any]],
     source: str,
 ) -> list[dict[str, Any]]:
-    fn = normalize_ena_run if source == "ENA" else normalize_sra_run
+    fn = _RUN_NORMALIZERS.get(source, normalize_sra_run)
     return [fn(r) for r in records if r.get("run_accession")]
 
 
@@ -254,16 +337,13 @@ def studies_from_runs(
     """Derive one study record per unique study_accession from a list of run records."""
     seen: set[str] = set()
     studies: list[dict[str, Any]] = []
-    fn = normalize_sra_study if source == "SRA" else None
+    fn = _STUDY_NORMALIZERS.get(source, normalize_ena_study)
     for run in runs:
         acc = run.get("study_accession", "")
         if not acc or acc in seen:
             continue
         seen.add(acc)
-        if fn:
-            studies.append(fn(run))
-        else:
-            studies.append(normalize_ena_study(run))
+        studies.append(fn(run))
     return studies
 
 

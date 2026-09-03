@@ -44,6 +44,16 @@ STUDIES_COL_FILE_QUANTIFYING: "fldQP63E5YRdkVB91"
 STUDIES_COL_FILE_COUNTS: "fld5nOaYLsu6cuuoQ"
 STUDIES_COL_FILE_BASES: "fldABch5symh2R3le"
 
+# --- Studies table > AMR columns ---
+# Attachment fields for the aggregate tables 'drakkar amr' writes.
+# Leave a key blank to disable that upload.
+STUDIES_COL_FILE_AMR_HITS: ""
+STUDIES_COL_FILE_AMR_LOCI: ""
+STUDIES_COL_FILE_AMR_DRUG_CLASSES: ""
+STUDIES_COL_FILE_AMR_MOBILITY: ""
+STUDIES_COL_FILE_AMR_MOBILITY_REGIONS: ""
+STUDIES_COL_FILE_AMR_MANIFEST: ""
+
 # --- Samples table column IDs ---
 # Airtable field IDs (fldXXXXXXXXXXXXXX) for each column in the Samples table.
 # Leave blank to use field names instead.
@@ -110,6 +120,19 @@ SAMPLES_COL_ASSEMBLY_MAPPING_RATE_FOCAL: "fldrtVqB4JIBwP9DC"
 SAMPLES_COL_ASSEMBLY_MAPPING_RATE_ALL: "fldyoREcPpIXbZANB"
 SAMPLES_COL_MAGS_MAPPING_RATE: "fldo6y0xcR3Gssh6K"
 
+# --- Drakkar > AMR ---
+# One row of amr/amr_qc.tsv per assembly. The two '*_without_coordinates'
+# columns are caller diagnostics rather than results and are never written.
+# Leave a key blank to skip that metric.
+
+SAMPLES_COL_AMR_AMRFINDER_HITS: ""
+SAMPLES_COL_AMR_RGI_HITS: ""
+SAMPLES_COL_AMR_MOBILITY_REGIONS: ""
+SAMPLES_COL_AMR_LOCI: ""
+SAMPLES_COL_AMR_MULTI_TOOL_LOCI: ""
+SAMPLES_COL_AMR_MOBILITY_LINKS: ""
+SAMPLES_COL_AMR_MOBILE_LOCI: ""
+
 # --- Drakkar > Cataloging > Genomes ---
 
 # Airtable-computed fields: wmw never writes these.
@@ -161,6 +184,7 @@ DRAKKAR_OUTPUT_DIR: "/projects/alberdilab/scratch/jpl786/wmw"  # Root output dir
 # cataloging outputs are finalised. Remote paths are built per study code as:
 #   {SFTP_REMOTE_BASE}/{code}/{SFTP_REMOTE_ASSEMBLY_DIR}  assemblies, gzipped
 #   {SFTP_REMOTE_BASE}/{code}/{SFTP_REMOTE_BIN_DIR}       bin FASTAs, gzipped
+#   {SFTP_REMOTE_BASE}/{code}/{SFTP_REMOTE_AMR_DIR}       AMR result tables, batch-prefixed
 # Leave SFTP_HOST or SFTP_REMOTE_BASE empty to disable ERDA transfers entirely.
 SFTP_HOST: "io.erda.dk"
 SFTP_USER: "antton.alberdi@snm.ku.dk"   # ERDA account used for the transfer
@@ -169,6 +193,7 @@ SFTP_IDENTITY: ""                       # Path to SSH private key (leave empty t
 SFTP_REMOTE_BASE: "/WMW"                # Top-level ERDA folder holding the wmw archive
 SFTP_REMOTE_ASSEMBLY_DIR: "assemblies"  # Per-study subfolder for assembly FASTAs
 SFTP_REMOTE_BIN_DIR: "bins"             # Per-study subfolder for bin FASTAs
+SFTP_REMOTE_AMR_DIR: "amr"              # Per-study subfolder for the AMR result tables
 
 # --- NCBI / ENA ---
 NCBI_EMAIL: ""              # Used as contact email for Unpaywall PDF lookup (optional)
@@ -176,6 +201,9 @@ NCBI_API_KEY: ""            # Fallback NCBI API key; prefer: export NCBI_TOKEN="
 
 # --- Scan defaults ---
 # These are used when the corresponding CLI flag is not provided.
+SOURCE: ""                  # Archive to query: ENA (default) or GSA — --source overrides
+GSA_ORGANISM: ""            # GSA organism name(s), comma-separated for OR
+                            # (blank = "organismal metagenomes"); GSA only
 LIBRARY_STRATEGY: "WGS,METAGENOMIC"  # Comma-separated strategies; excludes amplicon data
 LIBRARY_SOURCE: "METAGENOMIC"        # Comma-separated sources; excludes animal genomic libraries
 INSTRUMENT_PLATFORM: ""     # e.g. ILLUMINA — leave blank for no filter

@@ -35,6 +35,59 @@ def annotation_outputs_present(work_dir: Path) -> bool:
     return not missing_annotation_outputs(work_dir)
 
 
+# Aggregate tables 'drakkar amr' writes to <work_dir>/amr/. They are already
+# xz-compressed, so they are transferred and attached as they are. Each maps to
+# the config key holding the Studies attachment field it is uploaded to; a blank
+# key disables that upload.
+AMR_TABLE_FILES: dict[str, str] = {
+    "amr_hits.tsv.xz":         "STUDIES_COL_FILE_AMR_HITS",
+    "amr_loci.tsv.xz":         "STUDIES_COL_FILE_AMR_LOCI",
+    "amr_drug_classes.tsv.xz": "STUDIES_COL_FILE_AMR_DRUG_CLASSES",
+    "amr_mobility.tsv.xz":     "STUDIES_COL_FILE_AMR_MOBILITY",
+    "mobility_regions.tsv.xz": "STUDIES_COL_FILE_AMR_MOBILITY_REGIONS",
+}
+
+# Plain-text summaries of the same run. They are gzipped on the way to ERDA and
+# are not attached to Airtable: amr_qc.tsv is parsed into the Samples rows
+# instead, and assembly_summary.tsv repeats those numbers per assembly.
+AMR_PLAIN_FILES = ("amr_qc.tsv", "assembly_summary.tsv")
+
+# Provenance record of the run: database releases, tool versions, row counts.
+AMR_MANIFEST_FILE = "manifest.yaml"
+AMR_MANIFEST_CONFIG_KEY = "STUDIES_COL_FILE_AMR_MANIFEST"
+
+AMR_QC_FILE = Path("amr") / "amr_qc.tsv"
+
+
+def amr_results_dir(work_dir: Path) -> Path:
+    """Return the folder holding the aggregate AMR result tables."""
+    return Path(work_dir) / "amr"
+
+
+def amr_qc_path(work_dir: Path) -> Path:
+    """Return the per-assembly AMR summary of a drakkar amr run."""
+    return Path(work_dir) / AMR_QC_FILE
+
+
+def amr_outputs_present(work_dir: Path) -> bool:
+    """Return True when a drakkar amr run left its per-assembly summary behind.
+
+    drakkar exits 0 on some of its own error paths, so the missing summary is
+    the only reliable sign that the AMR run did not finish.
+    """
+    return amr_qc_path(work_dir).exists()
+
+
+def _amr_output_check_lines(work_dir: Path) -> list[str]:
+    qc_path = amr_qc_path(work_dir)
+    return [
+        f"if [ ! -f {shlex.quote(str(qc_path))} ]; then",
+        f"    echo \"Missing required AMR output: {qc_path}\" >&2",
+        "    exit 1",
+        "fi",
+    ]
+
+
 def _annotation_output_check_lines(work_dir: Path) -> list[str]:
     checks = [
         f"[ ! -f {shlex.quote(str(work_dir / rel_path))} ]"
@@ -139,7 +192,7 @@ def generate_full_pipeline_script(
     slurm_qos: str | None = None,
 ) -> str:
     """Return a bash script that runs the full pipeline for *code*:
-    preprocessing → cataloging → profiling → annotation."""
+    preprocessing → cataloging → amr → profiling → annotation."""
     preprocessing_flags = f"-f {tsv_path} -o {work_dir} --fraction --nonpareil --env_path {DRAKKAR_ENV_PATH}"
     if slurm:
         preprocessing_flags += " -p slurm"
@@ -158,6 +211,21 @@ def generate_full_pipeline_script(
         cataloging_flags += " -p slurm"
     cataloging_flags = _with_slurm_options(
         cataloging_flags,
+        slurm_partition=slurm_partition,
+        slurm_qos=slurm_qos,
+    )
+
+    # AMR reads the assemblies cataloging just wrote, so it slots in before
+    # profiling; drakkar amr -i discovers them under cataloging/megahit.
+    amr_flags = f"-i {work_dir} -o {work_dir} --env_path {DRAKKAR_ENV_PATH}"
+    if slurm:
+        amr_flags += " -p slurm"
+    if memory_multiplier not in (None, "", "1", 1, 1.0):
+        amr_flags += f" --memory-multiplier {memory_multiplier}"
+    if time_multiplier not in (None, "", "1", 1, 1.0):
+        amr_flags += f" --time-multiplier {time_multiplier}"
+    amr_flags = _with_slurm_options(
+        amr_flags,
         slurm_partition=slurm_partition,
         slurm_qos=slurm_qos,
     )
@@ -189,6 +257,7 @@ def generate_full_pipeline_script(
         c_flag = "-p" if str(conda_env).startswith(("/", "~", ".")) else "-n"
         preprocessing_cmd = f"conda run {c_flag} {conda_env} drakkar preprocessing {preprocessing_flags}"
         cataloging_cmd  = f"conda run {c_flag} {conda_env} drakkar cataloging {cataloging_flags}"
+        amr_cmd         = f"conda run {c_flag} {conda_env} drakkar amr {amr_flags}"
         profiling_cmd   = f"conda run {c_flag} {conda_env} drakkar profiling {profiling_flags}"
         annotation_cmd  = f"conda run {c_flag} {conda_env} drakkar annotating {annotation_flags}"
         conda_lines = [
@@ -201,6 +270,7 @@ def generate_full_pipeline_script(
     else:
         preprocessing_cmd = f"drakkar preprocessing {preprocessing_flags}"
         cataloging_cmd  = f"drakkar cataloging {cataloging_flags}"
+        amr_cmd         = f"drakkar amr {amr_flags}"
         profiling_cmd   = f"drakkar profiling {profiling_flags}"
         annotation_cmd  = f"drakkar annotating {annotation_flags}"
         conda_lines = []
@@ -216,7 +286,7 @@ def generate_full_pipeline_script(
 
     lines = [
         "#!/usr/bin/env bash",
-        f"# wmw-generated script — batch {code} (preprocessing → cataloging → profiling → annotation)",
+        f"# wmw-generated script — batch {code} (preprocessing → cataloging → amr → profiling → annotation)",
         "# Do not edit manually; re-run wmw process to regenerate.",
         "# AIRTABLE_TOKEN must be exported in the environment before launching.",
         "",
@@ -264,6 +334,24 @@ def generate_full_pipeline_script(
         cataloging_cmd,
         _rename_workflow_tsv_line(code, work_dir, "cataloging"),
         f"{wmw_cmd} set-status --study {code} --workflow cataloging --status cataloged{output_dir_arg}",
+        "_WMW_SUCCESS=1",
+        "",
+        # amr
+        "_WMW_SUCCESS=0",
+        "_on_exit_amr() {",
+        '    if [ "$_WMW_SUCCESS" -ne 1 ]; then',
+        '        if [ -f "$_WMW_STOP_FILE" ]; then',
+        f"            {wmw_cmd} set-status --study {code} --workflow amr --status stopped{output_dir_arg}",
+        "        else",
+        f"            {wmw_cmd} set-status --study {code} --workflow amr --status error{output_dir_arg}",
+        "        fi",
+        "    fi",
+        "}",
+        "trap _on_exit_amr EXIT",
+        f"{wmw_cmd} set-status --study {code} --workflow amr --status amr{output_dir_arg}",
+        amr_cmd,
+        *_amr_output_check_lines(work_dir),
+        f"{wmw_cmd} set-status --study {code} --workflow amr --status amr_done{output_dir_arg}",
         "_WMW_SUCCESS=1",
         "",
         # profiling
@@ -671,6 +759,103 @@ def generate_cataloging_script(
     return "\n".join(lines)
 
 
+def generate_amr_script(
+    code: str,
+    work_dir: Path,
+    conda_env: str,
+    slurm: bool = False,
+    wmw_conda_env: str = "",
+    memory_multiplier: str | float | None = None,
+    time_multiplier: str | float | None = None,
+    slurm_partition: str | None = None,
+    slurm_qos: str | None = None,
+) -> str:
+    """Return a bash script that runs drakkar amr for *code* and updates Airtable.
+
+    AMR runs between cataloging and profiling: it needs the assemblies
+    cataloging produces and nothing profiling or annotating adds.
+
+    ``drakkar amr -i`` discovers assemblies under cataloging/megahit of a drakkar
+    output directory and names each one after its folder, which is the wmw
+    sample code — so the amr_qc.tsv rows come back keyed the way Airtable
+    expects without a manifest.
+    """
+    out_dir = shlex.quote(str(work_dir))
+
+    amr_flags = f"-i {out_dir} -o {out_dir} --env_path {DRAKKAR_ENV_PATH}"
+    if slurm:
+        amr_flags += " -p slurm"
+    if memory_multiplier not in (None, "", "1", 1, 1.0):
+        amr_flags += f" --memory-multiplier {memory_multiplier}"
+    if time_multiplier not in (None, "", "1", 1, 1.0):
+        amr_flags += f" --time-multiplier {time_multiplier}"
+    amr_flags = _with_slurm_options(
+        amr_flags,
+        slurm_partition=slurm_partition,
+        slurm_qos=slurm_qos,
+    )
+
+    if conda_env:
+        c_flag = "-p" if str(conda_env).startswith(("/", "~", ".")) else "-n"
+        amr_cmd = f"conda run {c_flag} {conda_env} drakkar amr {amr_flags}"
+        conda_lines = [
+            'if [ -f "$(conda info --base 2>/dev/null)/etc/profile.d/conda.sh" ]; then',
+            '    source "$(conda info --base)/etc/profile.d/conda.sh"',
+            f"    conda activate {conda_env}",
+            "fi",
+            "",
+        ]
+    else:
+        amr_cmd = f"drakkar amr {amr_flags}"
+        conda_lines = []
+
+    if wmw_conda_env:
+        w_flag = "-p" if str(wmw_conda_env).startswith(("/", "~", ".")) else "-n"
+        wmw_cmd = f"conda run {w_flag} {wmw_conda_env} wmw"
+    else:
+        wmw_cmd = "wmw"
+
+    stop_file = shlex.quote(str(work_dir / ".wmw-stop"))
+    output_dir_arg = f" --output-dir {shlex.quote(str(work_dir.parent))}"
+
+    lines = [
+        "#!/usr/bin/env bash",
+        f"# wmw-generated script — batch {code} (AMR only)",
+        "# Do not edit manually; re-run wmw process to regenerate.",
+        "# AIRTABLE_TOKEN must be exported in the environment before launching.",
+        "",
+        "set -euo pipefail",
+        f"exec >> {work_dir}/{code}.out 2>> {work_dir}/{code}.err",
+        'echo ""',
+        "echo \"=== $(date '+%Y-%m-%d %H:%M:%S') ===\"",
+        "echo \"=== $(date '+%Y-%m-%d %H:%M:%S') ===\" >&2",
+        "",
+        *conda_lines,
+        f"_WMW_STOP_FILE={stop_file}",
+        'rm -f "$_WMW_STOP_FILE"',
+        "_WMW_SUCCESS=0",
+        "_on_exit() {",
+        '    if [ "$_WMW_SUCCESS" -ne 1 ]; then',
+        '        if [ -f "$_WMW_STOP_FILE" ]; then',
+        f"            {wmw_cmd} set-status --study {code} --workflow amr --status stopped{output_dir_arg}",
+        "        else",
+        f"            {wmw_cmd} set-status --study {code} --workflow amr --status error{output_dir_arg}",
+        "        fi",
+        "    fi",
+        "}",
+        "trap _on_exit EXIT",
+        "",
+        f"cd {shlex.quote(str(work_dir))}",
+        f"{wmw_cmd} set-status --study {code} --workflow amr --status amr{output_dir_arg}",
+        amr_cmd,
+        *_amr_output_check_lines(work_dir),
+        f"{wmw_cmd} set-status --study {code} --workflow amr --status amr_done{output_dir_arg}",
+        "_WMW_SUCCESS=1",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Drakkar invocation
 # ---------------------------------------------------------------------------
@@ -735,6 +920,20 @@ _CATALOGING_TSV_COLS: list[tuple[str, tuple[str, ...], str]] = [
     ),
     ("assembly_gc_percent",     ("SAMPLES_COL_ASSEMBLY_GC",),               "float2"),
     ("mapping_rate_percent",    ("SAMPLES_COL_ASSEMBLY_MAPPING_RATE_ALL",), "float2"),
+]
+
+# One row of amr/amr_qc.tsv per assembly. The two '*_without_coordinates'
+# columns are diagnostics of the callers rather than results, so they are not
+# written to Airtable.
+_AMR_QC_TSV_COLS: list[tuple[str, str, str]] = [
+    # (tsv_column,        config_key,                            type)
+    ("amrfinder_hits",    "SAMPLES_COL_AMR_AMRFINDER_HITS",      "int"),
+    ("rgi_hits",          "SAMPLES_COL_AMR_RGI_HITS",            "int"),
+    ("mobility_regions",  "SAMPLES_COL_AMR_MOBILITY_REGIONS",    "int"),
+    ("amr_loci",          "SAMPLES_COL_AMR_LOCI",                "int"),
+    ("multi_tool_loci",   "SAMPLES_COL_AMR_MULTI_TOOL_LOCI",     "int"),
+    ("mobility_links",    "SAMPLES_COL_AMR_MOBILITY_LINKS",      "int"),
+    ("mobile_loci",       "SAMPLES_COL_AMR_MOBILE_LOCI",         "int"),
 ]
 
 _BIN_METADATA_CSV_COLS: list[tuple[str, str, str]] = [
@@ -971,6 +1170,41 @@ def parse_cataloging_tsv(tsv_path: Path) -> dict[str, dict[str, Any]]:
                 if focal_mapping_rate is not None:
                     fields[focal_mapping_fid] = focal_mapping_rate
 
+            if fields:
+                result[assembly] = fields
+    return result
+
+
+def parse_amr_qc_tsv(tsv_path: Path) -> dict[str, dict[str, Any]]:
+    """Parse drakkar's amr/amr_qc.tsv; return {sample_code: {field_id: value}}.
+
+    Rows are keyed by the ``assembly_id`` column. ``drakkar amr -i`` names each
+    assembly after its cataloging/megahit folder, which is the wmw sample code,
+    so the keys line up with the Samples table the same way cataloging stats do.
+    """
+    if not Path(tsv_path).exists():
+        return {}
+
+    col_map: list[tuple[str, str, str]] = []
+    for tsv_col, config_key, typ in _AMR_QC_TSV_COLS:
+        fid = _config_field_id(config_key)
+        if fid:
+            col_map.append((tsv_col, fid, typ))
+    if not col_map:
+        return {}
+
+    result: dict[str, dict[str, Any]] = {}
+    with Path(tsv_path).open(encoding="utf-8", newline="") as fh:
+        reader = csv.DictReader(fh, delimiter="\t")
+        for row_dict in reader:
+            assembly = (row_dict.get("assembly_id") or "").strip()
+            if not assembly:
+                continue
+            fields: dict[str, Any] = {}
+            for tsv_col, fid, typ in col_map:
+                value = _coerce_stat(row_dict.get(tsv_col, ""), typ)
+                if value is not None:
+                    fields[fid] = value
             if fields:
                 result[assembly] = fields
     return result

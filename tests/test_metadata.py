@@ -282,3 +282,98 @@ def test_filter_runs_unknown_field_not_excluded():
     )
     assert excluded == 0
     assert len(kept) == 1
+
+
+# ---------------------------------------------------------------------------
+# GSA normalization
+# ---------------------------------------------------------------------------
+
+_GSA_RUN = {
+    "run_accession": "CRR2009389",
+    "study_accession": "CRA028180",
+    "sample_accession": "SAMC5697416",
+    "experiment_accession": "CRX1868732",
+    "scientific_name": "organismal metagenomes",
+    "tax_id": "410657",
+    "instrument_platform": "ILLUMINA",
+    "instrument_model": "Illumina NovaSeq 6000",
+    "library_strategy": "WGS",
+    "library_source": "METAGENOMIC",
+    "library_layout": "PAIRED",
+    "fastq_ftp": "ftp://download.big.ac.cn/gsa5/CRA028180/CRR2009389/CRR2009389_r1.fq.gz",
+    "fastq_md5": "md5one;md5two",
+    "fastq_url_1": "https://download.cncb.ac.cn/gsa5/CRA028180/CRR2009389/CRR2009389_r1.fq.gz",
+    "fastq_url_2": "https://download.cncb.ac.cn/gsa5/CRA028180/CRR2009389/CRR2009389_r2.fq.gz",
+    "collection_date": "2024-05-02",
+    "first_public": "2025-09-07",
+    "geo_loc_name": "China: Fujian",
+    "country": "China",
+    "host": "Atelerix albiventris",
+    "host_tax_id": "9368",
+    # Non-schema extras that gsa.py carries for traceability.
+    "file_name_1": "CRR2009389_r1.fq.gz",
+    "file_size_1": 3402548213,
+    "run_title": "Animal_7_2_1",
+}
+
+
+def test_normalize_gsa_run_maps_schema_fields():
+    run = metadata.normalize_gsa_run(_GSA_RUN)
+    assert run["run_accession"] == "CRR2009389"
+    assert run["study_accession"] == "CRA028180"
+    assert run["source"] == "GSA"
+    assert run["status"] == "pending"
+    assert run["collection_date"] == "2024-05-02"
+    assert run["country"] == "China"
+
+
+def test_normalize_gsa_run_leaves_counts_blank():
+    """GSA publishes no base or read counts, so MIN_BASES cannot apply."""
+    run = metadata.normalize_gsa_run(_GSA_RUN)
+    assert run["base_count"] is None
+    assert run["read_count"] is None
+
+
+def test_normalize_gsa_run_drops_non_schema_keys():
+    run = metadata.normalize_gsa_run(_GSA_RUN)
+    assert set(run) == set(metadata.SAMPLE_FIELDS)
+
+
+def test_normalize_gsa_run_defaults_host_scientific_name_to_host():
+    run = metadata.normalize_gsa_run(_GSA_RUN)
+    assert run["host_scientific_name"] == "Atelerix albiventris"
+
+
+def test_normalize_gsa_study_pairs_cra_with_bioproject():
+    study = metadata.normalize_gsa_study({
+        "study_accession": "CRA028180",
+        "secondary_study_accession": "PRJCA042537",
+        "study_title": "virome and microbiome of non-traditional mammals",
+        "study_description": "Zoonotic diseases.",
+        "scientific_name": "organismal metagenomes",
+        "first_public": "2025-09-07",
+        "center_name": "Fudan University",
+    })
+    assert study["study_accession"] == "CRA028180"
+    assert study["secondary_study_accession"] == "PRJCA042537"
+    assert study["source"] == "GSA"
+    assert study["status"] == "new"
+    assert set(study) == set(metadata.STUDY_FIELDS)
+
+
+def test_normalize_runs_dispatches_to_gsa():
+    runs = metadata.normalize_runs([_GSA_RUN], "GSA")
+    assert len(runs) == 1
+    assert runs[0]["source"] == "GSA"
+
+
+def test_studies_from_runs_dispatches_to_gsa():
+    studies = metadata.studies_from_runs(
+        [{"study_accession": "CRA028180", "study_title": "t"}], "GSA"
+    )
+    assert studies[0]["source"] == "GSA"
+
+
+def test_normalize_runs_still_dispatches_to_ena_and_sra():
+    assert metadata.normalize_runs([{"run_accession": "ERR1"}], "ENA")[0]["source"] == "ENA"
+    assert metadata.normalize_runs([{"run_accession": "SRR1"}], "SRA")[0]["source"] == "SRA"

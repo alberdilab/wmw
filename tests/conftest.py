@@ -2,7 +2,24 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _no_real_erda_transfers():
+    """Keep the suite off the network.
+
+    Finalising cataloging or AMR outputs ends in an ERDA transfer, and the
+    shipped config points at a real host. Without this, any test that reaches a
+    finaliser opens an SFTP connection to io.erda.dk and blocks for the 300 s
+    connect timeout when the host is unreachable. Reporting paramiko as absent
+    makes every transfer a no-op that warns and returns False; the tests that
+    exercise the transfer patch this back to True themselves.
+    """
+    with patch("wmw.transfer.paramiko_available", return_value=False):
+        yield
 
 
 @pytest.fixture()
