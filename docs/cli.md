@@ -43,7 +43,7 @@ wmw scan [--source ARCHIVE]              # ena (default) | gsa; config: SOURCE
 
 **Modes:**
 - Date-range: `--from`/`--to` (explicit ISO dates) **or** `--year`/`--month` (shorthand)
-- Single-study: `--study PRJEB12345` (overrides date window)
+- Single-study: `--study PRJEB12345` (overrides date window). Accepts a BioProject accession or its secondary (`ERP…`/`SRP…`); runs are counted under the same `LIBRARY_STRATEGY`/`LIBRARY_SOURCE` and host-exclusion filters as a windowed scan, so **Runs** and **Host taxa** are filled in.
 
 **Date shorthand (`--year` / `--month`):**
 

@@ -213,6 +213,55 @@ def _resolve_scan_dates(args: argparse.Namespace) -> None:
 # wmw scan  (phase 1 — study discovery, ENA only)
 # ---------------------------------------------------------------------------
 
+def _run_stats_by_study(runs: list[dict]) -> dict[str, dict]:
+    """Count runs and collect distinct host taxon IDs per study accession."""
+    stats: dict[str, dict] = {}
+    for run in runs:
+        acc = run.get("study_accession", "")
+        if not acc:
+            continue
+        entry = stats.setdefault(acc, {"runs": 0, "host_taxids": set()})
+        entry["runs"] += 1
+        htid = run.get("host_tax_id", "")
+        if htid:
+            entry["host_taxids"].add(htid)
+    return stats
+
+
+def _summarize_run_stats(stats: dict[str, dict]) -> dict[str, dict]:
+    """Collapse the host taxon ID sets of _run_stats_by_study() to counts."""
+    return {
+        acc: {"runs": d["runs"], "host_taxa": len(d["host_taxids"])}
+        for acc, d in stats.items()
+    }
+
+
+def _apply_run_stats(studies: list[dict], summary: dict[str, dict]) -> None:
+    """Write detected_runs / detected_host_taxa onto study records, in place."""
+    for study in studies:
+        stats = summary.get(study.get("study_accession", ""), {})
+        if stats.get("runs"):
+            study["detected_runs"] = stats["runs"]
+        if stats.get("host_taxa"):
+            study["detected_host_taxa"] = stats["host_taxa"]
+
+
+def _link_species_records(client, studies_table: str, host_taxids_by_study: dict[str, set]) -> None:
+    """Link studies to Species records by host taxon ID, when configured."""
+    species_table_id = str(cfg.get("SPECIES_TABLE") or "").strip()
+    taxid_field_id = str(cfg.get("SPECIES_TAXID_FIELD") or "").strip()
+    link_field_id = str(cfg.get("SPECIES_STUDIES_LINK_FIELD") or "").strip()
+    if not (species_table_id and taxid_field_id and link_field_id):
+        return
+    if not host_taxids_by_study:
+        return
+    n_linked = client.link_studies_to_species(
+        studies_table, species_table_id, taxid_field_id, link_field_id, host_taxids_by_study,
+    )
+    if n_linked:
+        out.success(f"Linked {n_linked} species record(s) to studies.")
+
+
 def _resolve_study_publications(studies: list[dict]) -> None:
     """Fill pub_* fields on study records from PubMed/CrossRef, with a progress bar."""
     from wmw import publications
@@ -660,21 +709,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
     if not args.no_publications:
         _resolve_study_publications(studies)
 
-    run_stats: dict[str, dict] = {}
-    for run in raw_runs:
-        acc = run.get("study_accession", "")
-        if not acc:
-            continue
-        if acc not in run_stats:
-            run_stats[acc] = {"runs": 0, "host_taxids": set()}
-        run_stats[acc]["runs"] += 1
-        htid = run.get("host_tax_id", "")
-        if htid:
-            run_stats[acc]["host_taxids"].add(htid)
-    final_run_stats = {
-        acc: {"runs": d["runs"], "host_taxa": len(d["host_taxids"])}
-        for acc, d in run_stats.items()
-    }
+    run_stats = _run_stats_by_study(raw_runs)
+    final_run_stats = _summarize_run_stats(run_stats)
 
     studies_with_hosts = [
         s for s in studies
@@ -698,13 +734,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
     _print_scan_summary(studies_with_hosts, run_stats=final_run_stats)
 
-    for s in studies:
-        acc = s.get("study_accession", "")
-        stats = final_run_stats.get(acc, {})
-        if stats.get("runs"):
-            s["detected_runs"] = stats["runs"]
-        if stats.get("host_taxa"):
-            s["detected_host_taxa"] = stats["host_taxa"]
+    _apply_run_stats(studies, final_run_stats)
 
     if dry_run:
         out.info("Dry-run mode — no changes written to Airtable.")
@@ -713,20 +743,11 @@ def cmd_scan(args: argparse.Namespace) -> int:
     s_inserted, s_updated = client.upsert_studies(studies_table, studies)
     out.success(f"Studies: {s_inserted} inserted, {s_updated} updated.")
 
-    species_table_id = str(cfg.get("SPECIES_TABLE") or "").strip()
-    taxid_field_id = str(cfg.get("SPECIES_TAXID_FIELD") or "").strip()
-    link_field_id = str(cfg.get("SPECIES_STUDIES_LINK_FIELD") or "").strip()
-    if species_table_id and taxid_field_id and link_field_id:
-        host_taxids_by_study = {
-            acc: d["host_taxids"]
-            for acc, d in run_stats.items()
-            if d["host_taxids"]
-        }
-        n_linked = client.link_studies_to_species(
-            studies_table, species_table_id, taxid_field_id, link_field_id, host_taxids_by_study,
-        )
-        if n_linked:
-            out.success(f"Linked {n_linked} species record(s) to studies.")
+    _link_species_records(
+        client,
+        studies_table,
+        {acc: d["host_taxids"] for acc, d in run_stats.items() if d["host_taxids"]},
+    )
 
     return 0
 
@@ -749,6 +770,44 @@ def _scan_single_study(
         return 0
 
     study = metadata.normalize_ena_study(study_record)
+    # An ERP/SRP secondary accession resolves to its primary here; the run query
+    # below only matches on study_accession, so query the resolved one.
+    resolved_accession = study.get("study_accession", "") or study_accession
+
+    library_strategy_str = (
+        (getattr(args, "library_strategy", "") or "").strip()
+        or _conf(args, "library_strategy", "LIBRARY_STRATEGY")
+        or "WGS,METAGENOMIC"
+    )
+    library_source_str = _conf(args, "library_source", "LIBRARY_SOURCE") or ""
+    exclude_ids = _build_exclude_ids(args)
+
+    out.info(f"Counting runs for {resolved_accession} in ENA…")
+    raw_runs: list[dict] = []
+    runs_counted = True
+    try:
+        raw_runs = ena.search_runs(
+            library_strategy=library_strategy_str,
+            library_source=library_source_str,
+            study_accessions=[resolved_accession],
+        )
+    except Exception as exc:
+        out.warn(f"ENA run query failed — run counts unavailable: {exc}")
+        runs_counted = False
+
+    n_host_excluded = 0
+    if runs_counted and exclude_ids:
+        raw_runs, n_host_excluded = metadata.filter_runs(
+            raw_runs, exclude_host_tax_ids=exclude_ids
+        )
+
+    run_stats = _run_stats_by_study(raw_runs)
+    final_run_stats: dict[str, dict] | None = None
+    if runs_counted:
+        final_run_stats = _summarize_run_stats(run_stats)
+        # A study with no qualifying runs reports 0, not a missing value.
+        final_run_stats.setdefault(resolved_accession, {"runs": 0, "host_taxa": 0})
+        _apply_run_stats([study], final_run_stats)
 
     if not args.no_publications:
         from wmw import publications
@@ -756,7 +815,17 @@ def _scan_single_study(
         email = cfg.get("NCBI_EMAIL", "").strip() or None
         publications.resolve_batch([study], api_key=api_key, email=email)
 
-    _print_scan_summary([study])
+    if exclude_ids:
+        include_arg = (getattr(args, "include", None) or "").strip()
+        out.info(
+            f"Excluding {len(exclude_ids)} host taxon ID(s)"
+            + (f" (included: {include_arg})" if include_arg else "")
+            + ". Use --include All to disable."
+        )
+        if n_host_excluded:
+            out.info(f"  Host exclusion filter removed {_pl(n_host_excluded, 'run')}.")
+
+    _print_scan_summary([study], run_stats=final_run_stats)
 
     if dry_run:
         out.info("Dry-run — no Airtable writes.")
@@ -766,6 +835,12 @@ def _scan_single_study(
         client = _require_airtable(args, studies_table)
     s_inserted, s_updated = client.upsert_studies(studies_table, [study])
     out.success(f"Studies: {s_inserted} inserted, {s_updated} updated.")
+
+    _link_species_records(
+        client,
+        studies_table,
+        {acc: d["host_taxids"] for acc, d in run_stats.items() if d["host_taxids"]},
+    )
     return 0
 
 

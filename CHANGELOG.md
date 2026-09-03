@@ -8,6 +8,26 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.6.2] - 2026-09-03
+
+### Fixed
+
+- **`wmw scan --study ACCESSION` now fills the Runs and Host taxa columns.**
+  The single-study path only fetched study metadata, so both columns printed
+  `—` and `detected_runs` / `detected_host_taxa` were never written to
+  Airtable — even though the same study scanned inside a date window got both.
+  It now runs the same run query the windowed scan uses (same
+  `LIBRARY_STRATEGY` / `LIBRARY_SOURCE` filters, same `EXCLUDED_HOST_TAX_IDS`
+  post-filter) and reports the counts. A study whose run query returns nothing
+  reports `0`, distinct from the `—` shown when the query itself fails; a
+  failed run query is a warning, not an error, and the study is still inserted.
+  Given a secondary accession (`ERP…`/`SRP…`), the run query uses the primary
+  accession ENA resolves it to, since `search_runs()` matches on
+  `study_accession` only.
+- `wmw scan --study` also links the study to its Species records by host taxon
+  ID, which previously only happened on a windowed scan. As before, the link is
+  skipped unless `SPECIES_TABLE`, `SPECIES_TAXID_FIELD` and
+  `SPECIES_STUDIES_LINK_FIELD` are all set.
 ## [0.6.1] - 2026-09-03
 
 ### Added
