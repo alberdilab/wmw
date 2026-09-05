@@ -502,10 +502,18 @@ def test_cmd_upload_erda_defaults_to_cataloging(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_amr_status_map_covers_the_generated_script_transitions():
-    assert cli._PROCESS_STATUS_MAP[("amr", "amr")] == "amr"
-    assert cli._PROCESS_STATUS_MAP[("amr", "amr_done")] == "amr_done"
+    # The generated scripts say amr/amr_done; the base's select offers
+    # amring/amred, so the map is what bridges the two vocabularies.
+    assert cli._PROCESS_STATUS_MAP[("amr", "amr")] == "amring"
+    assert cli._PROCESS_STATUS_MAP[("amr", "amr_done")] == "amred"
+    assert cli._PROCESS_STATUS_MAP[("amr", "completed")] == "amred"
     assert cli._PROCESS_STATUS_MAP[("amr", "stopped")] == "stopped"
     assert cli._PROCESS_STATUS_MAP[("amr", "error")] == "error"
+
+
+def test_amr_status_map_also_accepts_the_airtable_spellings():
+    assert cli._PROCESS_STATUS_MAP[("amr", "amring")] == "amring"
+    assert cli._PROCESS_STATUS_MAP[("amr", "amred")] == "amred"
 
 
 # ---------------------------------------------------------------------------
@@ -531,7 +539,7 @@ def test_finalize_amr_writes_stats_attaches_tables_and_transfers(tmp_path, amr_c
         "fldAmrMobLinks": 7,
         "fldAmrMobileLoci": 3,
     }}]
-    assert client.statuses == ["amr_done"]
+    assert client.statuses == ["amred"]
     assert sorted(client.uploads) == [
         ("file_amr_drug_classes", "ST001_amr_drug_classes.tsv.xz"),
         ("file_amr_hits", "ST001_amr_hits.tsv.xz"),

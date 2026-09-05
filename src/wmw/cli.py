@@ -1731,9 +1731,11 @@ _PROCESS_STATUS_MAP: dict[tuple[str, str], str] = {
     ("annotating",   "Done"):          "Done",
     ("annotating",   "stopped"):       "stopped",
     ("annotating",   "error"):         "error",
-    ("amr",          "amr"):           "amr",
-    ("amr",          "amr_done"):      "amr_done",
-    ("amr",          "completed"):     "amr_done",
+    ("amr",          "amr"):           "amring",
+    ("amr",          "amring"):        "amring",
+    ("amr",          "amr_done"):      "amred",
+    ("amr",          "amred"):         "amred",
+    ("amr",          "completed"):     "amred",
     ("amr",          "stopped"):       "stopped",
     ("amr",          "error"):         "error",
 }
@@ -3124,8 +3126,8 @@ def _finalize_amr_outputs(
         return False
 
     if set_status:
-        client.set_study_status(studies_table, [study_record["id"]], "amr_done")
-        out.success(f"{label}study status → 'amr_done'.")
+        client.set_study_status(studies_table, [study_record["id"]], "amred")
+        out.success(f"{label}study status → 'amred'.")
 
     stats = drakkar.parse_amr_qc_tsv(qc_path)
     if not stats:
@@ -3167,6 +3169,8 @@ def _finalize_amr_outputs(
 
 
 def cmd_set_status(args: argparse.Namespace) -> int:
+    from wmw.airtable import UnknownSelectOptionError
+
     studies_table = _conf(args, "studies_table", "STUDIES_TABLE") or "Studies"
     samples_table = _conf(args, "samples_table", "SAMPLES_TABLE") or "Samples"
     genomes_table = _conf(args, "genomes_table", "GENOMES_TABLE")
@@ -3184,10 +3188,15 @@ def cmd_set_status(args: argparse.Namespace) -> int:
         _die(f"No study with code {study_code!r} found in Airtable.")
     assert study_record is not None
 
-    client.set_study_status(studies_table, [study_record["id"]], airtable_status)
-    out.success(f"Study {study_code} status → {airtable_status!r}.")
+    try:
+        client.set_study_status(studies_table, [study_record["id"]], airtable_status)
+        out.success(f"Study {study_code} status → {airtable_status!r}.")
+    except UnknownSelectOptionError as exc:
+        # A status label the base does not offer must not abort the launch
+        # script: the workflow itself is fine, only the label is unwritable.
+        out.warn(f"{exc} Continuing without the status update.")
 
-    if workflow == "amr" and status in ("amr_done", "completed"):
+    if workflow == "amr" and status in ("amr_done", "amred", "completed"):
         output_dir_str = _conf(args, "output_dir", "DRAKKAR_OUTPUT_DIR")
         if output_dir_str:
             _finalize_amr_outputs(
@@ -3834,7 +3843,9 @@ def _build_parser() -> argparse.ArgumentParser:
             "annotated",
             "Done",
             "amr",
+            "amring",
             "amr_done",
+            "amred",
             "stopped",
             "error",
         ],

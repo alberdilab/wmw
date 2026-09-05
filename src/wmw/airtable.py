@@ -58,6 +58,20 @@ def _require() -> None:
         sys.exit(1)
 
 
+class UnknownSelectOptionError(RuntimeError):
+    """A select field in Airtable has no option matching the value we sent."""
+
+
+def _is_unknown_select_option(exc: Exception) -> bool:
+    """True when *exc* is Airtable's 422 for a value a select field does not offer.
+
+    Select options are curated by hand in the base and the API token cannot
+    create them, so a status label wmw knows but Airtable does not comes back
+    as INVALID_MULTIPLE_CHOICE_OPTIONS rather than as a new option.
+    """
+    return "INVALID_MULTIPLE_CHOICE_OPTIONS" in str(exc)
+
+
 class AirtableClient:
     def __init__(
         self,
@@ -392,6 +406,20 @@ class AirtableClient:
         tbl = self._tbl(samples_table, self._samples_fm)
         return tbl.all(formula=formula)
 
+    @staticmethod
+    def _batch_update_status(tbl, updates: list[dict[str, Any]], status: str, table_name: str) -> None:
+        """Apply status updates, naming the missing option when Airtable rejects one."""
+        try:
+            tbl.batch_update(updates)
+        except Exception as exc:
+            if _is_unknown_select_option(exc):
+                raise UnknownSelectOptionError(
+                    f"Airtable table {table_name!r} has no {status!r} option in its "
+                    f"status field — add it to the single-select in the base "
+                    f"(the API token may not create options)."
+                ) from exc
+            raise
+
     def set_sample_status(
         self,
         samples_table: str,
@@ -405,7 +433,7 @@ class AirtableClient:
             for rid in record_ids
         ]
         tbl = self._tbl(samples_table, self._samples_fm)
-        tbl.batch_update(updates)
+        self._batch_update_status(tbl, updates, status, samples_table)
 
     # ------------------------------------------------------------------
     # Studies table — status helpers
@@ -610,7 +638,7 @@ class AirtableClient:
         status_key = self._fld("status", self._studies_fm)
         updates = [{"id": rid, "fields": {status_key: status}} for rid in record_ids]
         tbl = self._tbl(studies_table, self._studies_fm)
-        tbl.batch_update(updates)
+        self._batch_update_status(tbl, updates, status, studies_table)
 
     def upload_study_file(
         self,

@@ -245,7 +245,7 @@ wmw process [--batch BATCH]
 5. Write `{output_dir}/{code}/{code}.sh`
 6. Studies with `Priority = Low` add `--slurm-partition lazyqueue --slurm-qos lazy` to generated Drakkar commands
 7. Launch the script in a detached `screen` session named `{code}`
-8. Generated scripts update the Study status through `preprocessing`, `preprocessed`, `cataloging`, `cataloged`, `amr`, `amr_done`, `quantifying`, `quantified`, `annotating`, `Done`, `error`, or `stopped`
+8. Generated scripts update the Study status through `preprocessing`, `preprocessed`, `cataloging`, `cataloged`, `amring`, `amred`, `quantifying`, `quantified`, `annotating`, `Done`, `error`, or `stopped`
 9. Genome FASTA attachment uploads are detached into a `{code}-genome-upload`
    `screen` session when finalization is run outside an existing `screen`; if
    `screen` is unavailable, upload falls back to the current process
@@ -274,7 +274,9 @@ preprocessing → cataloging → amr → profiling → annotating
 It is an ordinary stage in every other respect: the same `{code}.sh` script, the
 same `{code}` screen session, the same `{code}.out`/`.err` logs, the same
 `.wmw-stop` marker, and the same study `status` field, which it moves through
-`amr` → `amr_done` (or `stopped`/`error`). `drakkar amr -i` discovers the
+`amring` → `amred` (or `stopped`/`error`). The generated scripts report these as
+`--status amr` / `--status amr_done`; `_PROCESS_STATUS_MAP` translates them to
+the labels the base's select actually offers. `drakkar amr -i` discovers the
 assemblies under `cataloging/megahit/{assembly}/{assembly}.fna` and names each
 one after its folder — the wmw sample code — so no manifest is needed.
 

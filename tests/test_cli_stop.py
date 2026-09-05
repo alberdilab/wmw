@@ -198,6 +198,32 @@ def test_cmd_set_status_annotating_completed_sets_done(tmp_path):
     client.set_study_status.assert_called_once_with("Studies", ["recStudy"], "Done")
 
 
+def test_cmd_set_status_warns_when_airtable_lacks_the_status_option(tmp_path):
+    """A status the base does not offer must not abort the launch script."""
+    from wmw.airtable import UnknownSelectOptionError
+
+    args = argparse.Namespace(
+        study="ST00355",
+        workflow="amr",
+        status="amr",
+        output_dir=str(tmp_path),
+        studies_table="Studies",
+        samples_table="Samples",
+        genomes_table="Genomes",
+        airtable_token="",
+        base_id="",
+    )
+
+    client = MagicMock()
+    client.fetch_study_by_code.return_value = {"id": "recStudy", "fields": {"code": "ST00355"}}
+    client.set_study_status.side_effect = UnknownSelectOptionError("no 'amr' option")
+
+    with patch("wmw.cli._require_airtable", return_value=client):
+        assert cli.cmd_set_status(args) == 0
+
+    client.set_study_status.assert_called_once_with("Studies", ["recStudy"], "amring")
+
+
 def test_cmd_set_status_annotating_completed_uploads_annotation_stats_and_file(tmp_path):
     work_dir = tmp_path / "ST001"
     final_dir = work_dir / "annotating" / "final"

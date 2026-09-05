@@ -8,6 +8,27 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.6.3] - 2026-09-05
+
+### Fixed
+
+- **A status label the Airtable base does not offer no longer aborts a running
+  pipeline.** `wmw set-status` is called from inside the generated launch
+  scripts under `set -euo pipefail`, so when the Studies `status` single-select
+  had no `amr` option, the 422 from Airtable killed the script *before*
+  `drakkar amr` ran and the exit trap flipped the study to `error`. Both
+  `set_study_status()` and `set_sample_status()` now raise a named
+  `UnknownSelectOptionError` naming the table and the missing option instead of
+  a raw `HTTPError` traceback, and `wmw set-status` downgrades it to a warning
+  and carries on — the label is unwritable, but the workflow is fine. Any other
+  Airtable error still propagates.
+- **AMR study statuses now write the labels the base actually offers.** The
+  Studies `status` single-select has `amring` (running) and `amred` (done), but
+  wmw was writing `amr` and `amr_done`, which is what produced the 422 above.
+  `_PROCESS_STATUS_MAP` now translates `--status amr` → `amring` and
+  `--status amr_done` → `amred`, so the generated launch scripts are unchanged
+  and any `<code>.sh` already written to disk keeps working; `set-status` also
+  accepts `--status amring`/`amred` when typed by hand.
 ## [0.6.2] - 2026-09-03
 
 ### Fixed

@@ -152,6 +152,43 @@ def test_set_study_status(mock_client):
     assert {u["id"] for u in updates} == {"rec1", "rec2"}
 
 
+def test_set_study_status_unknown_option_raises_named_error(mock_client):
+    mock_table = MagicMock()
+    mock_table.batch_update.side_effect = Exception(
+        "('422 Client Error: Unprocessable Entity for url: https://api.airtable.com/v0/app/tbl', "
+        "'{\'type\': \'INVALID_MULTIPLE_CHOICE_OPTIONS\', "
+        "\'message\': \'Insufficient permissions to create new select option \"amr\"\'}')"
+    )
+    mock_client._api.table.return_value = mock_table
+
+    from wmw.airtable import UnknownSelectOptionError
+
+    with pytest.raises(UnknownSelectOptionError) as excinfo:
+        mock_client.set_study_status("Studies", ["rec1"], "amr")
+    assert "'amr'" in str(excinfo.value)
+    assert "Studies" in str(excinfo.value)
+
+
+def test_set_sample_status_unknown_option_raises_named_error(mock_client):
+    mock_table = MagicMock()
+    mock_table.batch_update.side_effect = Exception("INVALID_MULTIPLE_CHOICE_OPTIONS")
+    mock_client._api.table.return_value = mock_table
+
+    from wmw.airtable import UnknownSelectOptionError
+
+    with pytest.raises(UnknownSelectOptionError):
+        mock_client.set_sample_status("Samples", ["rec1"], "amr")
+
+
+def test_set_status_other_errors_propagate_unchanged(mock_client):
+    mock_table = MagicMock()
+    mock_table.batch_update.side_effect = RuntimeError("boom")
+    mock_client._api.table.return_value = mock_table
+
+    with pytest.raises(RuntimeError, match="boom"):
+        mock_client.set_study_status("Studies", ["rec1"], "indexed")
+
+
 def test_upload_study_file_uses_configured_field_id(mock_client, tmp_path):
     mock_table = MagicMock()
     mock_client._studies_fm = {"file_preprocessing": "fldPRE"}

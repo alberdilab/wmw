@@ -145,7 +145,7 @@ written to what is a date-typed Airtable column.
 
 ## Status lifecycle
 
-**Studies:** `new` → (manual review) → `approved` → `indexed` → `ready` → `preprocessing` → `preprocessed` → `cataloging` → `cataloged` → `amr` → `amr_done`. Failed or externally cancelled runs use `error` or `stopped`.
+**Studies:** `new` → (manual review) → `approved` → `indexed` → `ready` → `preprocessing` → `preprocessed` → `cataloging` → `cataloged` → `amring` → `amred`. Failed or externally cancelled runs use `error` or `stopped`.
 
 **Samples:** `use` rows are included in Drakkar input TSVs. `pending` and `ignore` rows are excluded.
 
