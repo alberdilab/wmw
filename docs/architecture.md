@@ -92,6 +92,15 @@ labels that the parsers key off.
   accession, release date, and the download root `gsa`…`gsa5`, which is *not* derivable
   from the accession) with `/bioproject/browse/<PRJCA>` (description, organism, submitting
   organization). Used by `wmw scan`.
+- `bioproject_studies(accession)` / `resolve_study_accession(accession)` — a GSA study names
+  its BioProject, but not the reverse, so a `PRJCA…` accession is resolved through the
+  resource table on `/bioproject/browse/<PRJCA>`, which links each `CRA` study it holds.
+  Everything GSA publishes — study metadata and the metadata workbook alike — is keyed by
+  `CRA` accession, so this runs first whenever a BioProject accession is passed to
+  `--study`. A BioProject can hold more than one study, and `wmw scan --study` takes them
+  all.
+- `is_gsa_accession(accession)` — recognises both GSA forms (`CRA…`, `PRJCA…`), which is how
+  `cli._source_for_study()` routes a `--study` accession to the archive that issued it.
 - `search_study(accession)` — run records for one study, from
   `POST /gsa/file/exportExcelFile`. The workbook's Run, Experiment and Sample sheets are
   joined on experiment and BioSample accession; it is the only source for file names,

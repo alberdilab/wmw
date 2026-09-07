@@ -319,6 +319,51 @@ def _resolve_source(args: argparse.Namespace) -> str:
     return source
 
 
+def _source_for_study(accession: str, source: str) -> str:
+    """Return the archive a single ``--study`` accession belongs to.
+
+    GSA accessions (CRA012991) and their NGDC BioProjects (PRJCA020434) are not
+    INSDC accessions — ENA answers a query carrying one with a bare 400 — and
+    ENA accessions mean nothing to GSA. For a single-study lookup the accession
+    is a surer guide than ``--source``, so it decides; an accession neither
+    archive claims is left to the configured source to reject.
+    """
+    from wmw import ena, gsa
+
+    if gsa.is_gsa_accession(accession):
+        archive = "GSA"
+    elif ena.is_study_accession(accession):
+        archive = "ENA"
+    else:
+        return source
+    if archive != source:
+        out.info(
+            f"{ena.normalize_accession(accession)} is a {archive} accession — "
+            f"querying {archive}, not {source}."
+        )
+    return archive
+
+
+def _gsa_study_accessions(accession: str) -> list[str]:
+    """Return the GSA study accessions a ``--study`` argument names.
+
+    A BioProject accession stands for the studies listed on its NGDC page; a
+    study accession stands for itself.
+    """
+    from wmw import gsa
+
+    acc = gsa.normalize_accession(accession)
+    if not gsa.is_bioproject_accession(acc):
+        return [acc]
+    out.info(f"Resolving BioProject {acc} to its GSA studies…")
+    accessions = gsa.bioproject_studies(acc)
+    if not accessions:
+        out.warn(f"BioProject {acc} lists no GSA study.")
+        return []
+    out.info(f"  {acc} → {', '.join(accessions)}")
+    return accessions
+
+
 def _gsa_organism(args: argparse.Namespace) -> str:
     """Return the GSA organism term: CLI flag → config GSA_ORGANISM → default."""
     from wmw.gsa import DEFAULT_ORGANISM
@@ -433,20 +478,31 @@ def _scan_single_gsa_study(
 ) -> int:
     from wmw import gsa, metadata
 
-    out.section(f"WMW SCAN — {study_accession} (GSA)")
-    out.info("Fetching study metadata from GSA…")
+    accession = gsa.normalize_accession(study_accession)
+    out.section(f"WMW SCAN — {accession} (GSA)")
 
-    record = gsa.fetch_study_metadata(study_accession)
-    if not record:
-        out.warn(f"Study {study_accession} not found in GSA.")
+    # GSA publishes study metadata per CRA accession, so a BioProject is
+    # resolved to the study (or studies) holding its data first.
+    accessions = _gsa_study_accessions(accession)
+    if not accessions:
         return 0
 
-    study = metadata.normalize_gsa_study(record)
+    out.info("Fetching study metadata from GSA…")
+    studies: list[dict] = []
+    for acc in accessions:
+        record = gsa.fetch_study_metadata(acc)
+        if not record:
+            out.warn(f"Study {acc} not found in GSA.")
+            continue
+        studies.append(metadata.normalize_gsa_study(record))
+
+    if not studies:
+        return 0
 
     if not args.no_publications:
-        _resolve_study_publications([study])
+        _resolve_study_publications(studies)
 
-    _print_scan_summary([study])
+    _print_scan_summary(studies)
 
     if dry_run:
         out.info("Dry-run — no Airtable writes.")
@@ -454,7 +510,7 @@ def _scan_single_gsa_study(
 
     if client is None:
         client = _require_airtable(args, studies_table)
-    s_inserted, s_updated = client.upsert_studies(studies_table, [study])
+    s_inserted, s_updated = client.upsert_studies(studies_table, studies)
     out.success(f"Studies: {s_inserted} inserted, {s_updated} updated.")
     return 0
 
@@ -464,7 +520,10 @@ def cmd_scan(args: argparse.Namespace) -> int:
     ena.DEBUG = getattr(args, "debug", False)
     _resolve_scan_dates(args)
 
-    if _resolve_source(args) == "GSA":
+    source = _resolve_source(args)
+    if args.study:
+        source = _source_for_study(args.study, source)
+    if source == "GSA":
         studies_table = _conf(args, "studies_table", "STUDIES_TABLE") or "Studies"
         client = _require_airtable(args, studies_table) if not args.dry_run else None
         return _scan_gsa(args, studies_table, args.dry_run, client=client)
@@ -761,10 +820,19 @@ def _scan_single_study(
 ) -> int:
     from wmw import ena, metadata
 
+    try:
+        study_accession = ena.validate_study_accession(study_accession)
+    except ena.ENAError as exc:
+        _die(str(exc))
+
     out.section(f"WMW SCAN — {study_accession}")
     out.info("Fetching study metadata from ENA…")
 
-    study_record = ena.fetch_study_metadata(study_accession)
+    try:
+        study_record = ena.fetch_study_metadata(study_accession)
+    except ena.ENAError as exc:
+        _die(f"ENA study lookup failed — {exc}")
+        return 1
     if not study_record:
         out.warn(f"Study {study_accession} not found in ENA.")
         return 0
@@ -927,6 +995,8 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     dry_run = args.dry_run
     params = _resolve_fetch_params(args)
     source = _resolve_source(args)
+    if args.study:
+        source = _source_for_study(args.study, source)
 
     if source == "GSA":
         from wmw import gsa
@@ -948,12 +1018,24 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         client = _require_airtable(args, studies_table, samples_table)
 
     if args.study:
-        out.info(f"Single-study mode: {args.study}")
-        studies_to_fetch = [args.study]
+        if source == "ENA":
+            try:
+                args.study = ena.validate_study_accession(args.study)
+            except ena.ENAError as exc:
+                _die(str(exc))
+            studies_to_fetch = [args.study]
+        else:
+            # Runs are published per GSA study, and the Studies table records
+            # the CRA accession, so a BioProject is resolved before either.
+            studies_to_fetch = _gsa_study_accessions(args.study)
+            if not studies_to_fetch:
+                return 0
+        out.info(f"Single-study mode: {', '.join(studies_to_fetch)}")
         if client is not None:
-            rec_id = client.fetch_study_record_id(studies_table, args.study)
-            if rec_id:
-                record_id_map = {args.study: rec_id}
+            for acc in studies_to_fetch:
+                rec_id = client.fetch_study_record_id(studies_table, acc)
+                if rec_id:
+                    record_id_map[acc] = rec_id
     else:
         status_filter = args.status or "approved"
         out.info(f"Reading studies with status='{status_filter}' from Airtable…")
@@ -4407,6 +4489,10 @@ def _add_airtable_flags(parser: argparse.ArgumentParser) -> None:
 # ---------------------------------------------------------------------------
 
 def main(argv: Sequence[str] | None = None) -> int:
+    import requests
+
+    from wmw import ena
+
     parser = _build_parser()
     args = parser.parse_args(argv)
     if not hasattr(args, "func"):
@@ -4417,3 +4503,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         out.warn("Interrupted.")
         return 130
+    except ena.ENAError as exc:
+        out.error(str(exc))
+        return 1
+    except requests.exceptions.RequestException as exc:
+        out.error(f"Network request failed: {exc}")
+        return 1

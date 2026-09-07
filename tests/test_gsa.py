@@ -257,6 +257,78 @@ def test_fetch_studies_batch_skips_unresolvable():
 
 
 # ---------------------------------------------------------------------------
+# Accessions and BioProject resolution
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("accession", ["CRA012991", " cra012991 ", "PRJCA020434", "prjca020434"])
+def test_is_gsa_accession_accepts_both_gsa_forms(accession):
+    assert gsa.is_gsa_accession(accession)
+
+
+@pytest.mark.parametrize("accession", ["PRJNA1300861", "PRJEB12345", "ERP146183", "ST00359", ""])
+def test_is_gsa_accession_rejects_non_gsa(accession):
+    assert not gsa.is_gsa_accession(accession)
+
+
+def test_is_study_accession_separates_study_from_bioproject():
+    assert gsa.is_study_accession("CRA012991")
+    assert not gsa.is_study_accession("PRJCA020434")
+    assert gsa.is_bioproject_accession("PRJCA020434")
+    assert not gsa.is_bioproject_accession("CRA012991")
+
+
+# The BioProject page lists its GSA studies as links in the resource table.
+_BIOPROJECT_RESOURCES_HTML = """
+<span>Accession</span><span>PRJCA020434</span>
+<tr><td>GSA (2)</td></tr>
+<tr><td><a href="../../gsa/browse/CRA012991">CRA012991</a></td><td>Himalayan vultures</td></tr>
+<tr><td><a href="../../gsa/browse/CRA012991">CRA012991</a></td><td>Himalayan vultures</td></tr>
+<tr><td><a href="../../gsa/browse/CRA012992">CRA012992</a></td><td>Second study</td></tr>
+"""
+
+
+def test_bioproject_studies_returns_unique_accessions_in_order():
+    with patch("wmw.gsa._request", return_value=_mock_response(_BIOPROJECT_RESOURCES_HTML)):
+        assert gsa.bioproject_studies("PRJCA020434") == ["CRA012991", "CRA012992"]
+
+
+def test_bioproject_studies_returns_empty_without_gsa_links():
+    with patch("wmw.gsa._request", return_value=_mock_response(_BIOPROJECT_HTML)):
+        assert gsa.bioproject_studies("PRJCA042537") == []
+
+
+def test_resolve_study_accession_passes_study_through_without_a_request():
+    with patch("wmw.gsa._request", side_effect=AssertionError("no request expected")):
+        assert gsa.resolve_study_accession(" cra012991 ") == "CRA012991"
+
+
+def test_resolve_study_accession_resolves_bioproject():
+    with patch("wmw.gsa._request", return_value=_mock_response(_BIOPROJECT_RESOURCES_HTML)):
+        assert gsa.resolve_study_accession("PRJCA020434") == "CRA012991"
+
+
+def test_resolve_study_accession_is_empty_for_bioproject_without_studies():
+    with patch("wmw.gsa._request", return_value=_mock_response(_BIOPROJECT_HTML)):
+        assert gsa.resolve_study_accession("PRJCA042537") == ""
+
+
+def test_fetch_study_metadata_accepts_a_bioproject_accession():
+    with patch("wmw.gsa._request", side_effect=[
+        _mock_response(_BIOPROJECT_RESOURCES_HTML),
+        _mock_response(_BROWSE_HTML),
+        _mock_response(_BIOPROJECT_HTML),
+    ]):
+        record = gsa.fetch_study_metadata("PRJCA020434")
+    assert record["study_accession"] == "CRA012991"
+
+
+def test_search_study_rejects_a_bioproject_without_studies():
+    with patch("wmw.gsa._request", return_value=_mock_response(_BIOPROJECT_HTML)):
+        with pytest.raises(ValueError, match="lists no GSA study"):
+            gsa.search_study("PRJCA042537")
+
+
+# ---------------------------------------------------------------------------
 # Metadata workbook parsing
 # ---------------------------------------------------------------------------
 

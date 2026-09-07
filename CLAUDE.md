@@ -17,7 +17,7 @@ Discovers wild-animal shotgun metagenome studies in ENA (or GSA), populates Airt
 | `airtable.py` | `AirtableClient` — `upsert_studies()`, `upsert_samples()`, `refresh_sample_metadata()`, `set_sample_status()`, `fetch_studies_by_status()`, `set_study_status()`, `fetch_samples_by_code()`, `upload_sample_file()`, dedup by accession |
 | `ena.py` | ENA Portal REST; `search_studies()` (study endpoint, used by scan), `search_study()` (run endpoint, used by fetch), `fetch_study_metadata()`, `search_runs()` |
 | `sra.py` | NCBI SRA via Biopython Entrez; `search_runs()`, `search_study()` — retained but not used in automated scan/fetch |
-| `gsa.py` | GSA (NGDC/CNCB) via its scraped web interface; `build_query()` (PubMed-style grammar), `search_study_accessions()` (scan), `fetch_study_metadata()` (browse + BioProject pages), `search_study()` (run records from the `.xlsx` metadata workbook), `resolve_taxonomy()`, `keyword_matches()`, `to_https()` |
+| `gsa.py` | GSA (NGDC/CNCB) via its scraped web interface; `build_query()` (PubMed-style grammar), `search_study_accessions()` (scan), `fetch_study_metadata()` (browse + BioProject pages), `search_study()` (run records from the `.xlsx` metadata workbook), `bioproject_studies()`/`resolve_study_accession()` (PRJCA → CRA), `is_gsa_accession()`, `resolve_taxonomy()`, `keyword_matches()`, `to_https()` |
 | `metadata.py` | `normalize_ena/sra_run/study()`, `filter_runs()` (host_tax_id, min_bases, library_strategy, library_source, instrument_platform), `deduplicate_runs()`, `studies_from_runs()`, `BIOSAMPLE_FIELDS`, `OPTIONAL_SAMPLE_FIELDS` |
 | `drakkar.py` | Drakkar 2.x bridge; `build_input_tsv()` → sample detail TSV; `generate_pipeline_script()` → bash launch script for any run of `PIPELINE_STAGES` (`stages_from()` gives a stage plus its tail), with `generate_*_script()` as thin wrappers; `parse_*_tsv()` → Airtable fields; AMR: `generate_amr_script()`, `parse_amr_qc_tsv()`, `amr_results_dir()`, `amr_result_files()`, `AMR_TABLE_FILES`; binette: `contig_to_bin_files()`, `gzip_contig_to_bin_tsv()` |
 | `publications.py` | `fetch_from_pubmed()`, `fetch_from_crossref()`, `fetch_pdf_url()` (Unpaywall), `resolve_batch()` |
@@ -61,6 +61,7 @@ wmw update
 
 ## Key patterns
 - GSA (`--source gsa`): no JSON API — `gsa.py` scrapes three session-free endpoints (`POST /gsa/search/`, `GET /gsa/browse/<CRA>`, `POST /gsa/file/exportExcelFile`). The `.xlsx` workbook is the run-record source (file names, sizes, MD5s, URLs, host, collection date, geo location); the browse page supplies the release date and the download shard (`gsa`…`gsa5`, not derivable from the accession); the BioProject page supplies description, organism and submitting organization
+- `--study` routes itself: `cli._source_for_study()` sends a GSA accession (`CRA…`, `PRJCA…`) to GSA and an INSDC one to ENA whatever `--source` says, since each archive answers the other's accessions with a 400. GSA keys everything by `CRA`, so `cli._gsa_study_accessions()` resolves a `PRJCA…` through the BioProject page's resource table first — all of the studies it lists
 - GSA queries are pinned to `"NGDC"[center]` and rows matched on `/gsa/browse/<CRA>/<CRX>`, excluding the INSDC mirror GSA also serves
 - GSA gaps: no `base_count`/`read_count` (so `MIN_BASES` cannot apply — `fetch` warns), no `tax_tree()` (so `--taxonomy` is ignored), and `title` indexes *experiment* titles — so `--keyword` is applied post-lookup against study title + description
 - `gsa.resolve_taxonomy()` turns GSA's host/organism *names* into NCBI tax IDs so `EXCLUDED_HOST_TAX_IDS` filters GSA runs too
@@ -86,7 +87,7 @@ wmw update
 - ERDA transfers skip files already present; `replace_existing_attachments` is deliberately **not** propagated to them (it works around Airtable appending on upload). `wmw upload-erda --replace-files` is the explicit re-transfer
 
 ## Tests & release
-`pytest tests/` (393 tests) · `python scripts/release.py X.Y.Z` (add `--dry-run` first)
+`pytest tests/` (471 tests) · `python scripts/release.py X.Y.Z` (add `--dry-run` first)
 
 ## Changelog policy
 - Every code change must be logged under the `[Unreleased]` section of `CHANGELOG.md` before the work is considered done.

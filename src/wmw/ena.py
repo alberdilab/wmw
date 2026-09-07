@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any
 from urllib.parse import urlencode
@@ -18,6 +19,79 @@ NCBI_EFETCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 DEBUG: bool = False
 
 _lineage_cache: dict[str, str] = {}
+
+
+class ENAError(RuntimeError):
+    """A user-facing failure talking to (or preparing a request for) ENA.
+
+    Carries a message meant to be printed as-is: no traceback, no request URL.
+    """
+
+
+# INSDC study accessions ENA will accept in a `study_accession` /
+# `secondary_study_accession` query.  Anything else makes the Portal API answer
+# 400, so it is caught before the request goes out.
+STUDY_ACCESSION_RE = re.compile(r"^(?:PRJ[EDN][A-Z]\d+|[EDS]RP\d{6,})$")
+
+# wmw's own Airtable study codes (ST00359) and GSA's accessions (CRA012991,
+# PRJCA020434).  Recognised only to explain the mix-up when one is passed
+# where an ENA accession is expected.
+_WMW_CODE_RE = re.compile(r"^ST\d+$")
+_GSA_ACCESSION_RE = re.compile(r"^(?:CRA|PRJCA)\d+$")
+
+
+def normalize_accession(accession: str) -> str:
+    """Strip surrounding whitespace and upper-case an accession.
+
+    ENA matches accessions case-sensitively, so ``prjna1300861`` is rejected
+    with a 400 while ``PRJNA1300861`` resolves.
+    """
+    return (accession or "").strip().upper()
+
+
+def is_study_accession(accession: str) -> bool:
+    """True if the (normalized) accession is shaped like an INSDC study accession."""
+    return bool(STUDY_ACCESSION_RE.match(normalize_accession(accession)))
+
+
+def validate_study_accession(accession: str) -> str:
+    """Return the normalized accession, or raise ENAError explaining why it can't be one."""
+    acc = normalize_accession(accession)
+    if not acc:
+        raise ENAError("No study accession given.")
+    if STUDY_ACCESSION_RE.match(acc):
+        return acc
+    if _GSA_ACCESSION_RE.match(acc):
+        raise ENAError(
+            f"{accession!r} is a GSA (NGDC) accession, which ENA does not index. "
+            "wmw routes a GSA accession given to --study to GSA on its own; "
+            "elsewhere, select the archive with --source gsa."
+        )
+    if _WMW_CODE_RE.match(acc):
+        raise ENAError(
+            f"{accession!r} is a wmw study code, not an ENA accession. "
+            "Pass the study's INSDC accession (e.g. PRJNA1300861 or ERP146183) — "
+            "the Studies table records it in study_accession."
+        )
+    raise ENAError(
+        f"{accession!r} is not a valid ENA study accession. Expected a BioProject "
+        "accession (PRJEB…, PRJNA…, PRJDB…) or a secondary study accession "
+        "(ERP…, SRP…, DRP…)."
+    )
+
+
+def _error_message(resp: requests.Response) -> str:
+    """Pull ENA's own explanation out of an error response body."""
+    try:
+        payload = resp.json()
+    except ValueError:
+        return (resp.text or "").strip()[:300]
+    if isinstance(payload, dict):
+        for key in ("message", "error", "detail"):
+            if payload.get(key):
+                return str(payload[key]).strip()
+    return str(payload).strip()[:300]
+
 
 VALID_DATE_FIELDS = {"first_public", "collection_date", "last_updated"}
 VALID_STUDY_DATE_FIELDS = {"first_public", "last_updated"}
@@ -78,23 +152,42 @@ STUDY_FIELDS = ",".join([
 def _get(url: str, params: dict[str, Any], retries: int = 3) -> list[dict[str, Any]]:
     if DEBUG:
         print(f"DEBUG ENA request: {url}?{urlencode(params)}")
+    last_error = ""
     for attempt in range(retries):
         try:
             resp = requests.get(url, params=params, timeout=60)
             resp.raise_for_status()
-            return resp.json()
+            try:
+                return resp.json()
+            except ValueError as exc:
+                raise ENAError(
+                    "ENA returned a response that is not JSON: "
+                    f"{(resp.text or '').strip()[:200]!r}"
+                ) from exc
         except requests.exceptions.HTTPError as exc:
-            status = exc.response.status_code if exc.response is not None else 0
+            resp = exc.response
+            status = resp.status_code if resp is not None else 0
+            detail = _error_message(resp) if resp is not None else ""
             if status == 429 or status >= 500:
+                last_error = f"ENA API is unavailable ({status})"
+                if detail:
+                    last_error += f": {detail}"
                 time.sleep(2 ** attempt)
                 continue
-            raise
-        except requests.exceptions.RequestException:
+            # A 4xx is the query's fault — retrying sends the same bad request.
+            raise ENAError(
+                f"ENA rejected the query ({status})"
+                + (f": {detail}" if detail else ".")
+            ) from exc
+        except requests.exceptions.RequestException as exc:
+            last_error = f"Could not reach the ENA API: {exc}"
             if attempt < retries - 1:
                 time.sleep(2 ** attempt)
                 continue
-            raise
-    return []
+            raise ENAError(last_error) from exc
+    # Every attempt was a retryable failure — report it rather than pretending
+    # the query returned no records.
+    raise ENAError(last_error or f"ENA request failed after {retries} attempts.")
 
 
 def _ncbi_efetch_taxon(tax_id: str) -> ET.Element | None:
@@ -255,9 +348,14 @@ def search_runs(
         if tid:
             query_parts.append(f"NOT host_tax_id={tid}")
 
-    # Restrict to specific studies (batched scan mode)
+    # Restrict to specific studies (batched scan mode).  One malformed accession
+    # would 400 the whole batch, so they are normalized and screened first; if
+    # that leaves nothing, the restriction must not silently widen the query.
     if study_accessions:
-        parts = " OR ".join(f'study_accession="{acc}"' for acc in study_accessions)
+        accs = [a for a in (normalize_accession(a) for a in study_accessions) if is_study_accession(a)]
+        if not accs:
+            return []
+        parts = " OR ".join(f'study_accession="{acc}"' for acc in accs)
         query_parts.append(f"({parts})")
 
     params = {
@@ -271,7 +369,12 @@ def search_runs(
 
 
 def search_study(study_accession: str) -> list[dict[str, Any]]:
-    """Return all run records for a single study accession."""
+    """Return all run records for a single study accession.
+
+    Raises ``ENAError`` if the accession cannot be an ENA study accession —
+    the Portal API answers such a query with a bare 400.
+    """
+    study_accession = validate_study_accession(study_accession)
     params = {
         "result": "read_run",
         "query": f'study_accession="{study_accession}" OR secondary_study_accession="{study_accession}"',
@@ -350,7 +453,12 @@ def search_studies(
 
 
 def fetch_study_metadata(study_accession: str) -> dict[str, Any] | None:
-    """Return metadata for a single study from the ENA study result set."""
+    """Return metadata for a single study from the ENA study result set.
+
+    Raises ``ENAError`` if the accession cannot be an ENA study accession —
+    the Portal API answers such a query with a bare 400.
+    """
+    study_accession = validate_study_accession(study_accession)
     params = {
         "result": "study",
         "query": f'study_accession="{study_accession}" OR secondary_study_accession="{study_accession}"',
@@ -372,6 +480,8 @@ def fetch_studies_batch(
     Splits accessions into chunks to avoid excessively long query strings,
     then concatenates the results.
     """
+    # One malformed accession would 400 the whole chunk, so drop those first.
+    accessions = [a for a in (normalize_accession(a) for a in accessions) if is_study_accession(a)]
     results: list[dict[str, Any]] = []
     for i in range(0, len(accessions), chunk_size):
         chunk = accessions[i : i + chunk_size]

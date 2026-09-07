@@ -8,6 +8,56 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.6.6] - 2026-09-07
+
+### Fixed
+
+- **GSA accessions passed to `--study` are no longer sent to ENA.**
+  `wmw scan --study PRJCA020434` and `wmw scan --study CRA012991` crashed with a
+  `400 Client Error` traceback: GSA accessions are not INSDC accessions, and the
+  archive was chosen by `--source`, which defaults to ENA. For a single-study
+  lookup the accession now decides — `CRA…` and `PRJCA…` go to GSA, INSDC
+  accessions to ENA, whichever source is configured — and a line is printed when
+  the accession overrides it. The same routing covers `wmw fetch --study`.
+
+- **A bad `--study` accession no longer ends in a Python traceback.** ENA
+  rejects anything that is not an INSDC study accession with a bare `400`, and
+  it matches accessions case-sensitively, so `wmw scan --study ST00359` (a wmw
+  study code) and `wmw scan --study prjna1300861` (lowercase) both crashed with
+  a `requests.exceptions.HTTPError` and the full request URL. Accessions are now
+  normalized and screened before the request goes out: `prjna1300861` is
+  upper-cased and resolves, while `ST00359` is reported as
+  `'ST00359' is a wmw study code, not an ENA accession` and exits 1. The same
+  handling covers `wmw fetch --study` for the ENA source; a GSA accession is
+  routed to GSA instead, and reported as such if it reaches an ENA query by
+  another route.
+
+### Added
+
+- **`--study` accepts an NGDC BioProject accession.** GSA publishes study
+  metadata and run workbooks per `CRA` accession only, so a `PRJCA…` accession is
+  resolved through the resource table on `/bioproject/browse/<PRJCA>` first:
+  `wmw scan --study PRJCA020434` scans `CRA012991`. A BioProject holding several
+  GSA studies contributes all of them, and one holding none is reported rather
+  than queried. New in `gsa.py`: `bioproject_studies()`, `resolve_study_accession()`,
+  `is_gsa_accession()` and friends.
+
+### Changed
+
+- **ENA errors are reported, not raised.** `ena._get()` now turns a failure into
+  an `ena.ENAError` carrying ENA's own explanation from the response body
+  instead of a `requests` exception naming the request URL. A 4xx is not
+  retried (the query, not the server, is at fault); a 429/5xx that survives
+  every retry now raises rather than returning an empty list, so an outage can
+  no longer read as "study not found"; a non-JSON response and an unreachable
+  host are reported the same way. `wmw`'s entry point catches `ENAError` and
+  `requests.exceptions.RequestException` and prints a single error line with
+  exit 1, so no archive or network hiccup surfaces a traceback.
+- **A malformed accession no longer costs a whole batch.** One bad accession in
+  `ena.fetch_studies_batch()` or in `search_runs(study_accessions=…)` used to
+  `400` every study queried alongside it; such accessions are now dropped
+  first. When that leaves nothing, both return `[]` rather than sending a query
+  whose study restriction has quietly vanished.
 ## [0.6.5] - 2026-09-07
 
 ### Added

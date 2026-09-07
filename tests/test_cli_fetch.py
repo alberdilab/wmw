@@ -208,3 +208,53 @@ def test_refreshable_sample_fields_never_touch_status():
     assert "parent_study" in metadata.REFRESHABLE_SAMPLE_FIELDS
     assert "collection_date" in metadata.REFRESHABLE_SAMPLE_FIELDS
     assert "fastq_url_1" in metadata.REFRESHABLE_SAMPLE_FIELDS
+
+
+# ---------------------------------------------------------------------------
+# Archive routing (fetch --study)
+# ---------------------------------------------------------------------------
+
+def test_fetch_sends_a_gsa_accession_to_gsa_despite_the_ena_source():
+    """`wmw fetch --study CRA012991` used to 400 against ENA."""
+    client = MagicMock()
+    client.fetch_study_record_id.return_value = "recSTUDY"
+    client.upsert_samples.return_value = (1, 0)
+
+    with patch("wmw.cli._require_airtable", return_value=client), \
+         patch("wmw.cli._resolve_fetch_params", return_value=dict(_FETCH_PARAMS)), \
+         patch("wmw.gsa.search_study", return_value=[]) as gsa_search, \
+         patch("wmw.ena.search_study") as ena_search:
+        assert cli.cmd_fetch(_fetch_args(study="CRA012991")) == 0
+
+    ena_search.assert_not_called()
+    gsa_search.assert_called_once_with("CRA012991")
+
+
+def test_fetch_resolves_a_bioproject_to_its_gsa_studies():
+    client = MagicMock()
+    client.fetch_study_record_id.return_value = "recSTUDY"
+
+    with patch("wmw.cli._require_airtable", return_value=client), \
+         patch("wmw.cli._resolve_fetch_params", return_value=dict(_FETCH_PARAMS)), \
+         patch("wmw.gsa.bioproject_studies", return_value=["CRA012991", "CRA012992"]), \
+         patch("wmw.gsa.search_study", return_value=[]) as gsa_search:
+        assert cli.cmd_fetch(_fetch_args(study="PRJCA020434")) == 0
+
+    assert [c[0][0] for c in gsa_search.call_args_list] == ["CRA012991", "CRA012992"]
+    # The Studies table records the CRA accession, not the BioProject.
+    assert [c[0][1] for c in client.fetch_study_record_id.call_args_list] == [
+        "CRA012991", "CRA012992",
+    ]
+
+
+def test_fetch_stops_when_a_bioproject_lists_no_gsa_study(capsys):
+    client = MagicMock()
+
+    with patch("wmw.cli._require_airtable", return_value=client), \
+         patch("wmw.cli._resolve_fetch_params", return_value=dict(_FETCH_PARAMS)), \
+         patch("wmw.gsa.bioproject_studies", return_value=[]), \
+         patch("wmw.gsa.search_study") as gsa_search:
+        assert cli.cmd_fetch(_fetch_args(study="PRJCA999999")) == 0
+
+    gsa_search.assert_not_called()
+    assert "lists no GSA study" in capsys.readouterr().out

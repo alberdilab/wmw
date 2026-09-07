@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from unittest.mock import MagicMock, patch
 
+import pytest
 from wmw import cli
 
 
@@ -210,3 +211,137 @@ def test_scan_single_study_links_species_by_host_taxon():
     args, _ = client.link_studies_to_species.call_args
     assert args[1:4] == ("tblSpecies", "fldTaxid", "fldLink")
     assert args[4] == {"PRJEB61088": {"100830"}}
+
+
+# ---------------------------------------------------------------------------
+# Accession validation (scan --study)
+# ---------------------------------------------------------------------------
+
+def test_scan_single_study_rejects_a_wmw_code_without_calling_ena(capsys):
+    """`wmw scan --study ST00359` used to reach ENA and die on a bare 400."""
+    with patch("wmw.ena.fetch_study_metadata") as fetch:
+        with pytest.raises(SystemExit):
+            cli._scan_single_study(
+                _scan_args(), "ST00359", "Studies", dry_run=True, client=None,
+            )
+    fetch.assert_not_called()
+    assert "wmw study code" in capsys.readouterr().err
+
+
+def test_scan_single_study_uppercases_a_lowercase_accession():
+    """ENA matches accessions case-sensitively; `prjna1300861` 400s as typed."""
+    client = MagicMock()
+    client.upsert_studies.return_value = (1, 0)
+
+    with patch("wmw.ena.fetch_study_metadata",
+               return_value={"study_accession": "PRJNA1300861"}) as fetch, \
+         patch("wmw.ena.search_runs", return_value=[]):
+        rc = cli._scan_single_study(
+            _scan_args(), "prjna1300861", "Studies", dry_run=False, client=client,
+        )
+
+    assert rc == 0
+    assert fetch.call_args[0][0] == "PRJNA1300861"
+
+
+def test_scan_single_study_reports_an_ena_failure_without_a_traceback(capsys):
+    from wmw import ena
+
+    with patch("wmw.ena.fetch_study_metadata",
+               side_effect=ena.ENAError("ENA rejected the query (400): nope")):
+        with pytest.raises(SystemExit):
+            cli._scan_single_study(
+                _scan_args(), "PRJEB1", "Studies", dry_run=True, client=None,
+            )
+
+    assert "ENA study lookup failed" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Archive routing (--study)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("accession", ["CRA012991", "cra012991", "PRJCA020434"])
+def test_source_for_study_routes_gsa_accessions_to_gsa(accession, capsys):
+    """`wmw scan --study PRJCA020434` used to 400 against ENA."""
+    assert cli._source_for_study(accession, "ENA") == "GSA"
+    assert "querying GSA, not ENA" in capsys.readouterr().out
+
+
+def test_source_for_study_routes_ena_accessions_to_ena():
+    assert cli._source_for_study("PRJNA1300861", "GSA") == "ENA"
+
+
+def test_source_for_study_keeps_the_configured_source_quietly(capsys):
+    """A matching accession is routed without a note; an unknown one is left be."""
+    assert cli._source_for_study("PRJEB61088", "ENA") == "ENA"
+    assert cli._source_for_study("ST00359", "ENA") == "ENA"
+    assert cli._source_for_study("ST00359", "GSA") == "GSA"
+    assert "querying" not in capsys.readouterr().out
+
+
+def test_cmd_scan_sends_a_gsa_accession_to_the_gsa_path():
+    args = _scan_args(
+        study="PRJCA020434", source="", dry_run=True, debug=False,
+        date_from="", date_to="", keyword="", taxonomy="", host_tax_id="",
+        gsa_organism="",
+    )
+    with patch("wmw.cli._scan_single_gsa_study", return_value=0) as gsa_scan, \
+         patch("wmw.cli._scan_single_study") as ena_scan, \
+         patch("wmw.config.get", side_effect=lambda key, default="": default):
+        assert cli.cmd_scan(args) == 0
+
+    ena_scan.assert_not_called()
+    assert gsa_scan.call_args[0][1] == "PRJCA020434"
+
+
+# ---------------------------------------------------------------------------
+# GSA single-study scan
+# ---------------------------------------------------------------------------
+
+def test_gsa_study_accessions_passes_a_study_through():
+    assert cli._gsa_study_accessions(" cra012991 ") == ["CRA012991"]
+
+
+def test_gsa_study_accessions_resolves_a_bioproject():
+    with patch("wmw.gsa.bioproject_studies", return_value=["CRA012991"]) as resolve:
+        assert cli._gsa_study_accessions("PRJCA020434") == ["CRA012991"]
+    resolve.assert_called_once_with("PRJCA020434")
+
+
+def test_gsa_study_accessions_reports_a_bioproject_with_no_studies(capsys):
+    with patch("wmw.gsa.bioproject_studies", return_value=[]):
+        assert cli._gsa_study_accessions("PRJCA999999") == []
+    assert "lists no GSA study" in capsys.readouterr().out
+
+
+def test_scan_single_gsa_study_scans_every_study_of_a_bioproject():
+    client = MagicMock()
+    client.upsert_studies.return_value = (2, 0)
+    records = {
+        "CRA012991": {"study_accession": "CRA012991", "study_title": "One"},
+        "CRA012992": {"study_accession": "CRA012992", "study_title": "Two"},
+    }
+
+    with patch("wmw.gsa.bioproject_studies", return_value=list(records)), \
+         patch("wmw.gsa.fetch_study_metadata", side_effect=lambda acc: records[acc]):
+        rc = cli._scan_single_gsa_study(
+            _scan_args(), "PRJCA020434", "Studies", dry_run=False, client=client,
+        )
+
+    assert rc == 0
+    upserted = client.upsert_studies.call_args[0][1]
+    assert [s["study_accession"] for s in upserted] == ["CRA012991", "CRA012992"]
+
+
+def test_scan_single_gsa_study_skips_an_unresolvable_study(capsys):
+    client = MagicMock()
+
+    with patch("wmw.gsa.fetch_study_metadata", return_value=None):
+        rc = cli._scan_single_gsa_study(
+            _scan_args(), "CRA999999", "Studies", dry_run=False, client=client,
+        )
+
+    assert rc == 0
+    client.upsert_studies.assert_not_called()
+    assert "not found in GSA" in capsys.readouterr().out

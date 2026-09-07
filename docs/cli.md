@@ -84,6 +84,17 @@ wmw scan --source gsa --from 2025-09-01 --to 2025-09-30
 wmw scan --source gsa --study CRA028180
 ```
 
+**`--study` picks its own archive.** ENA and GSA each reject the other's accessions with a
+bare `400`, so for a single-study lookup the accession decides where the query goes,
+whatever `--source` says: `CRA…` and `PRJCA…` go to GSA, `PRJEB…`/`PRJNA…`/`PRJDB…`/`ERP…`
+to ENA. A note is printed when the accession overrides the configured source. GSA
+publishes metadata per `CRA` accession, so a BioProject accession is first resolved to the
+study — or studies — listed on its NGDC page:
+
+```
+wmw scan --study PRJCA020434       # → CRA012991, scanned in GSA
+```
+
 **Differences from the ENA path:**
 
 | Flag | Behaviour under `--source gsa` |
@@ -204,7 +215,12 @@ two can be combined: the refresh runs first, then the fill covers whatever is st
 
 ```
 wmw fetch --source gsa --study CRA028180
+wmw fetch --study PRJCA020434       # → CRA012991, fetched from GSA
 ```
+
+`--study` picks its own archive here too, and a BioProject accession is resolved to the
+GSA studies it holds before anything is fetched — the workbook is published per study, and
+the Studies table records the `CRA` accession.
 
 Run records come from the study's metadata workbook
 (`POST /gsa/file/exportExcelFile`), whose Run, Experiment and Sample sheets are joined to

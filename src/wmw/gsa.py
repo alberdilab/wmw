@@ -82,6 +82,8 @@ _TOTAL_ITEMS_RE = re.compile(r"Total Items:(?:&nbsp;|\s)*(\d+)")
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _DATE_IN_TEXT_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _PRJCA_RE = re.compile(r"PRJCA\d+")
+# The GSA studies a BioProject page lists under its "Project Data" resources.
+_BIOPROJECT_GSA_LINK_RE = re.compile(r"/gsa/browse/(CRA\d+)")
 _DOWNLOAD_ROOT_RE = re.compile(r"https://download\.cncb\.ac\.cn/(gsa\d*)/CRA\d+")
 # "CRR2009389_r1.fq.gz (3402548213 bytes)"
 _FILENAME_SIZE_RE = re.compile(r"^(?P<name>\S+)(?:\s*\((?P<size>\d+)\s*bytes?\))?\s*$")
@@ -96,6 +98,37 @@ DEBUG: bool = False
 MAX_PAGE_SIZE = 1000
 
 _taxonomy_cache: dict[str, str] = {}
+
+
+# ---------------------------------------------------------------------------
+# Accessions
+# ---------------------------------------------------------------------------
+
+# GSA study accessions (CRA012991) and the NGDC BioProject accessions
+# (PRJCA020434) that link to them.  Neither is an INSDC accession, so ENA
+# answers a query carrying one with a bare 400.
+STUDY_ACCESSION_RE = re.compile(r"^CRA\d+$")
+BIOPROJECT_ACCESSION_RE = re.compile(r"^PRJCA\d+$")
+
+
+def normalize_accession(accession: str) -> str:
+    """Strip surrounding whitespace and upper-case an accession."""
+    return (accession or "").strip().upper()
+
+
+def is_study_accession(accession: str) -> bool:
+    """True if the accession is a GSA study accession (CRA…)."""
+    return bool(STUDY_ACCESSION_RE.match(normalize_accession(accession)))
+
+
+def is_bioproject_accession(accession: str) -> bool:
+    """True if the accession is an NGDC BioProject accession (PRJCA…)."""
+    return bool(BIOPROJECT_ACCESSION_RE.match(normalize_accession(accession)))
+
+
+def is_gsa_accession(accession: str) -> bool:
+    """True if the accession belongs to GSA, as either study or BioProject."""
+    return is_study_accession(accession) or is_bioproject_accession(accession)
 
 
 # ---------------------------------------------------------------------------
@@ -405,8 +438,39 @@ def fetch_bioproject(project_accession: str) -> dict[str, str]:
     }
 
 
+def bioproject_studies(project_accession: str) -> list[str]:
+    """Return the GSA study accessions (CRA…) an NGDC BioProject links to.
+
+    A GSA study names its BioProject, but not the reverse, so the resource
+    table on ``/bioproject/browse/<PRJCA>`` is the only place a BioProject
+    accession resolves to the study holding its data. A BioProject can hold
+    more than one, and studies are returned in the order the page lists them.
+    """
+    resp = _request(
+        "GET", f"{BIOPROJECT_BROWSE_URL}/{normalize_accession(project_accession)}"
+    )
+    accessions: list[str] = []
+    for match in _BIOPROJECT_GSA_LINK_RE.finditer(resp.text):
+        if match.group(1) not in accessions:
+            accessions.append(match.group(1))
+    return accessions
+
+
+def resolve_study_accession(accession: str) -> str:
+    """Return the GSA study accession to query for ``accession``.
+
+    A BioProject accession is resolved to the first GSA study it holds — ``""``
+    if it holds none. Anything else is returned normalized.
+    """
+    acc = normalize_accession(accession)
+    if is_bioproject_accession(acc):
+        studies = bioproject_studies(acc)
+        return studies[0] if studies else ""
+    return acc
+
+
 def fetch_study_metadata(study_accession: str) -> dict[str, Any] | None:
-    """Return study-level metadata for one GSA accession.
+    """Return study-level metadata for one GSA study or BioProject accession.
 
     Merges the GSA browse header with the linked NGDC BioProject record, which
     is where the description, organism and submitting organization live. A
@@ -414,6 +478,9 @@ def fetch_study_metadata(study_accession: str) -> dict[str, Any] | None:
     returned.
     """
     try:
+        study_accession = resolve_study_accession(study_accession)
+        if not study_accession:
+            return None
         summary = fetch_browse_summary(study_accession)
     except requests.exceptions.RequestException:
         return None
@@ -687,7 +754,16 @@ def search_study(study_accession: str) -> list[dict[str, Any]]:
     Experiment sheet on the experiment accession and to the Sample sheet on the
     BioSample accession. The study release date is taken from the browse page,
     which the workbook does not carry.
+
+    A BioProject accession is resolved to its GSA study first; the workbook is
+    only published per study.
     """
+    resolved = resolve_study_accession(study_accession)
+    if not resolved:
+        raise ValueError(
+            f"BioProject {normalize_accession(study_accession)} lists no GSA study."
+        )
+    study_accession = resolved
     sheets = parse_metadata_workbook(download_metadata_workbook(study_accession))
     runs = sheets.get("Run", [])
     experiments = {
