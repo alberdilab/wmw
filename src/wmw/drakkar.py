@@ -136,7 +136,16 @@ _REQUIRED_COLS = [
 _OPTIONAL_COLS = [
     ("assembly", "assembly"),
     ("coverage", "coverage"),
+    # A PAIRED run the archive serves as one flat FASTQ holding both mates
+    # concatenated (see metadata.unsplit_paired_runs). The file is not R1, so
+    # it travels in its own column for drakkar to split before preprocessing,
+    # and rawreads1/rawreads2 are left empty for that row.
+    ("rawreads_unsplit", "fastq_url_unsplit"),
 ]
+
+# Emitting the unsplit URL in rawreads1 would hand drakkar half a library under
+# the wrong name, so a row that has one carries no rawreads1/rawreads2 at all.
+_UNSPLIT_SUPPRESSES = ("rawreads1", "rawreads2")
 
 
 # ---------------------------------------------------------------------------
@@ -216,8 +225,12 @@ def build_input_tsv(
     """Write the Drakkar input TSV for a batch of decoded Airtable sample records.
 
     Required columns: sample, rawreads1, rawreads2, reference_name, reference_path.
-    Optional columns (assembly, coverage) are included only when at least one row
-    has a non-empty value.
+    Optional columns (assembly, coverage, rawreads_unsplit) are included only
+    when at least one row has a non-empty value.
+
+    A row with a `rawreads_unsplit` URL gets empty rawreads1/rawreads2: that
+    single file holds both mates concatenated, so naming it as R1 would feed
+    drakkar half a library under the wrong name.
     """
     include_optional: dict[str, bool] = {}
     for col_name, field_name in _OPTIONAL_COLS:
@@ -238,7 +251,13 @@ def build_input_tsv(
         fields = rec.get("fields", rec)
         if fields.get("status") != "use":
             continue
-        row = [str(fields.get(fn, "") or "") for fn in field_names]
+        unsplit = str(fields.get("fastq_url_unsplit", "") or "").strip()
+        row = [
+            ""
+            if unsplit and col in _UNSPLIT_SUPPRESSES
+            else str(fields.get(fn, "") or "")
+            for col, fn in zip(header_cols, field_names)
+        ]
         lines.append("\t".join(row))
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

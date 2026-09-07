@@ -134,6 +134,14 @@ SAMPLES_COL_ASSEMBLY_MAPPING_RATE_FOCAL: "fldrtVqB4JIBwP9DC"
 SAMPLES_COL_ASSEMBLY_MAPPING_RATE_ALL: "fldyoREcPpIXbZANB"
 SAMPLES_COL_MAGS_MAPPING_RATE: "fldo6y0xcR3Gssh6K"
 
+# URL column for a PAIRED run the archive serves as ONE flat FASTQ holding both
+# mates concatenated rather than a _1/_2 pair (the SRA loader could not pair
+# already-trimmed reads). That file is not R1, so it is kept out of
+# fastq_url_1 and travels to drakkar as the rawreads_unsplit column, to be
+# split before preprocessing. Leave blank if the column does not exist; the
+# affected runs are then reported by fetch/process but carry no read URL.
+SAMPLES_COL_FASTQ_URL_UNSPLIT: "fldESHMGEVmmFVbak"
+
 # Attachment column holding binette's per-assembly final_contig_to_bin.tsv
 # (gzipped, named after the sample). Leave blank to skip the upload.
 SAMPLES_COL_CONTIG_TO_BIN: "fldG40YIfBaX5O0NE"

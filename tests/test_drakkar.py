@@ -808,3 +808,53 @@ def test_gzip_contig_to_bin_tsv_reuses_current_archive(tmp_path):
 
     assert second == first
     assert second.stat().st_mtime_ns == mtime
+
+
+# ---------------------------------------------------------------------------
+# build_input_tsv — unsplit runs
+# ---------------------------------------------------------------------------
+
+def test_input_tsv_omits_unsplit_column_when_no_row_needs_it(tmp_path):
+    path = drakkar.build_input_tsv([_input_sample()], tmp_path / "b.tsv")
+    assert "rawreads_unsplit" not in path.read_text().splitlines()[0]
+
+
+def test_input_tsv_carries_unsplit_url_in_its_own_column(tmp_path):
+    sample = _input_sample(code="S002", r1="", r2="")
+    sample["fields"]["fastq_url_unsplit"] = "ftp://host/SRR9851002.fastq.gz"
+    path = drakkar.build_input_tsv([sample], tmp_path / "b.tsv")
+
+    header, row = path.read_text().splitlines()
+    cols = dict(zip(header.split("\t"), row.split("\t")))
+    assert cols["rawreads_unsplit"] == "ftp://host/SRR9851002.fastq.gz"
+    assert cols["rawreads1"] == ""
+    assert cols["rawreads2"] == ""
+
+
+def test_input_tsv_blanks_rawreads1_when_a_row_is_unsplit(tmp_path):
+    """The unsplit file holds both mates, so it must never appear as rawreads1."""
+    sample = _input_sample(code="S003", r1="ftp://host/SRR9851002.fastq.gz", r2="")
+    sample["fields"]["fastq_url_unsplit"] = "ftp://host/SRR9851002.fastq.gz"
+    path = drakkar.build_input_tsv([sample], tmp_path / "b.tsv")
+
+    header, row = path.read_text().splitlines()
+    cols = dict(zip(header.split("\t"), row.split("\t")))
+    assert cols["rawreads1"] == ""
+    assert cols["rawreads_unsplit"] == "ftp://host/SRR9851002.fastq.gz"
+
+
+def test_input_tsv_keeps_normal_pairs_untouched_alongside_an_unsplit_row(tmp_path):
+    normal = _input_sample(code="S001")
+    unsplit = _input_sample(code="S002", r1="", r2="")
+    unsplit["fields"]["fastq_url_unsplit"] = "ftp://host/SRR9851002.fastq.gz"
+    path = drakkar.build_input_tsv([normal, unsplit], tmp_path / "b.tsv")
+
+    header, *rows = path.read_text().splitlines()
+    by_code = {
+        r.split("\t")[0]: dict(zip(header.split("\t"), r.split("\t"))) for r in rows
+    }
+    assert by_code["S001"]["rawreads1"] == "ftp://host/S001_1.fastq.gz"
+    assert by_code["S001"]["rawreads2"] == "ftp://host/S001_2.fastq.gz"
+    assert by_code["S001"]["rawreads_unsplit"] == ""
+    assert by_code["S002"]["rawreads1"] == ""
+    assert by_code["S002"]["rawreads_unsplit"] == "ftp://host/SRR9851002.fastq.gz"

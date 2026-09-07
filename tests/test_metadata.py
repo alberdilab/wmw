@@ -73,29 +73,51 @@ def test_normalize_ena_study(ena_run_record):
 
 
 def test_split_fastq_urls_with_scheme():
-    url1, url2 = metadata._split_fastq_urls(
+    url1, url2, unsplit = metadata._split_fastq_urls(
         "ftp://host/path/file_1.fastq.gz;ftp://host/path/file_2.fastq.gz"
     )
     assert url1 == "ftp://host/path/file_1.fastq.gz"
     assert url2 == "ftp://host/path/file_2.fastq.gz"
+    assert unsplit == ""
 
 
 def test_split_fastq_urls_no_scheme():
-    url1, url2 = metadata._split_fastq_urls("host/path/file_1.fastq.gz;host/path/file_2.fastq.gz")
+    url1, url2, _ = metadata._split_fastq_urls(
+        "host/path/file_1.fastq.gz;host/path/file_2.fastq.gz"
+    )
     assert url1.startswith("ftp://")
     assert url2.startswith("ftp://")
 
 
-def test_split_fastq_urls_single():
-    url1, url2 = metadata._split_fastq_urls("ftp://host/path/file.fastq.gz")
+def test_split_fastq_urls_single_keeps_single_end_run_as_r1():
+    url1, url2, unsplit = metadata._split_fastq_urls(
+        "ftp://host/path/file.fastq.gz", "SINGLE"
+    )
     assert url1 == "ftp://host/path/file.fastq.gz"
     assert url2 == ""
+    assert unsplit == ""
+
+
+def test_split_fastq_urls_single_with_blank_layout_stays_r1():
+    """No layout is no evidence of a broken pair — keep the historical behaviour."""
+    url1, _, unsplit = metadata._split_fastq_urls("ftp://host/path/file.fastq.gz")
+    assert url1 == "ftp://host/path/file.fastq.gz"
+    assert unsplit == ""
+
+
+def test_split_fastq_urls_paired_single_file_is_unsplit():
+    """One file for a PAIRED run holds both mates — it must not be reported as R1."""
+    url1, url2, unsplit = metadata._split_fastq_urls(
+        "ftp://host/path/SRR9851002.fastq.gz", "PAIRED"
+    )
+    assert url1 == ""
+    assert url2 == ""
+    assert unsplit == "ftp://host/path/SRR9851002.fastq.gz"
 
 
 def test_split_fastq_urls_empty():
-    url1, url2 = metadata._split_fastq_urls("")
-    assert url1 == ""
-    assert url2 == ""
+    url1, url2, unsplit = metadata._split_fastq_urls("")
+    assert (url1, url2, unsplit) == ("", "", "")
 
 
 def test_split_fastq_urls_three_files_selects_paired():
@@ -106,9 +128,10 @@ def test_split_fastq_urls_three_files_selects_paired():
         "ftp://host/path/SRR13765885_1.fastq.gz;"
         "ftp://host/path/SRR13765885_2.fastq.gz"
     )
-    url1, url2 = metadata._split_fastq_urls(ftp)
+    url1, url2, unsplit = metadata._split_fastq_urls(ftp, "PAIRED")
     assert url1 == "ftp://host/path/SRR13765885_1.fastq.gz"
     assert url2 == "ftp://host/path/SRR13765885_2.fastq.gz"
+    assert unsplit == ""
 
 
 def test_deduplicate_runs(ena_run_record):
@@ -464,12 +487,13 @@ def test_normalize_gsa_run_carries_biosample_metadata():
 # unsplit_paired_runs
 # ---------------------------------------------------------------------------
 
-def test_unsplit_paired_runs_flags_paired_runs_without_r2():
+def test_unsplit_paired_runs_flags_runs_with_an_unsplit_url():
     runs = [
-        {"run_accession": "SRR1", "library_layout": "PAIRED", "fastq_url_2": ""},
-        {"run_accession": "SRR2", "library_layout": "PAIRED",
-         "fastq_url_2": "ftp://x/SRR2_2.fastq.gz"},
-        {"run_accession": "SRR3", "library_layout": "SINGLE", "fastq_url_2": ""},
+        {"run_accession": "SRR1",
+         "fastq_url_unsplit": "ftp://x/SRR1.fastq.gz"},
+        {"run_accession": "SRR2", "fastq_url_1": "ftp://x/SRR2_1.fastq.gz",
+         "fastq_url_2": "ftp://x/SRR2_2.fastq.gz", "fastq_url_unsplit": ""},
+        {"run_accession": "SRR3", "fastq_url_1": "ftp://x/SRR3.fastq.gz"},
     ]
     assert metadata.unsplit_paired_runs(runs) == ["SRR1"]
 
@@ -477,14 +501,24 @@ def test_unsplit_paired_runs_flags_paired_runs_without_r2():
 def test_unsplit_paired_runs_accepts_airtable_records():
     runs = [
         {"id": "rec1", "fields": {"run_accession": "SRR1",
-                                  "library_layout": "PAIRED", "fastq_url_2": ""}},
+                                  "fastq_url_unsplit": "ftp://x/SRR1.fastq.gz"}},
         {"id": "rec2", "fields": {"run_accession": "SRR2",
-                                  "library_layout": "paired",
                                   "fastq_url_2": "ftp://x/SRR2_2.fastq.gz"}},
     ]
     assert metadata.unsplit_paired_runs(runs) == ["SRR1"]
 
 
-def test_unsplit_paired_runs_ignores_blank_layout():
-    runs = [{"run_accession": "SRR1", "library_layout": "", "fastq_url_2": ""}]
+def test_unsplit_paired_runs_ignores_single_end_runs():
+    runs = [{"run_accession": "SRR1", "fastq_url_1": "ftp://x/SRR1.fastq.gz"}]
     assert metadata.unsplit_paired_runs(runs) == []
+
+
+def test_normalize_ena_run_routes_unsplit_paired_file(ena_run_record):
+    """A PAIRED run with one FASTQ must not report that file as R1."""
+    record = {**ena_run_record,
+              "library_layout": "PAIRED",
+              "fastq_ftp": "ftp.x/SRR9851002.fastq.gz"}
+    result = metadata.normalize_ena_run(record)
+    assert result["fastq_url_1"] == ""
+    assert result["fastq_url_2"] == ""
+    assert result["fastq_url_unsplit"] == "ftp://ftp.x/SRR9851002.fastq.gz"

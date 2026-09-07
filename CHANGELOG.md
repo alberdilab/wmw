@@ -8,6 +8,41 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.6.9] - 2026-09-07
+
+### Changed
+
+- **Runs the archive serves as one unsplit FASTQ now travel to Drakkar as a URL
+  instead of being dumped by wmw.** v0.6.8 shipped `wmw redump`, which ran
+  `fasterq-dump` locally and rewrote `fastq_url_1`/`fastq_url_2` to point at the
+  recovered files. That put wmw in the data path, which is not its job — wmw
+  populates Airtable and Drakkar moves the reads.
+
+  There is no per-mate URL to hand over: ENA publishes only the one flat file
+  and NCBI's original submitted files sit in a requester-pays bucket. But the
+  flat file is two equal halves, one mate each, and every read keeps the read
+  index it was loaded under — so splitting it is a read-count halving that
+  needs nothing but the archive URL. No SRA Toolkit is involved anywhere.
+
+  So the URL now gets its own field. `_split_fastq_urls()` recognises the case
+  (PAIRED layout, single file) and routes the URL to a new `fastq_url_unsplit`
+  sample field rather than `fastq_url_1` — that file is not R1, and naming it
+  so would hand Drakkar half a library under the wrong name.
+  `build_input_tsv()` passes it through as a new `rawreads_unsplit` column with
+  `rawreads1`/`rawreads2` blanked for that row, and Drakkar splits it before
+  preprocessing. `wmw fetch`/`wmw process` still name the affected runs.
+
+  The new column is opt-in like the other late additions: `fastq_url_unsplit`
+  is in `OPTIONAL_SAMPLE_FIELDS`, so a base without it keeps working rather
+  than having every batch rejected. Set `SAMPLES_COL_FASTQ_URL_UNSPLIT` to the
+  field ID to enable it.
+
+### Removed
+
+- **`wmw redump`, and the `sratools` module behind it.** Superseded by the
+  above: nothing in wmw fetches read files any more, and the NCBI SRA Toolkit
+  is no longer a dependency of any wmw command.
+  `AirtableClient.set_sample_fastq_paths()` went with it.
 ## [0.6.8] - 2026-09-07
 
 ### Added

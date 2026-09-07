@@ -54,6 +54,7 @@ SAMPLE_FIELDS = (
     "fastq_md5",
     "fastq_url_1",     # derived from fastq_ftp
     "fastq_url_2",     # derived from fastq_ftp
+    "fastq_url_unsplit",   # PAIRED run the archive serves as one flat file
     "collection_date",
     "first_public",
     "geo_loc_name",
@@ -93,6 +94,7 @@ BIOSAMPLE_FIELDS = (
 # without the columns must keep working rather than have every batch rejected
 # with UNKNOWN_FIELD_NAME.
 OPTIONAL_SAMPLE_FIELDS = frozenset({
+    "fastq_url_unsplit",
     "lat",
     "lon",
     "broad_scale_environmental_context",
@@ -146,13 +148,23 @@ def _date(val: Any) -> str | None:
     return s if _DATE_RE.match(s) else None
 
 
-def _split_fastq_urls(fastq_ftp: str) -> tuple[str, str]:
-    """Split a semicolon-delimited FTP string into (url1, url2).
+def _split_fastq_urls(
+    fastq_ftp: str,
+    library_layout: str = "",
+) -> tuple[str, str, str]:
+    """Split a semicolon-delimited FTP string into (url1, url2, unsplit).
 
     ENA returns up to three FASTQ paths separated by ';'. When three files
     are present (e.g. a merged singleton alongside _1/_2 paired files), the
     _1 and _2 suffixed files are selected and the unsuffixed file is ignored.
     Prepend ftp:// if the path lacks a scheme.
+
+    A run whose *library_layout* is PAIRED but which the archive serves as a
+    single file is the unsplit case: that one file holds **both** mates, so it
+    is not R1 and must not be reported as such. It is returned as *unsplit*
+    with url1 and url2 empty, and `wmw process` hands it to Drakkar in its own
+    column to be split before preprocessing. A genuinely SINGLE run keeps its
+    one file in url1.
     """
     parts = [p.strip() for p in fastq_ftp.split(";") if p.strip()]
     urls = []
@@ -163,10 +175,12 @@ def _split_fastq_urls(fastq_ftp: str) -> tuple[str, str]:
     if len(urls) > 2:
         r1 = next((u for u in urls if _FASTQ_R1.search(u)), "")
         r2 = next((u for u in urls if _FASTQ_R2.search(u)), "")
-        return r1, r2
+        return r1, r2, ""
+    if len(urls) == 1 and _str(library_layout).upper() == "PAIRED":
+        return "", "", urls[0]
     url1 = urls[0] if len(urls) > 0 else ""
     url2 = urls[1] if len(urls) > 1 else ""
-    return url1, url2
+    return url1, url2, ""
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +190,8 @@ def _split_fastq_urls(fastq_ftp: str) -> tuple[str, str]:
 def normalize_ena_run(record: dict[str, Any]) -> dict[str, Any]:
     """Map a raw ENA Portal API run record to the wmw sample schema."""
     fastq_ftp = _str(record.get("fastq_ftp"))
-    url1, url2 = _split_fastq_urls(fastq_ftp)
+    layout = _str(record.get("library_layout"))
+    url1, url2, unsplit = _split_fastq_urls(fastq_ftp, layout)
     return {
         "run_accession":        _str(record.get("run_accession")),
         "study_accession":      _str(record.get("study_accession")),
@@ -188,13 +203,14 @@ def normalize_ena_run(record: dict[str, Any]) -> dict[str, Any]:
         "instrument_model":     _str(record.get("instrument_model")),
         "library_strategy":     _str(record.get("library_strategy")),
         "library_source":       _str(record.get("library_source")),
-        "library_layout":       _str(record.get("library_layout")),
+        "library_layout":       layout,
         "base_count":           _int(record.get("base_count")),
         "read_count":           _int(record.get("read_count")),
         "fastq_ftp":            fastq_ftp,
         "fastq_md5":            _str(record.get("fastq_md5")),
         "fastq_url_1":          url1,
         "fastq_url_2":          url2,
+        "fastq_url_unsplit":    unsplit,
         "collection_date":      _date(record.get("collection_date")),
         "first_public":         _date(record.get("first_public")),
         "geo_loc_name":         _str(record.get("geo_loc_name")),
@@ -244,7 +260,9 @@ def normalize_ena_study(record: dict[str, Any]) -> dict[str, Any]:
 def normalize_sra_run(record: dict[str, Any]) -> dict[str, Any]:
     """Map a raw SRA Entrez record (already flat dict from sra.py) to wmw sample schema."""
     fastq_ftp = _str(record.get("fastq_ftp"))
-    url1, url2 = _split_fastq_urls(fastq_ftp)
+    url1, url2, unsplit = _split_fastq_urls(
+        fastq_ftp, _str(record.get("library_layout"))
+    )
     return {
         "run_accession":        _str(record.get("run_accession")),
         "study_accession":      _str(record.get("study_accession")),
@@ -263,6 +281,7 @@ def normalize_sra_run(record: dict[str, Any]) -> dict[str, Any]:
         "fastq_md5":            "",
         "fastq_url_1":          url1,
         "fastq_url_2":          url2,
+        "fastq_url_unsplit":    unsplit,
         "collection_date":      _date(record.get("collection_date")),
         "first_public":         _date(record.get("first_public")),
         "geo_loc_name":         "",
@@ -333,6 +352,7 @@ def normalize_gsa_run(record: dict[str, Any]) -> dict[str, Any]:
         "fastq_md5":            _str(record.get("fastq_md5")),
         "fastq_url_1":          _str(record.get("fastq_url_1")),
         "fastq_url_2":          _str(record.get("fastq_url_2")),
+        "fastq_url_unsplit":    _str(record.get("fastq_url_unsplit")),
         "collection_date":      _date(record.get("collection_date")),
         "first_public":         _date(record.get("first_public")),
         "geo_loc_name":         _str(record.get("geo_loc_name")),
@@ -435,33 +455,29 @@ def deduplicate_runs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def unsplit_paired_runs(runs: list[dict[str, Any]]) -> list[str]:
-    """Return accessions of runs declaring PAIRED that ENA serves as one FASTQ.
+    """Return accessions of runs the archive serves as one unsplit FASTQ.
 
     The mate is not missing — the archive failed to split it. When a submitter
     uploads reads that were already quality-trimmed, the two files no longer
     line up read-for-read, so the SRA loader gives up on pairing them and
-    stores every read as its own single-read spot: the R1 file's reads first,
-    then the R2 file's, each spot carrying a zero-length second read. ENA
-    mirrors that object, so `fastq_ftp` names one flat `<run>.fastq.gz` holding
-    both mates concatenated rather than a `_1`/`_2` pair.
+    stores every read as its own single-read spot: one file's reads first,
+    then the other's, each spot carrying a zero-length second read. ENA
+    mirrors that object, so `fastq_ftp` names one flat `<run>.fastq.gz`
+    holding both mates concatenated rather than a `_1`/`_2` pair.
 
-    Downloading that URL therefore yields an interleaved-by-halves file, not
-    R1, and `fastq_url_2` is left blank — so the run reaches Drakkar with an
-    empty `rawreads2` column. `fasterq-dump --split-files <run>` recovers the
-    submitter's original R1 and R2 from the same SRA object.
+    Those runs carry `fastq_url_unsplit` instead of `fastq_url_1`/`_2`: the one
+    file is not R1, so reporting it as R1 would feed Drakkar half a library
+    under the wrong name. `build_input_tsv` passes it through in its own
+    column for Drakkar to split before preprocessing.
 
     Accepts both plain run dicts and Airtable records wrapping them in
     "fields", as `build_input_tsv` does.
     """
-    accessions: list[str] = []
-    for run in runs:
-        fields = run.get("fields", run)
-        if _str(fields.get("library_layout")).upper() != "PAIRED":
-            continue
-        if _str(fields.get("fastq_url_2")):
-            continue
-        accessions.append(_str(fields.get("run_accession")) or "(unknown run)")
-    return accessions
+    return [
+        _str(fields.get("run_accession")) or "(unknown run)"
+        for fields in (run.get("fields", run) for run in runs)
+        if _str(fields.get("fastq_url_unsplit"))
+    ]
 
 
 def _run_exclusion(

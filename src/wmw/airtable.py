@@ -361,38 +361,6 @@ class AirtableClient:
             self._tbl(samples_table, self._samples_fm).batch_update(updates)
         return len(updates), filled
 
-    def set_sample_fastq_paths(
-        self,
-        samples_table: str,
-        pairs: dict[str, tuple[str, str]],
-    ) -> int:
-        """Point fastq_url_1/fastq_url_2 of each run in *pairs* at a recovered pair.
-
-        *pairs* maps run_accession to (r1, r2). Used by `wmw redump` after
-        fasterq-dump has split a run the archive serves unsplit: the single
-        archive URL in fastq_url_1 is not R1 at all, so both cells are
-        rewritten together. Runs absent from the table are ignored.
-
-        Returns the number of records updated.
-        """
-        existing = self._existing_run_records(samples_table)
-        updates: list[dict[str, Any]] = []
-        for run_accession, (r1, r2) in pairs.items():
-            record = existing.get(run_accession)
-            if record is None:
-                continue
-            payload = self._enc(
-                {"fastq_url_1": str(r1), "fastq_url_2": str(r2)},
-                self._samples_fm,
-                self._optional_samples,
-            )
-            if payload:
-                updates.append({"id": record["id"], "fields": payload})
-
-        if updates:
-            self._tbl(samples_table, self._samples_fm).batch_update(updates)
-        return len(updates)
-
     def fetch_study_by_code(
         self,
         studies_table: str,

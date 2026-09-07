@@ -58,6 +58,7 @@ encoded attachment limit is reported and left on ERDA only.
 | `fastq_md5` | text | ENA + GSA | Semicolon-delimited MD5s |
 | `fastq_url_1` | text | derived | Parsed R1 URL; `ftp://` for ENA/SRA, `https://download.cncb.ac.cn/…` for GSA |
 | `fastq_url_2` | text | derived | Parsed R2 URL; empty for single-end |
+| `fastq_url_unsplit` | text | derived | Set instead of `fastq_url_1`/`_2` when a PAIRED run is served as ONE flat FASTQ holding both mates concatenated. Reaches drakkar as `rawreads_unsplit`, to be split before preprocessing; config `SAMPLES_COL_FASTQ_URL_UNSPLIT` (blank by default) |
 | `collection_date` | text | ENA + GSA | ISO date sample was collected |
 | `first_public` | text | ENA + SRA | ISO date run was made public |
 | `geo_loc_name` | text | GSA | Free-text location; ENA has no such run-level field, so it is empty for ENA records |

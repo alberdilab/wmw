@@ -377,57 +377,6 @@ wmw stop --batch CODE                 # --study CODE is an alias
 
 ---
 
-## wmw redump
-
-Recover R1 and R2 for runs the archive serves as a single unsplit FASTQ.
-
-When a submitter uploads reads that were already quality-trimmed, the two files
-no longer line up read-for-read, so the SRA loader gives up on pairing them: it
-stores every read as its own single-read spot — all of one file's reads, then
-all of the other's, each spot carrying a zero-length second read. ENA mirrors
-that object, so `fastq_ftp` names one flat `<run>.fastq.gz` instead of a
-`_1`/`_2` pair.
-
-The mate is not missing. `fastq_url_1` points at a file holding **both** mates
-concatenated, so it is not R1 either, and `fastq_url_2` is blank. `wmw fetch`
-and `wmw process` warn when they see such runs; this command repairs them.
-
-```
-wmw redump --study CODE
-           [--run ACC]...
-           [--output-dir DIR]
-           [--studies-table TABLE] [--samples-table TABLE]
-           [--threads N] [--tmp-dir DIR] [--fasterq-dump PATH]
-           [--no-gzip] [--verify] [--force] [--dry-run]
-           [--airtable-token TOKEN] [--base-id BASE_ID]
-```
-
-| Step | Effect |
-|---|---|
-| `fasterq-dump --split-files <run>` | writes `<run>_1.fastq` / `<run>_2.fastq` into `{DRAKKAR_OUTPUT_DIR}/<code>/rawreads/` |
-| gzip (pigz when installed) | leaves `<run>_1.fastq.gz` / `<run>_2.fastq.gz` |
-| Airtable | `fastq_url_1` and `fastq_url_2` are rewritten to those local paths |
-
-- Needs the NCBI SRA Toolkit on `PATH` (`conda install -c bioconda sra-tools`),
-  or `--fasterq-dump` pointing at the binary.
-- With no `--run`, every run of the study that `metadata.unsplit_paired_runs()`
-  flags is recovered. `--run ACC` (repeatable) overrides the detection and
-  redumps exactly those runs.
-- Splitting is by read index, not by position, so it does not matter which half
-  of the run holds R1 — `fasterq-dump` files each read under the index it was
-  loaded with.
-- A run whose pair is already on disk is skipped and still written to Airtable;
-  `--force` dumps it again.
-- `--verify` counts the reads in both mates and refuses the pair unless the
-  counts match, which costs a full pass over each file. Without it the dump is
-  trusted.
-- `--dry-run` lists what would be recovered and touches neither disk nor
-  Airtable.
-- After a redump, `wmw process` writes the local paths into `rawreads1` and
-  `rawreads2` of the Drakkar input TSV like any other sample.
-
----
-
 ## wmw upload-genome-files
 
 Upload generated genome FASTA attachments for one study. This is normally

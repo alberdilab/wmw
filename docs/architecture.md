@@ -181,22 +181,26 @@ is renamed only once the writer returns, so an interrupted transfer leaves behin
 that looks complete. `paramiko` is imported defensively — `paramiko_available()` lets the
 caller skip the transfer with a warning rather than failing the run.
 
-### `sratools.py`
-The `fasterq-dump` bridge behind `wmw redump`. An SRA run whose reads were submitted
-already quality-trimmed loses its pairing at load time: the two files no longer line up
-read-for-read, so the loader stores every read as its own single-read spot — all of one
-file's reads, then all of the other's, each spot carrying a zero-length second read. ENA
-mirrors that object, so the run is served as one flat `<run>.fastq.gz` holding both mates
-concatenated instead of a `_1`/`_2` pair, and `fastq_url_1` is not R1.
+### Unsplit paired runs
+An SRA run whose reads were submitted already quality-trimmed loses its pairing at load
+time: the two files no longer line up read-for-read, so the loader stores every read as
+its own single-read spot — all of one file's reads, then all of the other's, each spot
+carrying a zero-length second read. ENA mirrors that object, so the run is served as one
+flat `<run>.fastq.gz` holding **both** mates concatenated instead of a `_1`/`_2` pair.
 
-Each read still carries the read index it was loaded under, so `split_run()` shells out to
-`fasterq-dump --split-files` and gets the submitter's original R1 and R2 back. Splitting is
-by read index rather than by position, so it does not matter which half of the run holds
-R1 — that varies per run. `gzip_in_place()` compresses the outputs with `pigz` when it is
-installed and the stdlib otherwise; `verify_pair()` counts both mates and refuses a pair
-whose halves differ, since equal counts are what makes position-wise pairing valid.
-`require_fasterq_dump()` keeps the SRA Toolkit an optional runtime dependency: it is needed
-only by `redump`, and its absence is reported rather than raised at import.
+There is no per-mate URL to fetch: ENA publishes only that one file, and NCBI's original
+submitted files sit in a requester-pays bucket. The reads are all present though, in two
+equal halves, and each keeps the read index it was loaded under — so the split is a
+read-count halving, not an SRA-format operation, and the archive URL is all a splitter
+needs.
+
+wmw therefore stays out of the data path. `_split_fastq_urls()` recognises the case (a
+PAIRED layout with a single file) and routes that URL to `fastq_url_unsplit` rather than
+`fastq_url_1`, because the file is not R1 and naming it so would hand drakkar half a
+library under the wrong name. `build_input_tsv()` passes it through as the
+`rawreads_unsplit` column with `rawreads1`/`rawreads2` blanked for that row, and drakkar
+splits it before preprocessing. `metadata.unsplit_paired_runs()` is what `fetch` and
+`process` report from.
 
 ### `publications.py`
 `resolve_batch()` iterates study records and calls `resolve()` per study. `resolve()`
