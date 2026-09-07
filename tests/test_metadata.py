@@ -458,3 +458,33 @@ def test_normalize_gsa_run_carries_biosample_metadata():
     assert run["host_sex"] == "female"
     assert run["broad_scale_environmental_context"] == "forest biome"
     assert run["environmental_medium"] == "feces"
+
+
+# ---------------------------------------------------------------------------
+# unsplit_paired_runs
+# ---------------------------------------------------------------------------
+
+def test_unsplit_paired_runs_flags_paired_runs_without_r2():
+    runs = [
+        {"run_accession": "SRR1", "library_layout": "PAIRED", "fastq_url_2": ""},
+        {"run_accession": "SRR2", "library_layout": "PAIRED",
+         "fastq_url_2": "ftp://x/SRR2_2.fastq.gz"},
+        {"run_accession": "SRR3", "library_layout": "SINGLE", "fastq_url_2": ""},
+    ]
+    assert metadata.unsplit_paired_runs(runs) == ["SRR1"]
+
+
+def test_unsplit_paired_runs_accepts_airtable_records():
+    runs = [
+        {"id": "rec1", "fields": {"run_accession": "SRR1",
+                                  "library_layout": "PAIRED", "fastq_url_2": ""}},
+        {"id": "rec2", "fields": {"run_accession": "SRR2",
+                                  "library_layout": "paired",
+                                  "fastq_url_2": "ftp://x/SRR2_2.fastq.gz"}},
+    ]
+    assert metadata.unsplit_paired_runs(runs) == ["SRR1"]
+
+
+def test_unsplit_paired_runs_ignores_blank_layout():
+    runs = [{"run_accession": "SRR1", "library_layout": "", "fastq_url_2": ""}]
+    assert metadata.unsplit_paired_runs(runs) == []

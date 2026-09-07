@@ -8,6 +8,55 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.6.8] - 2026-09-07
+
+### Added
+
+- **`wmw redump` — recovers R1/R2 for runs the archive serves as one unsplit
+  FASTQ.** When a submitter uploads reads that were already quality-trimmed,
+  the two files no longer line up read-for-read, so the SRA loader gives up on
+  pairing them: it stores every read as its own single-read spot — all of one
+  file's reads, then all of the other's, each spot carrying a zero-length
+  second read. ENA mirrors that object, so `fastq_ftp` names one flat
+  `<run>.fastq.gz` instead of a `_1`/`_2` pair.
+
+  The mate is not missing, which makes the failure worse than a blank cell:
+  `fastq_url_1` points at a file holding **both** mates concatenated, so it is
+  not R1 either, and `fastq_url_2` is empty. Until now nothing said so — the
+  run reached Drakkar with an empty `rawreads2` and a mislabelled `rawreads1`.
+
+  `wmw redump --study CODE` runs `fasterq-dump --split-files` for every
+  affected run of a study, writes the submitter's original R1 and R2 into
+  `{DRAKKAR_OUTPUT_DIR}/<code>/rawreads/` (gzipped with pigz when installed),
+  and repoints `fastq_url_1`/`fastq_url_2` at that local pair, so `wmw process`
+  picks it up unchanged. Splitting is by read index rather than by position, so
+  it does not matter which half of the run holds R1 — that varies per run.
+  `--run ACC` overrides the detection, `--verify` refuses a pair whose halves
+  hold different read counts, `--force` redumps a pair already on disk, and
+  `--dry-run` touches neither disk nor Airtable. Runs already recovered are
+  skipped. The NCBI SRA Toolkit is needed only by this command, so it stays an
+  optional dependency: its absence is reported, not raised at import.
+
+- **`wmw fetch` and `wmw process` now warn about these runs.**
+  `metadata.unsplit_paired_runs()` detects them and both commands name the
+  affected accessions and point at `wmw redump` — `fetch` after run filtering,
+  `process` for the `use` samples of each batch, on the normal and `resume`
+  paths alike. This is a report, not a filter: the runs are still written and
+  still processed.
+
+  PRJNA556790 is one such study. 99 of its 103 runs are affected; all 99 were
+  verified to hold exactly half their spots under one read index and half under
+  the other, so `--split-files` recovers every one. The 4 runs ENA does split
+  are exactly the 4 submitted as untrimmed fixed-length reads (300 bases per
+  spot, 2 × 150 bp).
+
+### Added — internal
+
+- `sratools.py`: `split_run()`, `verify_pair()`, `existing_pair()`,
+  `pair_paths()`, `build_command()`, `count_reads()`, `gzip_in_place()`,
+  `require_fasterq_dump()`, `SraToolsError`.
+- `AirtableClient.set_sample_fastq_paths()` rewrites `fastq_url_1` and
+  `fastq_url_2` together for a batch of runs.
 ## [0.6.7] - 2026-09-07
 
 ### Added

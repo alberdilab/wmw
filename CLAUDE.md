@@ -11,7 +11,7 @@ Discovers wild-animal shotgun metagenome studies in ENA (or GSA), populates Airt
 ## Module map
 | File | Responsibility |
 |---|---|
-| `cli.py` | argparse; `cmd_scan`, `_scan_single_study`, `cmd_fetch`, `_resolve_fetch_params`, `cmd_process`, `cmd_upload_amr`, `cmd_status`, `cmd_config`, `cmd_update` |
+| `cli.py` | argparse; `cmd_scan`, `_scan_single_study`, `cmd_fetch`, `_resolve_fetch_params`, `cmd_process`, `cmd_redump`, `cmd_upload_amr`, `cmd_status`, `cmd_config`, `cmd_update` |
 | `config.py` | YAML at `src/wmw/data/config.yaml`; `get()`, `require()`, `view_config()`, `edit_config()` |
 | `output.py` | Rich console; `info()` `warn()` `error()` `success()` `section()` `make_table()` `render_table()` |
 | `airtable.py` | `AirtableClient` — `upsert_studies()`, `upsert_samples()`, `refresh_sample_metadata()`, `set_sample_status()`, `fetch_studies_by_status()`, `set_study_status()`, `fetch_samples_by_code()`, `upload_sample_file()`, dedup by accession |
@@ -21,6 +21,7 @@ Discovers wild-animal shotgun metagenome studies in ENA (or GSA), populates Airt
 | `metadata.py` | `normalize_ena/sra_run/study()`, `filter_runs()` (host_tax_id, min_bases, library_strategy, library_source, instrument_platform), `deduplicate_runs()`, `studies_from_runs()`, `BIOSAMPLE_FIELDS`, `OPTIONAL_SAMPLE_FIELDS` |
 | `drakkar.py` | Drakkar 2.x bridge; `build_input_tsv()` → sample detail TSV; `generate_pipeline_script()` → bash launch script for any run of `PIPELINE_STAGES` (`stages_from()` gives a stage plus its tail), with `generate_*_script()` as thin wrappers; `platform_from_instrument()`/`resolve_batch_platform()` → `drakkar preprocessing --platform illumina|bgi`; `parse_*_tsv()` → Airtable fields; AMR: `generate_amr_script()`, `parse_amr_qc_tsv()`, `amr_results_dir()`, `amr_result_files()`, `AMR_TABLE_FILES`; binette: `contig_to_bin_files()`, `gzip_contig_to_bin_tsv()` |
 | `publications.py` | `fetch_from_pubmed()`, `fetch_from_crossref()`, `fetch_pdf_url()` (Unpaywall), `resolve_batch()` |
+| `sratools.py` | `fasterq-dump` bridge for runs the archive serves unsplit; `split_run()` → recovered `(R1, R2)`, `verify_pair()`, `existing_pair()`, `gzip_in_place()` (pigz when present), `require_fasterq_dump()`, `SraToolsError` |
 | `transfer.py` | ERDA SFTP via paramiko; `SFTPTransfer` (`upload_stream()`, `upload_gzipped()`, `upload_file()`, `remote_exists()`, `remove_remote_dir()`), `gzip_into()` |
 
 ## Airtable schema
@@ -46,6 +47,10 @@ wmw fetch  [--source ena|gsa] [--status VALUE] [--study ACC]
            [--include GROUPS] [--exclude-taxa IDs] [--dry-run] [--debug]
 wmw process --batch BATCH [--workflow preprocessing|cataloging|amr|profiling|annotating]
             [--only] [--slurm] [--output-dir DIR]
+wmw redump --study CODE [--run ACC]... [--output-dir DIR]
+           [--studies-table TABLE] [--samples-table TABLE]
+           [--threads N] [--tmp-dir DIR] [--fasterq-dump PATH]
+           [--no-gzip] [--verify] [--force] [--dry-run]
 wmw upload-contig-to-bin --study CODE [--output-dir DIR] [--samples-table TABLE]
                          [--replace-files]
 wmw upload-amr [--study CODE] [--output-dir DIR] [--studies-table TABLE]
@@ -85,10 +90,11 @@ wmw update
 - AMR archive: `_finalize_amr_outputs()` writes `amr/amr_qc.tsv` counts to Samples, attaches the 5 aggregate tables + manifest to Studies, and sends them study-prefixed to `{SFTP_REMOTE_BASE}/<code>/{SFTP_REMOTE_AMR_DIR}/` inline (`.tsv.xz` as-is, plain summaries gzipped) — small files, so no screen session
 - Contig-to-bin: `_upload_contig_to_bin_attachments()` attaches each `cataloging/binette/<assembly>/final_contig_to_bin.tsv` to the Samples row of that assembly, gzipped and renamed `<code>_contig_to_bin.tsv.gz` (Airtable names an attachment after its file, and every assembly's is called the same). Runs inline from `_finalize_cataloging_outputs()`; `wmw upload-contig-to-bin` is the manual backfill. Already-attached rows are skipped unless `--replace-files`; a table over the ~3.7 MB attachment limit is reported and skipped
 - `wmw upload-amr` is the manual backfill for the Studies AMR attachments: with no `--study` it discovers every batch under `DRAKKAR_OUTPUT_DIR` whose `amr/` folder holds tables (`drakkar.amr_result_files()`), because a study processed before the columns were configured has no Airtable status recording the gap. Already-attached fields are skipped unless `--replace-files`; `amr_qc.tsv` is optional, and the Samples stats ride along when it and the `SAMPLES_COL_AMR_*` keys are both there. ERDA is left to `wmw upload-erda --what amr`
+- Unsplit paired runs: an SRA run submitted as already-trimmed reads loses its pairing at load time — the loader stores every read as its own single-read spot (one file's reads, then the other's, each spot carrying a zero-length mate), so ENA serves one flat `<run>.fastq.gz` holding **both** mates rather than a `_1`/`_2` pair. `fastq_url_1` is therefore not R1 and `fastq_url_2` is blank. `metadata.unsplit_paired_runs()` detects them (PAIRED layout + no `fastq_url_2`, accepting plain run dicts and `fields`-wrapped Airtable records alike); `fetch` and `process` warn; `wmw redump` repairs via `sratools.split_run()` and repoints both cells at the local pair. Splitting is by read index, not position — which half holds R1 varies per run
 - ERDA transfers skip files already present; `replace_existing_attachments` is deliberately **not** propagated to them (it works around Airtable appending on upload). `wmw upload-erda --replace-files` is the explicit re-transfer
 
 ## Tests & release
-`pytest tests/` (496 tests) · `python scripts/release.py X.Y.Z` (add `--dry-run` first)
+`pytest tests/` (525 tests) · `python scripts/release.py X.Y.Z` (add `--dry-run` first)
 
 ## Changelog policy
 - Every code change must be logged under the `[Unreleased]` section of `CHANGELOG.md` before the work is considered done.

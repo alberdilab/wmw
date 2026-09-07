@@ -434,6 +434,36 @@ def deduplicate_runs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def unsplit_paired_runs(runs: list[dict[str, Any]]) -> list[str]:
+    """Return accessions of runs declaring PAIRED that ENA serves as one FASTQ.
+
+    The mate is not missing — the archive failed to split it. When a submitter
+    uploads reads that were already quality-trimmed, the two files no longer
+    line up read-for-read, so the SRA loader gives up on pairing them and
+    stores every read as its own single-read spot: the R1 file's reads first,
+    then the R2 file's, each spot carrying a zero-length second read. ENA
+    mirrors that object, so `fastq_ftp` names one flat `<run>.fastq.gz` holding
+    both mates concatenated rather than a `_1`/`_2` pair.
+
+    Downloading that URL therefore yields an interleaved-by-halves file, not
+    R1, and `fastq_url_2` is left blank — so the run reaches Drakkar with an
+    empty `rawreads2` column. `fasterq-dump --split-files <run>` recovers the
+    submitter's original R1 and R2 from the same SRA object.
+
+    Accepts both plain run dicts and Airtable records wrapping them in
+    "fields", as `build_input_tsv` does.
+    """
+    accessions: list[str] = []
+    for run in runs:
+        fields = run.get("fields", run)
+        if _str(fields.get("library_layout")).upper() != "PAIRED":
+            continue
+        if _str(fields.get("fastq_url_2")):
+            continue
+        accessions.append(_str(fields.get("run_accession")) or "(unknown run)")
+    return accessions
+
+
 def _run_exclusion(
     run: dict[str, Any],
     criterion: str,

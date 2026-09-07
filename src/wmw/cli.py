@@ -987,6 +987,32 @@ def _show_run_filter_exclusions(
         )
 
 
+def _warn_unsplit_runs(
+    runs: list[dict],
+    *,
+    prefix: str = "",
+    max_examples: int = 20,
+) -> None:
+    """Name PAIRED runs ENA serves as one unsplit FASTQ holding both mates."""
+    from wmw import metadata
+
+    accessions = metadata.unsplit_paired_runs(runs)
+    if not accessions:
+        return
+
+    shown = ", ".join(accessions[:max_examples])
+    more = len(accessions) - max_examples
+    if more > 0:
+        shown = f"{shown}, +{more} more"
+    out.warn(
+        f"{prefix}{_pl(len(accessions), 'run')} declared PAIRED but served as a "
+        f"single unsplit FASTQ. Both mates are in that file — the archive stored "
+        f"R1 and R2 as consecutive halves instead of a _1/_2 pair, so "
+        f"fastq_url_1 is NOT R1 and rawreads2 is empty. Recover the pair with "
+        f"`fasterq-dump --split-files <run>`: {shown}"
+    )
+
+
 def cmd_fetch(args: argparse.Namespace) -> int:
     from wmw import ena, metadata
 
@@ -1119,6 +1145,7 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         _show_run_filter_exclusions(other_exclusions)
 
     out.info(f"Total runs after filtering: {len(all_runs)}")
+    _warn_unsplit_runs(all_runs)
 
     if dry_run:
         out.info("Dry-run mode — no changes written to Airtable.")
@@ -1481,6 +1508,7 @@ def cmd_process(args: argparse.Namespace) -> int:
                     continue
 
                 out.info(f"{code}: {_pl(len(use_samples), 'sample')} with status 'use' available for resume.")
+                _warn_unsplit_runs(use_samples, prefix=f"{code}: ")
                 input_tsv = work_dir / f"{code}.tsv"
                 drakkar.build_input_tsv(samples, input_tsv)
                 out.info(f"  Input TSV:     {input_tsv}")
@@ -1518,6 +1546,7 @@ def cmd_process(args: argparse.Namespace) -> int:
             continue
 
         out.info(f"{code}: {_pl(len(use_samples), 'sample')} with status 'use' to process.")
+        _warn_unsplit_runs(use_samples, prefix=f"{code}: ")
 
         work_dir.mkdir(parents=True, exist_ok=True)
 
@@ -3531,6 +3560,127 @@ def cmd_upload_contig_to_bin(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_redump(args: argparse.Namespace) -> int:
+    """Recover R1/R2 for runs the archive serves as one unsplit FASTQ."""
+    from wmw import metadata, sratools
+
+    studies_table = _conf(args, "studies_table", "STUDIES_TABLE") or "Studies"
+    samples_table = _conf(args, "samples_table", "SAMPLES_TABLE") or "Samples"
+    output_dir_str = _conf(args, "output_dir", "DRAKKAR_OUTPUT_DIR", required=True)
+    study_code = args.study
+    dry_run = args.dry_run
+    compress = not args.no_gzip
+
+    out.section("WMW REDUMP")
+
+    binary = (args.fasterq_dump or "").strip() or sratools.FASTERQ_DUMP
+    if not dry_run:
+        try:
+            resolved = sratools.require_fasterq_dump(binary)
+        except sratools.SraToolsError as exc:
+            _die(str(exc))
+        out.info(f"Using {resolved}")
+
+    client = _require_airtable(args, studies_table, samples_table)
+    study = client.fetch_study_by_code(studies_table, study_code)
+    if study is None:
+        _die(f"No study with code {study_code!r} in the Studies table.")
+    study_accession = study["fields"].get("study_accession", "")
+    if not study_accession:
+        _die(f"{study_code}: study row has no study_accession.")
+
+    samples = client.fetch_samples_for_study(samples_table, study_accession)
+    if not samples:
+        out.warn(f"{study_code}: no samples in the Samples table — nothing to redump.")
+        return 1
+
+    wanted = {a.strip() for a in (args.run or []) if a.strip()}
+    if wanted:
+        targets = [
+            r for r in samples
+            if r.get("fields", r).get("run_accession", "") in wanted
+        ]
+        unknown = wanted - {
+            r.get("fields", r).get("run_accession", "") for r in targets
+        }
+        if unknown:
+            out.warn(
+                f"{study_code}: not in this study, ignored — {', '.join(sorted(unknown))}"
+            )
+    else:
+        affected = set(metadata.unsplit_paired_runs(samples))
+        targets = [
+            r for r in samples
+            if r.get("fields", r).get("run_accession", "") in affected
+        ]
+
+    if not targets:
+        out.success(
+            f"{study_code}: no run is served as an unsplit FASTQ — nothing to redump."
+        )
+        return 0
+
+    reads_dir = Path(output_dir_str).expanduser().resolve() / study_code / "rawreads"
+    tmp_dir = Path(args.tmp_dir).expanduser().resolve() if args.tmp_dir else None
+    out.info(f"{study_code}: {_pl(len(targets), 'run')} to recover into {reads_dir}")
+
+    if dry_run:
+        for record in targets:
+            acc = record.get("fields", record).get("run_accession", "")
+            r1, r2 = sratools.pair_paths(acc, reads_dir, gzipped=compress)
+            out.info(f"  {acc} → {r1.name}, {r2.name}")
+        out.info("Dry-run mode — nothing dumped and no changes written to Airtable.")
+        return 0
+
+    updates: dict[str, tuple[str, str]] = {}
+    n_done = 0
+    n_failed = 0
+    for record in targets:
+        fields = record.get("fields", record)
+        acc = fields.get("run_accession", "")
+        existing = sratools.existing_pair(acc, reads_dir)
+        if existing and not args.force:
+            r1, r2 = existing
+            out.info(f"  {acc}: already recovered — skipping (use --force to redump).")
+        else:
+            out.info(f"  {acc}: running fasterq-dump --split-files…")
+            try:
+                r1, r2 = sratools.split_run(
+                    acc,
+                    reads_dir,
+                    binary=binary,
+                    threads=args.threads,
+                    tmp_dir=tmp_dir,
+                    compress=compress,
+                )
+            except sratools.SraToolsError as exc:
+                out.warn(f"  {acc}: {exc}")
+                n_failed += 1
+                continue
+
+        if args.verify:
+            try:
+                n_reads = sratools.verify_pair(r1, r2)
+            except sratools.SraToolsError as exc:
+                out.warn(f"  {acc}: {exc}")
+                n_failed += 1
+                continue
+            out.info(f"  {acc}: {n_reads:,} reads in each mate.")
+
+        updates[acc] = (str(r1), str(r2))
+        n_done += 1
+
+    if updates:
+        n_written = client.set_sample_fastq_paths(samples_table, updates)
+        out.success(
+            f"{study_code}: {_pl(n_done, 'run')} recovered; "
+            f"fastq_url_1/fastq_url_2 rewritten on {_pl(n_written, 'sample')}."
+        )
+    if n_failed:
+        out.warn(f"{study_code}: {_pl(n_failed, 'run')} could not be recovered.")
+    return 1 if n_failed and not n_done else 0
+
+
 def _amr_study_codes(output_root: Path) -> list[str]:
     """Return every study code under *output_root* whose amr/ folder holds results.
 
@@ -4310,6 +4460,104 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Replace existing contig-to-bin attachments instead of skipping them.",
     )
     p_contig_to_bin.set_defaults(func=cmd_upload_contig_to_bin)
+
+    # ---- redump ----
+    p_redump = sub.add_parser(
+        "redump",
+        help="Recover R1/R2 for runs the archive serves as one unsplit FASTQ.",
+        description=(
+            "Some PAIRED runs are served as a single flat <run>.fastq.gz holding "
+            "both mates concatenated rather than a _1/_2 pair — the SRA loader "
+            "could not pair already-trimmed reads, so it stored each read as its "
+            "own single-read spot. fastq_url_1 then points at a file that is not "
+            "R1 and fastq_url_2 is empty. This runs `fasterq-dump --split-files` "
+            "to write the submitter's original R1 and R2 into "
+            "<output-dir>/<code>/rawreads/, then repoints fastq_url_1 and "
+            "fastq_url_2 at that local pair so `wmw process` picks it up."
+        ),
+    )
+    _add_airtable_flags(p_redump)
+    p_redump.add_argument(
+        "--study",
+        metavar="CODE",
+        required=True,
+        help="Study code (batch label) whose unsplit runs should be recovered.",
+    )
+    p_redump.add_argument(
+        "--run",
+        metavar="ACC",
+        action="append",
+        default=[],
+        help=(
+            "Recover only this run accession (repeatable). "
+            "Default: every run of the study that is served unsplit."
+        ),
+    )
+    p_redump.add_argument(
+        "--output-dir",
+        metavar="DIR",
+        default="",
+        help="Override DRAKKAR_OUTPUT_DIR from config.",
+    )
+    p_redump.add_argument(
+        "--studies-table",
+        metavar="TABLE",
+        default="",
+        help="Override Studies table name from config.",
+    )
+    p_redump.add_argument(
+        "--samples-table",
+        metavar="TABLE",
+        default="",
+        help="Override Samples table name from config.",
+    )
+    p_redump.add_argument(
+        "--threads",
+        metavar="N",
+        type=int,
+        default=6,
+        help="Threads for fasterq-dump and pigz (default: 6).",
+    )
+    p_redump.add_argument(
+        "--tmp-dir",
+        metavar="DIR",
+        default="",
+        help="Scratch directory for fasterq-dump (default: its own).",
+    )
+    p_redump.add_argument(
+        "--fasterq-dump",
+        metavar="PATH",
+        default="",
+        help="Path to the fasterq-dump binary (default: found on PATH).",
+    )
+    p_redump.add_argument(
+        "--no-gzip",
+        action="store_true",
+        default=False,
+        help="Leave the recovered FASTQ files uncompressed.",
+    )
+    p_redump.add_argument(
+        "--verify",
+        action="store_true",
+        default=False,
+        help=(
+            "Count the reads in both mates and refuse the pair unless they match. "
+            "Costs a full pass over each file."
+        ),
+    )
+    p_redump.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="Redump runs whose pair is already on disk instead of skipping them.",
+    )
+    p_redump.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="List what would be recovered without dumping or writing to Airtable.",
+    )
+    p_redump.set_defaults(func=cmd_redump)
 
     # ---- upload-amr ----
     p_upload_amr = sub.add_parser(
