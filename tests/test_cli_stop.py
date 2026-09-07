@@ -918,6 +918,70 @@ def test_resume_stage_picks_up_after_the_latest_finished_stage():
     assert cli._resume_stage(**{**done, "has_preprocessing": False, "has_annotation": False}) == "annotating"
 
 
+def _platform_process_args(tmp_path, workflow="preprocessing", only=False):
+    return argparse.Namespace(
+        batch="",
+        workflow=workflow,
+        only=only,
+        slurm=False,
+        output_dir=str(tmp_path),
+        studies_table="Studies",
+        samples_table="Samples",
+        genomes_table="Genomes",
+        airtable_token="",
+        base_id="",
+    )
+
+
+def _run_cmd_process_with_samples(args, samples):
+    ready_study = {
+        "id": "recStudy",
+        "fields": {"code": "ST001", "study_accession": "PRJEB001", "status": "ready"},
+    }
+    client = MagicMock()
+    client.fetch_studies_by_status.side_effect = (
+        lambda _table, status: [ready_study] if status == "ready" else []
+    )
+    client.fetch_samples_for_study.return_value = samples
+
+    with (
+        patch("wmw.cli._require_airtable", return_value=client),
+        patch("wmw.drakkar.build_input_tsv"),
+        patch("wmw.drakkar.generate_pipeline_script", return_value="#!/usr/bin/env bash\n") as gen,
+        patch("shutil.which", return_value=None),
+        patch("subprocess.run"),
+    ):
+        assert cli.cmd_process(args) == 0
+    return gen
+
+
+def test_cmd_process_passes_bgi_platform_from_airtable(tmp_path):
+    gen = _run_cmd_process_with_samples(
+        _platform_process_args(tmp_path),
+        [
+            {"id": "recS1", "fields": {"code": "SA01", "status": "use", "instrument_platform": "DNBSEQ"}},
+            {"id": "recS2", "fields": {"code": "SA02", "status": "use", "instrument_platform": "BGISEQ"}},
+        ],
+    )
+    assert gen.call_args.kwargs["platform"] == "bgi"
+
+
+def test_cmd_process_passes_illumina_platform_from_airtable(tmp_path):
+    gen = _run_cmd_process_with_samples(
+        _platform_process_args(tmp_path),
+        [{"id": "recS1", "fields": {"code": "SA01", "status": "use", "instrument_platform": "ILLUMINA"}}],
+    )
+    assert gen.call_args.kwargs["platform"] == "illumina"
+
+
+def test_cmd_process_omits_platform_when_preprocessing_is_not_run(tmp_path):
+    gen = _run_cmd_process_with_samples(
+        _platform_process_args(tmp_path, workflow="amr", only=True),
+        [{"id": "recS1", "fields": {"code": "SA01", "status": "use", "instrument_platform": "BGISEQ"}}],
+    )
+    assert gen.call_args.kwargs["platform"] is None
+
+
 def test_cmd_process_only_runs_the_requested_stage(tmp_path):
     work_dir = tmp_path / "ST001"
     args = argparse.Namespace(

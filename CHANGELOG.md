@@ -8,6 +8,35 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.6.7] - 2026-09-07
+
+### Added
+
+- **`wmw process` now tells Drakkar which sequencing platform a study came
+  from.** Drakkar 2.5.6 added `drakkar preprocessing --platform illumina|bgi`,
+  which picks the fastp adapter fallback sequences, whether polyG tails are
+  trimmed, and the `seqkit pair` read-name regexp used under `--sanitize`. It
+  defaults to `illumina`, so BGI/DNBSEQ (MGI) studies were being preprocessed
+  with TruSeq adapters and an Illumina-only polyG rule. wmw now reads the
+  Samples table's `instrument_platform` column (`SAMPLES_COL_INSTRUMENT_PLATFORM`),
+  which ENA and GSA both populate, and passes the matching `--platform` value on
+  the generated `preprocessing` line — in both the normal and the `resume` path.
+
+  `BGISEQ`, `DNBSEQ` and `MGISEQ` map to `bgi` and `ILLUMINA` to `illumina`;
+  the match is on substrings, so an instrument *model* (`DNBSEQ-T7`,
+  `BGISEQ-500`, `Illumina NovaSeq 6000`) resolves as readily as ENA's platform
+  name. Only rows with status `use` — the ones that reach the sample sheet —
+  are counted, and the flag is emitted only when the run actually includes the
+  preprocessing stage.
+
+  Drakkar takes `--platform` once per run rather than per sample, so a study
+  whose samples disagree has to settle on one: the majority platform wins,
+  ties and studies with no recognised platform fall back to `illumina`
+  (Drakkar's own default), and both cases are reported with the per-platform
+  counts so the study can be split if it matters.
+
+  Generated scripts now require Drakkar ≥ 2.5.6, which is the version that
+  accepts the flag.
 ## [0.6.6] - 2026-09-07
 
 ### Fixed

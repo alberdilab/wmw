@@ -259,22 +259,23 @@ wmw process [--batch BATCH]
 2. For `status="resume"`, upload any existing preprocessing/cataloging/profiling outputs to Airtable
 3. If resume still has a pending Drakkar task, restart at the stage after the latest one that left outputs behind
 4. For `status="ready"` or `"rerun"`, fetch the study's samples and write `{output_dir}/{code}/{code}.tsv` with samples whose status is `"use"`
-5. Write `{output_dir}/{code}/{code}.sh`, which chains the starting stage and **every stage after it** — `--only` limits it to the one stage
-6. Studies with `Priority = Low` add `--slurm-partition lazyqueue --slurm-qos lazy` to generated Drakkar commands
-7. Launch the script in a detached `screen` session named `{code}`
-8. Generated scripts update the Study status through `preprocessing`, `preprocessed`, `cataloging`, `cataloged`, `amring`, `amred`, `quantifying`, `quantified`, `annotating`, `Done`, `error`, or `stopped`
-9. Genome FASTA attachment uploads are detached into a `{code}-genome-upload`
+5. Resolve the study's sequencing platform from the samples' `instrument_platform` and pass it to `drakkar preprocessing --platform` (`illumina` or `bgi`); a study whose samples disagree is reported and preprocessed as its majority platform
+6. Write `{output_dir}/{code}/{code}.sh`, which chains the starting stage and **every stage after it** — `--only` limits it to the one stage
+7. Studies with `Priority = Low` add `--slurm-partition lazyqueue --slurm-qos lazy` to generated Drakkar commands
+8. Launch the script in a detached `screen` session named `{code}`
+9. Generated scripts update the Study status through `preprocessing`, `preprocessed`, `cataloging`, `cataloged`, `amring`, `amred`, `quantifying`, `quantified`, `annotating`, `Done`, `error`, or `stopped`
+10. Genome FASTA attachment uploads are detached into a `{code}-genome-upload`
    `screen` session when finalization is run outside an existing `screen`; if
    `screen` is unavailable, upload falls back to the current process
-10. Genomes are only created/updated and uploaded when completeness is above 50
+11. Genomes are only created/updated and uploaded when completeness is above 50
    and contamination is below 10; each assembly's binette contig-to-bin table is
    attached to its Samples row (see
    [wmw upload-contig-to-bin](#wmw-upload-contig-to-bin))
-11. Assemblies and the binette-refined final bins are transferred to ERDA in a
+12. Assemblies and the binette-refined final bins are transferred to ERDA in a
    detached `{code}-erda-upload` `screen` session (see
    [wmw upload-erda](#wmw-upload-erda)); the transfer runs after the Airtable
    writes, so a failed transfer never costs the metadata
-12. AMR runs between cataloging and profiling — see
+13. AMR runs between cataloging and profiling — see
    [the AMR workflow](#the-amr-workflow)
 
 **One run, every stage.** A generated script carries the study from its starting

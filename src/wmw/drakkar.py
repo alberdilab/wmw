@@ -139,6 +139,76 @@ _OPTIONAL_COLS = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Sequencing platform (drakkar --platform)
+# ---------------------------------------------------------------------------
+
+# `drakkar preprocessing --platform` picks the fastp adapter fallback sequences,
+# whether polyG tails are trimmed, and the seqkit read-name regexp used under
+# --sanitize. It takes one of these two values and defaults to illumina.
+PLATFORM_ILLUMINA = "illumina"
+PLATFORM_BGI = "bgi"
+DRAKKAR_PLATFORMS: tuple[str, ...] = (PLATFORM_ILLUMINA, PLATFORM_BGI)
+DEFAULT_PLATFORM = PLATFORM_ILLUMINA
+
+# Reported for samples whose instrument_platform is blank or names an archive
+# platform drakkar has no preprocessing profile for (nanopore, PacBio, …).
+UNKNOWN_PLATFORM = "unknown"
+
+# Matched as substrings, so an instrument *model* ("DNBSEQ-T7", "BGISEQ-500",
+# "Illumina NovaSeq 6000") resolves as readily as ENA's platform name.
+_PLATFORM_NEEDLES: tuple[tuple[str, str], ...] = (
+    ("bgiseq", PLATFORM_BGI),
+    ("dnbseq", PLATFORM_BGI),
+    ("mgiseq", PLATFORM_BGI),
+    ("illumina", PLATFORM_ILLUMINA),
+)
+
+
+def platform_from_instrument(value: str) -> str | None:
+    """Map an ENA/GSA instrument_platform (or model) onto a drakkar --platform value.
+
+    Returns None when *value* is blank or names a platform drakkar does not
+    preprocess, so the caller can tell "no information" apart from "illumina".
+    """
+    lowered = str(value or "").strip().lower()
+    if not lowered:
+        return None
+    for needle, platform in _PLATFORM_NEEDLES:
+        if needle in lowered:
+            return platform
+    return None
+
+
+def resolve_batch_platform(
+    samples: list[dict[str, Any]],
+) -> tuple[str, dict[str, int]]:
+    """Return the drakkar --platform value for a batch, plus its per-platform counts.
+
+    drakkar takes --platform once per run rather than per sample, so a batch
+    whose samples disagree has to settle on one: the most common wins, and both
+    a tie and a batch with no usable platform fall back to illumina, which is
+    drakkar's own default. The counts (keyed by the two platforms and
+    UNKNOWN_PLATFORM) let the caller report what it saw before deciding.
+
+    Only rows with status 'use' are counted — the same rows build_input_tsv
+    writes to the sample sheet.
+    """
+    counts = {PLATFORM_ILLUMINA: 0, PLATFORM_BGI: 0, UNKNOWN_PLATFORM: 0}
+    for rec in samples:
+        fields = rec.get("fields", rec)
+        if fields.get("status") != "use":
+            continue
+        resolved = platform_from_instrument(fields.get("instrument_platform", ""))
+        counts[resolved or UNKNOWN_PLATFORM] += 1
+
+    platform = max(
+        DRAKKAR_PLATFORMS,
+        key=lambda p: (counts[p], p == DEFAULT_PLATFORM),
+    )
+    return platform, counts
+
+
 def build_input_tsv(
     samples: list[dict[str, Any]],
     output_path: Path,
@@ -249,6 +319,7 @@ def _stage_drakkar_flags(
     time_multiplier: str | float | None,
     slurm_partition: str | None,
     slurm_qos: str | None,
+    platform: str | None = None,
 ) -> str:
     out_dir = shlex.quote(str(work_dir))
     bin_paths = shlex.quote(str(work_dir / "cataloging" / "final" / "all_bin_paths.txt"))
@@ -257,6 +328,10 @@ def _stage_drakkar_flags(
 
     if stage == "preprocessing":
         flags = f"-f {tsv_path} -o {work_dir} --fraction --nonpareil --env_path {DRAKKAR_ENV_PATH}"
+        # preprocessing is the only stage that reads --platform: it is what picks
+        # the adapter fallbacks, polyG trimming and read-name handling.
+        if platform:
+            flags += f" --platform {shlex.quote(str(platform))}"
     elif stage == "cataloging":
         flags = f"-f {tsv_path} -o {work_dir} --multicoverage --env_path {DRAKKAR_ENV_PATH}"
     elif stage == "amr":
@@ -360,6 +435,7 @@ def generate_pipeline_script(
     time_multiplier: str | float | None = None,
     slurm_partition: str | None = None,
     slurm_qos: str | None = None,
+    platform: str | None = None,
 ) -> str:
     """Return a bash script that runs *stages* back to back for *code*.
 
@@ -367,6 +443,10 @@ def generate_pipeline_script(
     EXIT trap, so a failure is attributed to the stage that caused it. A stage
     that fails stops the script — the stages after it need what it did not write —
     but a stage that succeeds always flows straight into the next one.
+
+    *platform* is passed to `drakkar preprocessing --platform`; it is ignored by
+    every other stage. Leaving it None omits the flag and lets drakkar apply its
+    own illumina default.
     """
     stages = tuple(stages)
     if not stages:
@@ -376,6 +456,11 @@ def generate_pipeline_script(
         raise ValueError(f"Unknown pipeline stage(s): {', '.join(unknown)}")
     if tsv_path is None and any(s in TSV_STAGES for s in stages):
         raise ValueError("tsv_path is required to run the preprocessing or cataloging stage.")
+    if platform is not None and platform not in DRAKKAR_PLATFORMS:
+        raise ValueError(
+            f"Unknown sequencing platform: {platform!r} "
+            f"(drakkar accepts {' or '.join(DRAKKAR_PLATFORMS)})."
+        )
 
     if conda_env:
         c_flag = "-p" if str(conda_env).startswith(("/", "~", ".")) else "-n"
@@ -441,6 +526,7 @@ def generate_pipeline_script(
             time_multiplier,
             slurm_partition,
             slurm_qos,
+            platform,
         )
         lines.extend(
             _stage_block(
@@ -478,6 +564,7 @@ def generate_full_pipeline_script(
     time_multiplier: str | float | None = None,
     slurm_partition: str | None = None,
     slurm_qos: str | None = None,
+    platform: str | None = None,
 ) -> str:
     """Return a bash script that runs the full pipeline for *code*:
     preprocessing → cataloging → amr → profiling → annotation."""
@@ -493,6 +580,7 @@ def generate_full_pipeline_script(
         time_multiplier=time_multiplier,
         slurm_partition=slurm_partition,
         slurm_qos=slurm_qos,
+        platform=platform,
     )
 
 
@@ -507,6 +595,7 @@ def generate_preprocessing_script(
     time_multiplier: str | float | None = None,
     slurm_partition: str | None = None,
     slurm_qos: str | None = None,
+    platform: str | None = None,
 ) -> str:
     """Return a bash script that runs preprocessing then cataloging for *code*."""
     return generate_pipeline_script(
@@ -521,6 +610,7 @@ def generate_preprocessing_script(
         time_multiplier=time_multiplier,
         slurm_partition=slurm_partition,
         slurm_qos=slurm_qos,
+        platform=platform,
     )
 
 

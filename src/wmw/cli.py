@@ -1239,6 +1239,36 @@ def _study_priority_drakkar_kwargs(fields: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _resolve_batch_platform(code: str, samples: list[dict]) -> str:
+    """Return the drakkar --platform value for *code*, reporting how it was chosen.
+
+    The value comes from the Samples table's instrument_platform column, which
+    ENA and GSA both fill. drakkar takes --platform once per run, so a study
+    whose samples disagree is flagged: the majority platform is used and the
+    minority is preprocessed with the wrong adapter fallbacks, which is worth
+    splitting the study over.
+    """
+    from wmw import drakkar
+
+    platform, counts = drakkar.resolve_batch_platform(samples)
+    named = {p: n for p, n in counts.items() if n}
+    if len(named) > 1:
+        breakdown = ", ".join(f"{n} {p}" for p, n in sorted(named.items()))
+        out.warn(
+            f"{code}: samples do not agree on a sequencing platform ({breakdown}); "
+            f"drakkar takes --platform per run, so all of them are preprocessed "
+            f"as {platform}."
+        )
+    elif counts[drakkar.UNKNOWN_PLATFORM]:
+        out.warn(
+            f"{code}: no recognised instrument_platform on any sample — "
+            f"preprocessing as {platform}."
+        )
+    else:
+        out.info(f"  Platform:      {platform}")
+    return platform
+
+
 def _stages_to_run(first_stage: str, args: argparse.Namespace) -> tuple[str, ...]:
     """Return the stages a launch script should chain, starting at *first_stage*.
 
@@ -1442,6 +1472,7 @@ def cmd_process(args: argparse.Namespace) -> int:
             )
 
             input_tsv: Path | None = None
+            platform: str | None = None
             if any(stage in drakkar.TSV_STAGES for stage in stages):
                 samples = client.fetch_samples_for_study(samples_table, study_accession)
                 use_samples = [r for r in samples if r.get("fields", r).get("status") == "use"]
@@ -1453,6 +1484,8 @@ def cmd_process(args: argparse.Namespace) -> int:
                 input_tsv = work_dir / f"{code}.tsv"
                 drakkar.build_input_tsv(samples, input_tsv)
                 out.info(f"  Input TSV:     {input_tsv}")
+                if "preprocessing" in stages:
+                    platform = _resolve_batch_platform(code, samples)
 
             work_dir.mkdir(parents=True, exist_ok=True)
             script_path = work_dir / f"{code}.sh"
@@ -1466,6 +1499,7 @@ def cmd_process(args: argparse.Namespace) -> int:
                 wmw_conda_env=wmw_conda_env,
                 memory_multiplier=fields.get("memory_boost") or None,
                 time_multiplier=fields.get("time_boost") or None,
+                platform=platform,
                 **priority_drakkar_kwargs,
             )
             _write_and_maybe_launch_script(code, script_path, script)
@@ -1492,6 +1526,11 @@ def cmd_process(args: argparse.Namespace) -> int:
         out.info(f"  Input TSV:     {input_tsv}")
 
         stages = _stages_to_run(workflow, args)
+        platform = (
+            _resolve_batch_platform(code, samples)
+            if "preprocessing" in stages
+            else None
+        )
         out.info(f"{code}: launching {' → '.join(stages)}.")
 
         script_path = work_dir / f"{code}.sh"
@@ -1505,6 +1544,7 @@ def cmd_process(args: argparse.Namespace) -> int:
             wmw_conda_env=wmw_conda_env,
             memory_multiplier=fields.get("memory_boost") or None,
             time_multiplier=fields.get("time_boost") or None,
+            platform=platform,
             **priority_drakkar_kwargs,
         )
 

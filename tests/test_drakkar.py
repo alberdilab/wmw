@@ -88,6 +88,124 @@ def test_build_input_tsv_creates_parent_dirs(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Sequencing platform
+# ---------------------------------------------------------------------------
+
+def _platform_sample(platform: str, code: str = "S001", status: str = "use") -> dict:
+    rec = _input_sample(code=code)
+    rec["fields"]["status"] = status
+    rec["fields"]["instrument_platform"] = platform
+    return rec
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("ILLUMINA", "illumina"),
+        ("Illumina NovaSeq 6000", "illumina"),
+        ("BGISEQ", "bgi"),
+        ("BGISEQ-500", "bgi"),
+        ("DNBSEQ", "bgi"),
+        ("DNBSEQ-T7", "bgi"),
+        ("MGISEQ-2000", "bgi"),
+        ("", None),
+        ("   ", None),
+        ("OXFORD_NANOPORE", None),
+        ("PACBIO_SMRT", None),
+    ],
+)
+def test_platform_from_instrument(value, expected):
+    assert drakkar.platform_from_instrument(value) == expected
+
+
+def test_resolve_batch_platform_all_illumina():
+    samples = [_platform_sample("ILLUMINA", code=f"S{i}") for i in range(3)]
+    platform, counts = drakkar.resolve_batch_platform(samples)
+    assert platform == "illumina"
+    assert counts == {"illumina": 3, "bgi": 0, "unknown": 0}
+
+
+def test_resolve_batch_platform_all_bgi():
+    samples = [_platform_sample("DNBSEQ-T7", code=f"S{i}") for i in range(2)]
+    platform, counts = drakkar.resolve_batch_platform(samples)
+    assert platform == "bgi"
+    assert counts == {"illumina": 0, "bgi": 2, "unknown": 0}
+
+
+def test_resolve_batch_platform_mixed_takes_the_majority():
+    samples = [
+        _platform_sample("BGISEQ", code="S1"),
+        _platform_sample("BGISEQ", code="S2"),
+        _platform_sample("ILLUMINA", code="S3"),
+    ]
+    platform, counts = drakkar.resolve_batch_platform(samples)
+    assert platform == "bgi"
+    assert counts == {"illumina": 1, "bgi": 2, "unknown": 0}
+
+
+def test_resolve_batch_platform_ties_go_to_illumina():
+    samples = [
+        _platform_sample("BGISEQ", code="S1"),
+        _platform_sample("ILLUMINA", code="S2"),
+    ]
+    platform, _ = drakkar.resolve_batch_platform(samples)
+    assert platform == "illumina"
+
+
+def test_resolve_batch_platform_unknown_falls_back_to_illumina():
+    samples = [_platform_sample("OXFORD_NANOPORE"), _platform_sample("", code="S2")]
+    platform, counts = drakkar.resolve_batch_platform(samples)
+    assert platform == "illumina"
+    assert counts == {"illumina": 0, "bgi": 0, "unknown": 2}
+
+
+def test_resolve_batch_platform_ignores_rows_not_in_use():
+    samples = [
+        _platform_sample("BGISEQ", code="S1", status="discard"),
+        _platform_sample("ILLUMINA", code="S2"),
+    ]
+    platform, counts = drakkar.resolve_batch_platform(samples)
+    assert platform == "illumina"
+    assert counts == {"illumina": 1, "bgi": 0, "unknown": 0}
+
+
+def test_platform_flag_only_reaches_preprocessing(tmp_path):
+    script = drakkar.generate_pipeline_script(
+        code="PRJ010",
+        work_dir=tmp_path,
+        conda_env="",
+        tsv_path=tmp_path / "PRJ010.tsv",
+        platform="bgi",
+    )
+    preprocessing_line = next(
+        line for line in script.splitlines() if line.startswith("drakkar preprocessing")
+    )
+    assert "--platform bgi" in preprocessing_line
+    assert script.count("--platform") == 1
+
+
+def test_platform_flag_omitted_when_not_given(tmp_path):
+    script = drakkar.generate_preprocessing_script(
+        code="PRJ011",
+        tsv_path=tmp_path / "PRJ011.tsv",
+        work_dir=tmp_path,
+        conda_env="",
+    )
+    assert "--platform" not in script
+
+
+def test_unknown_platform_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match="Unknown sequencing platform"):
+        drakkar.generate_pipeline_script(
+            code="PRJ012",
+            work_dir=tmp_path,
+            conda_env="",
+            tsv_path=tmp_path / "PRJ012.tsv",
+            platform="nanopore",
+        )
+
+
+# ---------------------------------------------------------------------------
 # generate_preprocessing_script
 # ---------------------------------------------------------------------------
 

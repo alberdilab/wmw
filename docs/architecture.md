@@ -145,6 +145,14 @@ rather than the stages it has not reached yet, and the script parks such a study
 profiling because it reads the assemblies cataloging produces and nothing the later
 stages add; `drakkar amr -i <work dir>` discovers them under `cataloging/megahit`.
 
+`platform_from_instrument()` maps a Samples-table `instrument_platform` (or instrument
+model) onto the `illumina`/`bgi` value `drakkar preprocessing --platform` takes, and
+`resolve_batch_platform()` settles a whole study on one of them — Drakkar takes the flag
+once per run, so the majority platform among the `use` rows wins, ties and studies with
+no recognised platform fall back to `illumina` (Drakkar's own default), and the returned
+per-platform counts let `wmw process` report a mixed study. The flag reaches only the
+`preprocessing` stage, which is the only one that reads it.
+
 `contig_to_bin_files()` collects binette's per-assembly
 `cataloging/binette/<assembly>/final_contig_to_bin.tsv` tables, which
 `gzip_contig_to_bin_tsv()` compresses under the sample's own name for the
