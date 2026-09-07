@@ -231,6 +231,7 @@ Pull ready studies from Airtable and launch a Drakkar workflow in detached `scre
 ```
 wmw process [--batch BATCH]
             [--workflow {preprocessing,cataloging,amr,profiling,annotating}]   # default: preprocessing
+            [--only]
             [--slurm]
             [--output-dir DIR]   # or config DRAKKAR_OUTPUT_DIR
             [--studies-table TABLE] [--samples-table TABLE] [--genomes-table TABLE]
@@ -240,9 +241,9 @@ wmw process [--batch BATCH]
 **Execution order:**
 1. Fetch studies where `status` is `"ready"`, `"resume"`, or `"rerun"` (filtered by `--batch` if given)
 2. For `status="resume"`, upload any existing preprocessing/cataloging/profiling outputs to Airtable
-3. If resume still has a pending Drakkar task, launch only the earliest missing task whose dependencies are satisfied
+3. If resume still has a pending Drakkar task, restart at the stage after the latest one that left outputs behind
 4. For `status="ready"` or `"rerun"`, fetch the study's samples and write `{output_dir}/{code}/{code}.tsv` with samples whose status is `"use"`
-5. Write `{output_dir}/{code}/{code}.sh`
+5. Write `{output_dir}/{code}/{code}.sh`, which chains the starting stage and **every stage after it** — `--only` limits it to the one stage
 6. Studies with `Priority = Low` add `--slurm-partition lazyqueue --slurm-qos lazy` to generated Drakkar commands
 7. Launch the script in a detached `screen` session named `{code}`
 8. Generated scripts update the Study status through `preprocessing`, `preprocessed`, `cataloging`, `cataloged`, `amring`, `amred`, `quantifying`, `quantified`, `annotating`, `Done`, `error`, or `stopped`
@@ -250,13 +251,28 @@ wmw process [--batch BATCH]
    `screen` session when finalization is run outside an existing `screen`; if
    `screen` is unavailable, upload falls back to the current process
 10. Genomes are only created/updated and uploaded when completeness is above 50
-   and contamination is below 10
+   and contamination is below 10; each assembly's binette contig-to-bin table is
+   attached to its Samples row (see
+   [wmw upload-contig-to-bin](#wmw-upload-contig-to-bin))
 11. Assemblies and the binette-refined final bins are transferred to ERDA in a
    detached `{code}-erda-upload` `screen` session (see
    [wmw upload-erda](#wmw-upload-erda)); the transfer runs after the Airtable
    writes, so a failed transfer never costs the metadata
 12. AMR runs between cataloging and profiling — see
    [the AMR workflow](#the-amr-workflow)
+
+**One run, every stage.** A generated script carries the study from its starting
+stage to the end of the pipeline: each stage reports its own start/end status and
+installs its own `EXIT` trap, and the next one begins as soon as the previous one
+succeeds. Only a stage that actually fails stops the script — the stages after it
+need what it did not write — so a full run needs one `wmw process` call, not one
+per stage. An Airtable write that fails is logged and does not stop the run: the
+science outputs are on disk either way, and the script parks the study in
+`resume` at the end so the next `wmw process` replays the finalization it missed.
+
+Set the study back to `resume` and run `wmw process --batch CODE` again to pick up
+after a genuine failure; the run restarts at the stage that failed and continues
+through the rest of the pipeline.
 
 ---
 
@@ -280,14 +296,16 @@ the labels the base's select actually offers. `drakkar amr -i` discovers the
 assemblies under `cataloging/megahit/{assembly}/{assembly}.fna` and names each
 one after its folder — the wmw sample code — so no manifest is needed.
 
-**Running it on its own**
+**Starting a run at AMR**
 
 ```
-wmw process --batch CODE --workflow amr [--slurm]
+wmw process --batch CODE --workflow amr [--slurm]          # amr → profiling → annotating
+wmw process --batch CODE --workflow amr --only [--slurm]   # amr alone
 ```
 
-A study with status `resume` also launches AMR automatically when cataloging
-output exists and `amr/amr_qc.tsv` does not, before it would launch profiling.
+A study with status `resume` also starts at AMR automatically when cataloging
+output exists and `amr/amr_qc.tsv` does not, and then carries on into profiling
+and annotation.
 
 **Outputs**
 
@@ -343,6 +361,40 @@ wmw upload-genome-files --study CODE
                         [--samples-table TABLE] [--genomes-table TABLE]
                         [--airtable-token TOKEN] [--base-id BASE_ID]
 ```
+
+---
+
+## wmw upload-contig-to-bin
+
+Attach binette's per-assembly contig-to-bin table to the Samples row of each
+assembly of one study, so the bin every binned contig ended up in can be read
+from the base. Cataloging finalization does this automatically; run it by hand
+to backfill a study cataloged before the column existed.
+
+```
+wmw upload-contig-to-bin --study CODE
+                         [--output-dir DIR]
+                         [--samples-table TABLE]
+                         [--replace-files]
+                         [--airtable-token TOKEN] [--base-id BASE_ID]
+```
+
+| Source | Airtable |
+|---|---|
+| `cataloging/binette/{assembly}/final_contig_to_bin.tsv` | Samples row of `{assembly}`, field `SAMPLES_COL_CONTIG_TO_BIN`, as `{assembly}_contig_to_bin.tsv.gz` |
+
+- The binette folder name is the assembly, which is the sample `code` — the same
+  convention megahit's output folders follow.
+- The table is gzipped and renamed after the sample, because every assembly's
+  file carries the same name and Airtable takes the attachment name from the
+  path.
+- A sample that already has the attachment is skipped; `--replace-files` clears
+  the field first and uploads again (Airtable's upload endpoint appends rather
+  than replaces).
+- A table still over Airtable's ~3.7 MB attachment limit after compression is
+  reported and skipped.
+- `SAMPLES_COL_CONTIG_TO_BIN` must name the attachment field; a blank key
+  disables the upload everywhere.
 
 ---
 

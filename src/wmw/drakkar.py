@@ -9,6 +9,7 @@ import shlex
 import shutil
 import subprocess
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Any
 
 from wmw import config as cfg
@@ -57,6 +58,9 @@ AMR_MANIFEST_FILE = "manifest.yaml"
 AMR_MANIFEST_CONFIG_KEY = "STUDIES_COL_FILE_AMR_MANIFEST"
 
 AMR_QC_FILE = Path("amr") / "amr_qc.tsv"
+
+# Binette's per-assembly contig membership table, attached to the Samples row.
+CONTIG_TO_BIN_FILE = "final_contig_to_bin.tsv"
 
 
 def amr_results_dir(work_dir: Path) -> Path:
@@ -179,6 +183,275 @@ def _with_slurm_options(
     return flags
 
 
+PIPELINE_STAGES: tuple[str, ...] = (
+    "preprocessing",
+    "cataloging",
+    "amr",
+    "profiling",
+    "annotating",
+)
+
+# (status reported when a stage starts, status reported when it finishes)
+_STAGE_STATUSES: dict[str, tuple[str, str]] = {
+    "preprocessing": ("preprocessing", "preprocessed"),
+    "cataloging":    ("cataloging", "cataloged"),
+    "amr":           ("amr", "amr_done"),
+    "profiling":     ("quantifying", "quantified"),
+    "annotating":    ("annotating", "completed"),
+}
+
+_STAGE_LABELS: dict[str, str] = {
+    "preprocessing": "preprocessing",
+    "cataloging": "cataloging",
+    "amr": "amr",
+    "profiling": "profiling",
+    "annotating": "annotation",
+}
+
+# Stages driven by the sample TSV rather than by what an earlier stage wrote.
+TSV_STAGES: tuple[str, ...] = ("preprocessing", "cataloging")
+
+# Stages drakkar runs from inside the working directory.
+_WORK_DIR_STAGES: tuple[str, ...] = ("amr", "profiling", "annotating")
+
+# Stages whose resource envelope the Airtable boost columns widen.
+_BOOSTED_STAGES: tuple[str, ...] = ("preprocessing", "amr")
+
+
+def stages_from(stage: str) -> tuple[str, ...]:
+    """Return *stage* plus every pipeline stage that follows it."""
+    if stage not in PIPELINE_STAGES:
+        raise ValueError(f"Unknown pipeline stage: {stage!r}")
+    return PIPELINE_STAGES[PIPELINE_STAGES.index(stage):]
+
+
+def _stage_drakkar_flags(
+    stage: str,
+    work_dir: Path,
+    tsv_path: Path | None,
+    slurm: bool,
+    memory_multiplier: str | float | None,
+    time_multiplier: str | float | None,
+    slurm_partition: str | None,
+    slurm_qos: str | None,
+) -> str:
+    out_dir = shlex.quote(str(work_dir))
+    bin_paths = shlex.quote(str(work_dir / "cataloging" / "final" / "all_bin_paths.txt"))
+    reads_dir = shlex.quote(str(work_dir / "preprocessing" / "final"))
+    bin_metadata = shlex.quote(str(work_dir / "cataloging" / "final" / "all_bin_metadata.csv"))
+
+    if stage == "preprocessing":
+        flags = f"-f {tsv_path} -o {work_dir} --fraction --nonpareil --env_path {DRAKKAR_ENV_PATH}"
+    elif stage == "cataloging":
+        flags = f"-f {tsv_path} -o {work_dir} --multicoverage --env_path {DRAKKAR_ENV_PATH}"
+    elif stage == "amr":
+        # drakkar amr -i discovers the assemblies cataloging wrote under
+        # cataloging/megahit, naming each one after its folder (the sample code).
+        flags = f"-i {out_dir} -o {out_dir} --env_path {DRAKKAR_ENV_PATH}"
+    elif stage == "profiling":
+        flags = (
+            f"-B {bin_paths} -r {reads_dir} -a 0.98 -t genomes -q {bin_metadata} "
+            f"-o {out_dir} --env_path {DRAKKAR_ENV_PATH}"
+        )
+    else:  # annotating
+        flags = f"-B {bin_paths} -o {out_dir} --env_path {DRAKKAR_ENV_PATH}"
+
+    if slurm:
+        flags += " -p slurm"
+    if stage in _BOOSTED_STAGES:
+        if memory_multiplier not in (None, "", "1", 1, 1.0):
+            flags += f" --memory-multiplier {memory_multiplier}"
+        if time_multiplier not in (None, "", "1", 1, 1.0):
+            flags += f" --time-multiplier {time_multiplier}"
+    return _with_slurm_options(
+        flags,
+        slurm_partition=slurm_partition,
+        slurm_qos=slurm_qos,
+    )
+
+
+def _stage_post_lines(stage: str, code: str, work_dir: Path) -> list[str]:
+    """Return the lines that run between a stage's command and its 'done' status."""
+    if stage in ("preprocessing", "cataloging"):
+        return [_rename_workflow_tsv_line(code, work_dir, stage)]
+    if stage == "amr":
+        return _amr_output_check_lines(work_dir)
+    if stage == "annotating":
+        return _annotation_output_check_lines(work_dir)
+    return []
+
+
+def _set_status_line(
+    wmw_cmd: str,
+    code: str,
+    stage: str,
+    status: str,
+    output_dir_arg: str,
+    guarded: bool = True,
+) -> str:
+    """Return one `wmw set-status` call.
+
+    Guarded calls hand a failure to `_wmw_bookkeeping_failed` instead of letting
+    `set -e` abort the run: an Airtable hiccup must not cost the pipeline the
+    stages it has not run yet.
+    """
+    line = f"{wmw_cmd} set-status --study {code} --workflow {stage} --status {status}{output_dir_arg}"
+    if guarded:
+        line += f" || _wmw_bookkeeping_failed {stage} {status}"
+    return line
+
+
+def _stage_block(
+    stage: str,
+    code: str,
+    work_dir: Path,
+    drakkar_cmd: str,
+    wmw_cmd: str,
+    output_dir_arg: str,
+) -> list[str]:
+    start_status, done_status = _STAGE_STATUSES[stage]
+    trap_fn = f"_on_exit_{stage}"
+    return [
+        "_WMW_SUCCESS=0",
+        f"{trap_fn}() {{",
+        '    if [ "$_WMW_SUCCESS" -ne 1 ]; then',
+        '        if [ -f "$_WMW_STOP_FILE" ]; then',
+        f"            {_set_status_line(wmw_cmd, code, stage, 'stopped', output_dir_arg, guarded=False)}",
+        "        else",
+        f"            {_set_status_line(wmw_cmd, code, stage, 'error', output_dir_arg, guarded=False)}",
+        "        fi",
+        "    fi",
+        "}",
+        f"trap {trap_fn} EXIT",
+        "",
+        _set_status_line(wmw_cmd, code, stage, start_status, output_dir_arg),
+        drakkar_cmd,
+        *_stage_post_lines(stage, code, work_dir),
+        _set_status_line(wmw_cmd, code, stage, done_status, output_dir_arg),
+        "_WMW_SUCCESS=1",
+        "",
+    ]
+
+
+def generate_pipeline_script(
+    code: str,
+    work_dir: Path,
+    conda_env: str,
+    stages: Sequence[str] = PIPELINE_STAGES,
+    tsv_path: Path | None = None,
+    slurm: bool = False,
+    wmw_conda_env: str = "",
+    memory_multiplier: str | float | None = None,
+    time_multiplier: str | float | None = None,
+    slurm_partition: str | None = None,
+    slurm_qos: str | None = None,
+) -> str:
+    """Return a bash script that runs *stages* back to back for *code*.
+
+    Every stage reports its own start/end status to Airtable and installs its own
+    EXIT trap, so a failure is attributed to the stage that caused it. A stage
+    that fails stops the script — the stages after it need what it did not write —
+    but a stage that succeeds always flows straight into the next one.
+    """
+    stages = tuple(stages)
+    if not stages:
+        raise ValueError("At least one pipeline stage is required.")
+    unknown = [s for s in stages if s not in PIPELINE_STAGES]
+    if unknown:
+        raise ValueError(f"Unknown pipeline stage(s): {', '.join(unknown)}")
+    if tsv_path is None and any(s in TSV_STAGES for s in stages):
+        raise ValueError("tsv_path is required to run the preprocessing or cataloging stage.")
+
+    if conda_env:
+        c_flag = "-p" if str(conda_env).startswith(("/", "~", ".")) else "-n"
+        drakkar_prefix = f"conda run {c_flag} {conda_env} drakkar"
+        conda_lines = [
+            'if [ -f "$(conda info --base 2>/dev/null)/etc/profile.d/conda.sh" ]; then',
+            '    source "$(conda info --base)/etc/profile.d/conda.sh"',
+            f"    conda activate {conda_env}",
+            "fi",
+            "",
+        ]
+    else:
+        drakkar_prefix = "drakkar"
+        conda_lines = []
+
+    if wmw_conda_env:
+        w_flag = "-p" if str(wmw_conda_env).startswith(("/", "~", ".")) else "-n"
+        wmw_cmd = f"conda run {w_flag} {wmw_conda_env} wmw"
+    else:
+        wmw_cmd = "wmw"
+
+    stop_file = shlex.quote(str(work_dir / ".wmw-stop"))
+    output_dir_arg = f" --output-dir {shlex.quote(str(work_dir.parent))}"
+
+    labels = [_STAGE_LABELS[s] for s in stages]
+    header = " → ".join(labels) if len(labels) > 1 else f"{labels[0]} only"
+
+    lines = [
+        "#!/usr/bin/env bash",
+        f"# wmw-generated script — batch {code} ({header})",
+        "# Do not edit manually; re-run wmw process to regenerate.",
+        "# AIRTABLE_TOKEN must be exported in the environment before launching.",
+        "",
+        "set -euo pipefail",
+        f"exec >> {work_dir}/{code}.out 2>> {work_dir}/{code}.err",
+        'echo ""',
+        "echo \"=== $(date '+%Y-%m-%d %H:%M:%S') ===\"",
+        "echo \"=== $(date '+%Y-%m-%d %H:%M:%S') ===\" >&2",
+        "",
+        *conda_lines,
+        f"_WMW_STOP_FILE={stop_file}",
+        'rm -f "$_WMW_STOP_FILE"',
+        "_WMW_BOOKKEEPING_FAILED=0",
+        "_wmw_bookkeeping_failed() {",
+        '    echo "wmw: Airtable update failed ($1 -> $2); continuing the pipeline." >&2',
+        "    _WMW_BOOKKEEPING_FAILED=1",
+        "}",
+        "",
+    ]
+
+    cd_emitted = False
+    for stage in stages:
+        if not cd_emitted and stage in _WORK_DIR_STAGES:
+            lines.append(f"cd {shlex.quote(str(work_dir))}")
+            lines.append("")
+            cd_emitted = True
+        drakkar_flags = _stage_drakkar_flags(
+            stage,
+            work_dir,
+            tsv_path,
+            slurm,
+            memory_multiplier,
+            time_multiplier,
+            slurm_partition,
+            slurm_qos,
+        )
+        lines.extend(
+            _stage_block(
+                stage,
+                code,
+                work_dir,
+                f"{drakkar_prefix} {stage} {drakkar_flags}",
+                wmw_cmd,
+                output_dir_arg,
+            )
+        )
+
+    # A stage whose Airtable bookkeeping failed still produced its outputs, so the
+    # run carries on; parking the study in 'resume' makes the next `wmw process`
+    # replay the finalisation that was missed.
+    lines.extend([
+        'if [ "$_WMW_BOOKKEEPING_FAILED" -ne 0 ]; then',
+        '    echo "wmw: some Airtable updates failed — leaving the study in '
+        "'resume' so wmw process can finish them.\" >&2",
+        f"    {_set_status_line(wmw_cmd, code, stages[-1], 'resume', output_dir_arg, guarded=False)} || true",
+        "fi",
+        "",
+    ])
+    return "\n".join(lines)
+
+
 def generate_full_pipeline_script(
     code: str,
     tsv_path: Path,
@@ -193,207 +466,19 @@ def generate_full_pipeline_script(
 ) -> str:
     """Return a bash script that runs the full pipeline for *code*:
     preprocessing → cataloging → amr → profiling → annotation."""
-    preprocessing_flags = f"-f {tsv_path} -o {work_dir} --fraction --nonpareil --env_path {DRAKKAR_ENV_PATH}"
-    if slurm:
-        preprocessing_flags += " -p slurm"
-    if memory_multiplier not in (None, "", "1", 1, 1.0):
-        preprocessing_flags += f" --memory-multiplier {memory_multiplier}"
-    if time_multiplier not in (None, "", "1", 1, 1.0):
-        preprocessing_flags += f" --time-multiplier {time_multiplier}"
-    preprocessing_flags = _with_slurm_options(
-        preprocessing_flags,
+    return generate_pipeline_script(
+        code=code,
+        work_dir=work_dir,
+        conda_env=conda_env,
+        stages=PIPELINE_STAGES,
+        tsv_path=tsv_path,
+        slurm=slurm,
+        wmw_conda_env=wmw_conda_env,
+        memory_multiplier=memory_multiplier,
+        time_multiplier=time_multiplier,
         slurm_partition=slurm_partition,
         slurm_qos=slurm_qos,
     )
-
-    cataloging_flags = f"-f {tsv_path} -o {work_dir} --multicoverage --env_path {DRAKKAR_ENV_PATH}"
-    if slurm:
-        cataloging_flags += " -p slurm"
-    cataloging_flags = _with_slurm_options(
-        cataloging_flags,
-        slurm_partition=slurm_partition,
-        slurm_qos=slurm_qos,
-    )
-
-    # AMR reads the assemblies cataloging just wrote, so it slots in before
-    # profiling; drakkar amr -i discovers them under cataloging/megahit.
-    amr_flags = f"-i {work_dir} -o {work_dir} --env_path {DRAKKAR_ENV_PATH}"
-    if slurm:
-        amr_flags += " -p slurm"
-    if memory_multiplier not in (None, "", "1", 1, 1.0):
-        amr_flags += f" --memory-multiplier {memory_multiplier}"
-    if time_multiplier not in (None, "", "1", 1, 1.0):
-        amr_flags += f" --time-multiplier {time_multiplier}"
-    amr_flags = _with_slurm_options(
-        amr_flags,
-        slurm_partition=slurm_partition,
-        slurm_qos=slurm_qos,
-    )
-
-    bin_paths = shlex.quote(str(work_dir / "cataloging" / "final" / "all_bin_paths.txt"))
-    reads_dir = shlex.quote(str(work_dir / "preprocessing" / "final"))
-    bin_metadata = shlex.quote(str(work_dir / "cataloging" / "final" / "all_bin_metadata.csv"))
-    out_dir = shlex.quote(str(work_dir))
-
-    profiling_flags = f"-B {bin_paths} -r {reads_dir} -a 0.98 -t genomes -q {bin_metadata} -o {out_dir} --env_path {DRAKKAR_ENV_PATH}"
-    if slurm:
-        profiling_flags += " -p slurm"
-    profiling_flags = _with_slurm_options(
-        profiling_flags,
-        slurm_partition=slurm_partition,
-        slurm_qos=slurm_qos,
-    )
-
-    annotation_flags = f"-B {bin_paths} -o {out_dir} --env_path {DRAKKAR_ENV_PATH}"
-    if slurm:
-        annotation_flags += " -p slurm"
-    annotation_flags = _with_slurm_options(
-        annotation_flags,
-        slurm_partition=slurm_partition,
-        slurm_qos=slurm_qos,
-    )
-
-    if conda_env:
-        c_flag = "-p" if str(conda_env).startswith(("/", "~", ".")) else "-n"
-        preprocessing_cmd = f"conda run {c_flag} {conda_env} drakkar preprocessing {preprocessing_flags}"
-        cataloging_cmd  = f"conda run {c_flag} {conda_env} drakkar cataloging {cataloging_flags}"
-        amr_cmd         = f"conda run {c_flag} {conda_env} drakkar amr {amr_flags}"
-        profiling_cmd   = f"conda run {c_flag} {conda_env} drakkar profiling {profiling_flags}"
-        annotation_cmd  = f"conda run {c_flag} {conda_env} drakkar annotating {annotation_flags}"
-        conda_lines = [
-            'if [ -f "$(conda info --base 2>/dev/null)/etc/profile.d/conda.sh" ]; then',
-            '    source "$(conda info --base)/etc/profile.d/conda.sh"',
-            f"    conda activate {conda_env}",
-            "fi",
-            "",
-        ]
-    else:
-        preprocessing_cmd = f"drakkar preprocessing {preprocessing_flags}"
-        cataloging_cmd  = f"drakkar cataloging {cataloging_flags}"
-        amr_cmd         = f"drakkar amr {amr_flags}"
-        profiling_cmd   = f"drakkar profiling {profiling_flags}"
-        annotation_cmd  = f"drakkar annotating {annotation_flags}"
-        conda_lines = []
-
-    if wmw_conda_env:
-        w_flag = "-p" if str(wmw_conda_env).startswith(("/", "~", ".")) else "-n"
-        wmw_cmd = f"conda run {w_flag} {wmw_conda_env} wmw"
-    else:
-        wmw_cmd = "wmw"
-
-    stop_file = shlex.quote(str(work_dir / ".wmw-stop"))
-    output_dir_arg = f" --output-dir {shlex.quote(str(work_dir.parent))}"
-
-    lines = [
-        "#!/usr/bin/env bash",
-        f"# wmw-generated script — batch {code} (preprocessing → cataloging → amr → profiling → annotation)",
-        "# Do not edit manually; re-run wmw process to regenerate.",
-        "# AIRTABLE_TOKEN must be exported in the environment before launching.",
-        "",
-        "set -euo pipefail",
-        f"exec >> {work_dir}/{code}.out 2>> {work_dir}/{code}.err",
-        'echo ""',
-        "echo \"=== $(date '+%Y-%m-%d %H:%M:%S') ===\"",
-        "echo \"=== $(date '+%Y-%m-%d %H:%M:%S') ===\" >&2",
-        "",
-        *conda_lines,
-        f"_WMW_STOP_FILE={stop_file}",
-        'rm -f "$_WMW_STOP_FILE"',
-        # preprocessing
-        "_WMW_SUCCESS=0",
-        "_on_exit_preprocessing() {",
-        '    if [ "$_WMW_SUCCESS" -ne 1 ]; then',
-        '        if [ -f "$_WMW_STOP_FILE" ]; then',
-        f"            {wmw_cmd} set-status --study {code} --workflow preprocessing --status stopped{output_dir_arg}",
-        "        else",
-        f"            {wmw_cmd} set-status --study {code} --workflow preprocessing --status error{output_dir_arg}",
-        "        fi",
-        "    fi",
-        "}",
-        "trap _on_exit_preprocessing EXIT",
-        "",
-        f"{wmw_cmd} set-status --study {code} --workflow preprocessing --status preprocessing{output_dir_arg}",
-        preprocessing_cmd,
-        _rename_workflow_tsv_line(code, work_dir, "preprocessing"),
-        f"{wmw_cmd} set-status --study {code} --workflow preprocessing --status preprocessed{output_dir_arg}",
-        "_WMW_SUCCESS=1",
-        "",
-        # cataloging
-        "_WMW_SUCCESS=0",
-        "_on_exit_cataloging() {",
-        '    if [ "$_WMW_SUCCESS" -ne 1 ]; then',
-        '        if [ -f "$_WMW_STOP_FILE" ]; then',
-        f"            {wmw_cmd} set-status --study {code} --workflow cataloging --status stopped{output_dir_arg}",
-        "        else",
-        f"            {wmw_cmd} set-status --study {code} --workflow cataloging --status error{output_dir_arg}",
-        "        fi",
-        "    fi",
-        "}",
-        "trap _on_exit_cataloging EXIT",
-        f"{wmw_cmd} set-status --study {code} --workflow cataloging --status cataloging{output_dir_arg}",
-        cataloging_cmd,
-        _rename_workflow_tsv_line(code, work_dir, "cataloging"),
-        f"{wmw_cmd} set-status --study {code} --workflow cataloging --status cataloged{output_dir_arg}",
-        "_WMW_SUCCESS=1",
-        "",
-        # amr
-        "_WMW_SUCCESS=0",
-        "_on_exit_amr() {",
-        '    if [ "$_WMW_SUCCESS" -ne 1 ]; then',
-        '        if [ -f "$_WMW_STOP_FILE" ]; then',
-        f"            {wmw_cmd} set-status --study {code} --workflow amr --status stopped{output_dir_arg}",
-        "        else",
-        f"            {wmw_cmd} set-status --study {code} --workflow amr --status error{output_dir_arg}",
-        "        fi",
-        "    fi",
-        "}",
-        "trap _on_exit_amr EXIT",
-        f"{wmw_cmd} set-status --study {code} --workflow amr --status amr{output_dir_arg}",
-        amr_cmd,
-        *_amr_output_check_lines(work_dir),
-        f"{wmw_cmd} set-status --study {code} --workflow amr --status amr_done{output_dir_arg}",
-        "_WMW_SUCCESS=1",
-        "",
-        # profiling
-        "_WMW_SUCCESS=0",
-        "_on_exit_profiling() {",
-        '    if [ "$_WMW_SUCCESS" -ne 1 ]; then',
-        '        if [ -f "$_WMW_STOP_FILE" ]; then',
-        f"            {wmw_cmd} set-status --study {code} --workflow profiling --status stopped{output_dir_arg}",
-        "        else",
-        f"            {wmw_cmd} set-status --study {code} --workflow profiling --status error{output_dir_arg}",
-        "        fi",
-        "    fi",
-        "}",
-        "trap _on_exit_profiling EXIT",
-        "",
-        f"cd {shlex.quote(str(work_dir))}",
-        f"{wmw_cmd} set-status --study {code} --workflow profiling --status quantifying{output_dir_arg}",
-        profiling_cmd,
-        f"{wmw_cmd} set-status --study {code} --workflow profiling --status quantified{output_dir_arg}",
-        "_WMW_SUCCESS=1",
-        "",
-        # annotation
-        "_WMW_SUCCESS=0",
-        "_on_exit_annotation() {",
-        '    if [ "$_WMW_SUCCESS" -ne 1 ]; then',
-        '        if [ -f "$_WMW_STOP_FILE" ]; then',
-        f"            {wmw_cmd} set-status --study {code} --workflow annotating --status stopped{output_dir_arg}",
-        "        else",
-        f"            {wmw_cmd} set-status --study {code} --workflow annotating --status error{output_dir_arg}",
-        "        fi",
-        "    fi",
-        "}",
-        "trap _on_exit_annotation EXIT",
-        "",
-        f"{wmw_cmd} set-status --study {code} --workflow annotating --status annotating{output_dir_arg}",
-        annotation_cmd,
-        *_annotation_output_check_lines(work_dir),
-        f"{wmw_cmd} set-status --study {code} --workflow annotating --status completed{output_dir_arg}",
-        "_WMW_SUCCESS=1",
-        "",
-    ]
-    return "\n".join(lines)
 
 
 def generate_preprocessing_script(
@@ -408,275 +493,20 @@ def generate_preprocessing_script(
     slurm_partition: str | None = None,
     slurm_qos: str | None = None,
 ) -> str:
-    """Return a bash script that runs drakkar preprocessing for *code* and updates Airtable."""
-    drakkar_flags = f"-f {tsv_path} -o {work_dir} --fraction --nonpareil --env_path {DRAKKAR_ENV_PATH}"
-    if slurm:
-        drakkar_flags += " -p slurm"
-    if memory_multiplier not in (None, "", "1", 1, 1.0):
-        drakkar_flags += f" --memory-multiplier {memory_multiplier}"
-    if time_multiplier not in (None, "", "1", 1, 1.0):
-        drakkar_flags += f" --time-multiplier {time_multiplier}"
-    drakkar_flags = _with_slurm_options(
-        drakkar_flags,
+    """Return a bash script that runs preprocessing then cataloging for *code*."""
+    return generate_pipeline_script(
+        code=code,
+        work_dir=work_dir,
+        conda_env=conda_env,
+        stages=("preprocessing", "cataloging"),
+        tsv_path=tsv_path,
+        slurm=slurm,
+        wmw_conda_env=wmw_conda_env,
+        memory_multiplier=memory_multiplier,
+        time_multiplier=time_multiplier,
         slurm_partition=slurm_partition,
         slurm_qos=slurm_qos,
     )
-
-    if conda_env:
-        c_flag = "-p" if str(conda_env).startswith(("/", "~", ".")) else "-n"
-        drakkar_cmd = f"conda run {c_flag} {conda_env} drakkar preprocessing {drakkar_flags}"
-        conda_lines = [
-            'if [ -f "$(conda info --base 2>/dev/null)/etc/profile.d/conda.sh" ]; then',
-            '    source "$(conda info --base)/etc/profile.d/conda.sh"',
-            f"    conda activate {conda_env}",
-            "fi",
-            "",
-        ]
-    else:
-        drakkar_cmd = f"drakkar preprocessing {drakkar_flags}"
-        conda_lines = []
-
-    if wmw_conda_env:
-        w_flag = "-p" if str(wmw_conda_env).startswith(("/", "~", ".")) else "-n"
-        wmw_cmd = f"conda run {w_flag} {wmw_conda_env} wmw"
-    else:
-        wmw_cmd = "wmw"
-
-    cataloging_flags = f"-f {tsv_path} -o {work_dir} --multicoverage --env_path {DRAKKAR_ENV_PATH}"
-    if slurm:
-        cataloging_flags += " -p slurm"
-    cataloging_flags = _with_slurm_options(
-        cataloging_flags,
-        slurm_partition=slurm_partition,
-        slurm_qos=slurm_qos,
-    )
-    if conda_env:
-        cataloging_cmd = f"conda run {c_flag} {conda_env} drakkar cataloging {cataloging_flags}"
-    else:
-        cataloging_cmd = f"drakkar cataloging {cataloging_flags}"
-
-    stop_file = shlex.quote(str(work_dir / ".wmw-stop"))
-    output_dir_arg = f" --output-dir {shlex.quote(str(work_dir.parent))}"
-
-    lines = [
-        "#!/usr/bin/env bash",
-        f"# wmw-generated script — batch {code} (preprocessing → cataloging)",
-        "# Do not edit manually; re-run wmw process to regenerate.",
-        "# AIRTABLE_TOKEN must be exported in the environment before launching.",
-        "",
-        "set -euo pipefail",
-        f"exec >> {work_dir}/{code}.out 2>> {work_dir}/{code}.err",
-        'echo ""',
-        "echo \"=== $(date '+%Y-%m-%d %H:%M:%S') ===\"",
-        "echo \"=== $(date '+%Y-%m-%d %H:%M:%S') ===\" >&2",
-        "",
-        *conda_lines,
-        f"_WMW_STOP_FILE={stop_file}",
-        'rm -f "$_WMW_STOP_FILE"',
-        "_WMW_SUCCESS=0",
-        "_on_exit_preprocessing() {",
-        '    if [ "$_WMW_SUCCESS" -ne 1 ]; then',
-        '        if [ -f "$_WMW_STOP_FILE" ]; then',
-        f"            {wmw_cmd} set-status --study {code} --workflow preprocessing --status stopped{output_dir_arg}",
-        "        else",
-        f"            {wmw_cmd} set-status --study {code} --workflow preprocessing --status error{output_dir_arg}",
-        "        fi",
-        "    fi",
-        "}",
-        "trap _on_exit_preprocessing EXIT",
-        "",
-        f"{wmw_cmd} set-status --study {code} --workflow preprocessing --status preprocessing{output_dir_arg}",
-        drakkar_cmd,
-        _rename_workflow_tsv_line(code, work_dir, "preprocessing"),
-        f"{wmw_cmd} set-status --study {code} --workflow preprocessing --status preprocessed{output_dir_arg}",
-        "_WMW_SUCCESS=1",
-        "",
-        "_WMW_SUCCESS=0",
-        "_on_exit_cataloging() {",
-        '    if [ "$_WMW_SUCCESS" -ne 1 ]; then',
-        '        if [ -f "$_WMW_STOP_FILE" ]; then',
-        f"            {wmw_cmd} set-status --study {code} --workflow cataloging --status stopped{output_dir_arg}",
-        "        else",
-        f"            {wmw_cmd} set-status --study {code} --workflow cataloging --status error{output_dir_arg}",
-        "        fi",
-        "    fi",
-        "}",
-        "trap _on_exit_cataloging EXIT",
-        f"{wmw_cmd} set-status --study {code} --workflow cataloging --status cataloging{output_dir_arg}",
-        cataloging_cmd,
-        _rename_workflow_tsv_line(code, work_dir, "cataloging"),
-        f"{wmw_cmd} set-status --study {code} --workflow cataloging --status cataloged{output_dir_arg}",
-        "_WMW_SUCCESS=1",
-        "",
-    ]
-    return "\n".join(lines)
-
-
-def generate_profiling_script(
-    code: str,
-    work_dir: Path,
-    conda_env: str,
-    slurm: bool = False,
-    wmw_conda_env: str = "",
-    slurm_partition: str | None = None,
-    slurm_qos: str | None = None,
-) -> str:
-    """Return a bash script that runs drakkar profiling for *code* and updates Airtable."""
-    bin_paths = shlex.quote(str(work_dir / "cataloging" / "final" / "all_bin_paths.txt"))
-    reads_dir = shlex.quote(str(work_dir / "preprocessing" / "final"))
-    bin_metadata = shlex.quote(str(work_dir / "cataloging" / "final" / "all_bin_metadata.csv"))
-    out_dir = shlex.quote(str(work_dir))
-
-    profiling_flags = f"-B {bin_paths} -r {reads_dir} -a 0.98 -t genomes -q {bin_metadata} -o {out_dir} --env_path {DRAKKAR_ENV_PATH}"
-    if slurm:
-        profiling_flags += " -p slurm"
-    profiling_flags = _with_slurm_options(
-        profiling_flags,
-        slurm_partition=slurm_partition,
-        slurm_qos=slurm_qos,
-    )
-
-    if conda_env:
-        c_flag = "-p" if str(conda_env).startswith(("/", "~", ".")) else "-n"
-        profiling_cmd = f"conda run {c_flag} {conda_env} drakkar profiling {profiling_flags}"
-        conda_lines = [
-            'if [ -f "$(conda info --base 2>/dev/null)/etc/profile.d/conda.sh" ]; then',
-            '    source "$(conda info --base)/etc/profile.d/conda.sh"',
-            f"    conda activate {conda_env}",
-            "fi",
-            "",
-        ]
-    else:
-        profiling_cmd = f"drakkar profiling {profiling_flags}"
-        conda_lines = []
-
-    if wmw_conda_env:
-        w_flag = "-p" if str(wmw_conda_env).startswith(("/", "~", ".")) else "-n"
-        wmw_cmd = f"conda run {w_flag} {wmw_conda_env} wmw"
-    else:
-        wmw_cmd = "wmw"
-
-    stop_file = shlex.quote(str(work_dir / ".wmw-stop"))
-    output_dir_arg = f" --output-dir {shlex.quote(str(work_dir.parent))}"
-
-    lines = [
-        "#!/usr/bin/env bash",
-        f"# wmw-generated script — batch {code} (profiling only)",
-        "# Do not edit manually; re-run wmw process to regenerate.",
-        "# AIRTABLE_TOKEN must be exported in the environment before launching.",
-        "",
-        "set -euo pipefail",
-        f"exec >> {work_dir}/{code}.out 2>> {work_dir}/{code}.err",
-        'echo ""',
-        "echo \"=== $(date '+%Y-%m-%d %H:%M:%S') ===\"",
-        "echo \"=== $(date '+%Y-%m-%d %H:%M:%S') ===\" >&2",
-        "",
-        *conda_lines,
-        f"_WMW_STOP_FILE={stop_file}",
-        'rm -f "$_WMW_STOP_FILE"',
-        "_WMW_SUCCESS=0",
-        "_on_exit() {",
-        '    if [ "$_WMW_SUCCESS" -ne 1 ]; then',
-        '        if [ -f "$_WMW_STOP_FILE" ]; then',
-        f"            {wmw_cmd} set-status --study {code} --workflow profiling --status stopped{output_dir_arg}",
-        "        else",
-        f"            {wmw_cmd} set-status --study {code} --workflow profiling --status error{output_dir_arg}",
-        "        fi",
-        "    fi",
-        "}",
-        "trap _on_exit EXIT",
-        "",
-        f"cd {shlex.quote(str(work_dir))}",
-        f"{wmw_cmd} set-status --study {code} --workflow profiling --status quantifying{output_dir_arg}",
-        profiling_cmd,
-        f"{wmw_cmd} set-status --study {code} --workflow profiling --status quantified{output_dir_arg}",
-        "_WMW_SUCCESS=1",
-        "",
-    ]
-    return "\n".join(lines)
-
-
-def generate_annotation_script(
-    code: str,
-    work_dir: Path,
-    conda_env: str,
-    slurm: bool = False,
-    wmw_conda_env: str = "",
-    slurm_partition: str | None = None,
-    slurm_qos: str | None = None,
-) -> str:
-    """Return a bash script that runs drakkar annotating for *code* and updates Airtable."""
-    bin_paths = shlex.quote(str(work_dir / "cataloging" / "final" / "all_bin_paths.txt"))
-    out_dir = shlex.quote(str(work_dir))
-
-    annotation_flags = f"-B {bin_paths} -o {out_dir} --env_path {DRAKKAR_ENV_PATH}"
-    if slurm:
-        annotation_flags += " -p slurm"
-    annotation_flags = _with_slurm_options(
-        annotation_flags,
-        slurm_partition=slurm_partition,
-        slurm_qos=slurm_qos,
-    )
-
-    if conda_env:
-        c_flag = "-p" if str(conda_env).startswith(("/", "~", ".")) else "-n"
-        annotation_cmd = f"conda run {c_flag} {conda_env} drakkar annotating {annotation_flags}"
-        conda_lines = [
-            'if [ -f "$(conda info --base 2>/dev/null)/etc/profile.d/conda.sh" ]; then',
-            '    source "$(conda info --base)/etc/profile.d/conda.sh"',
-            f"    conda activate {conda_env}",
-            "fi",
-            "",
-        ]
-    else:
-        annotation_cmd = f"drakkar annotating {annotation_flags}"
-        conda_lines = []
-
-    if wmw_conda_env:
-        w_flag = "-p" if str(wmw_conda_env).startswith(("/", "~", ".")) else "-n"
-        wmw_cmd = f"conda run {w_flag} {wmw_conda_env} wmw"
-    else:
-        wmw_cmd = "wmw"
-
-    stop_file = shlex.quote(str(work_dir / ".wmw-stop"))
-    output_dir_arg = f" --output-dir {shlex.quote(str(work_dir.parent))}"
-
-    lines = [
-        "#!/usr/bin/env bash",
-        f"# wmw-generated script — batch {code} (annotation only)",
-        "# Do not edit manually; re-run wmw process to regenerate.",
-        "# AIRTABLE_TOKEN must be exported in the environment before launching.",
-        "",
-        "set -euo pipefail",
-        f"exec >> {work_dir}/{code}.out 2>> {work_dir}/{code}.err",
-        'echo ""',
-        "echo \"=== $(date '+%Y-%m-%d %H:%M:%S') ===\"",
-        "echo \"=== $(date '+%Y-%m-%d %H:%M:%S') ===\" >&2",
-        "",
-        *conda_lines,
-        f"_WMW_STOP_FILE={stop_file}",
-        'rm -f "$_WMW_STOP_FILE"',
-        "_WMW_SUCCESS=0",
-        "_on_exit() {",
-        '    if [ "$_WMW_SUCCESS" -ne 1 ]; then',
-        '        if [ -f "$_WMW_STOP_FILE" ]; then',
-        f"            {wmw_cmd} set-status --study {code} --workflow annotating --status stopped{output_dir_arg}",
-        "        else",
-        f"            {wmw_cmd} set-status --study {code} --workflow annotating --status error{output_dir_arg}",
-        "        fi",
-        "    fi",
-        "}",
-        "trap _on_exit EXIT",
-        "",
-        f"cd {shlex.quote(str(work_dir))}",
-        f"{wmw_cmd} set-status --study {code} --workflow annotating --status annotating{output_dir_arg}",
-        annotation_cmd,
-        *_annotation_output_check_lines(work_dir),
-        f"{wmw_cmd} set-status --study {code} --workflow annotating --status completed{output_dir_arg}",
-        "_WMW_SUCCESS=1",
-        "",
-    ]
-    return "\n".join(lines)
 
 
 def generate_cataloging_script(
@@ -689,74 +519,18 @@ def generate_cataloging_script(
     slurm_partition: str | None = None,
     slurm_qos: str | None = None,
 ) -> str:
-    """Return a bash script that runs drakkar cataloging only for *code* and updates Airtable."""
-    cataloging_flags = f"-f {tsv_path} -o {work_dir} --multicoverage --env_path {DRAKKAR_ENV_PATH}"
-    if slurm:
-        cataloging_flags += " -p slurm"
-    cataloging_flags = _with_slurm_options(
-        cataloging_flags,
+    """Return a bash script that runs drakkar cataloging only for *code*."""
+    return generate_pipeline_script(
+        code=code,
+        work_dir=work_dir,
+        conda_env=conda_env,
+        stages=("cataloging",),
+        tsv_path=tsv_path,
+        slurm=slurm,
+        wmw_conda_env=wmw_conda_env,
         slurm_partition=slurm_partition,
         slurm_qos=slurm_qos,
     )
-
-    if conda_env:
-        c_flag = "-p" if str(conda_env).startswith(("/", "~", ".")) else "-n"
-        cataloging_cmd = f"conda run {c_flag} {conda_env} drakkar cataloging {cataloging_flags}"
-        conda_lines = [
-            'if [ -f "$(conda info --base 2>/dev/null)/etc/profile.d/conda.sh" ]; then',
-            '    source "$(conda info --base)/etc/profile.d/conda.sh"',
-            f"    conda activate {conda_env}",
-            "fi",
-            "",
-        ]
-    else:
-        cataloging_cmd = f"drakkar cataloging {cataloging_flags}"
-        conda_lines = []
-
-    if wmw_conda_env:
-        w_flag = "-p" if str(wmw_conda_env).startswith(("/", "~", ".")) else "-n"
-        wmw_cmd = f"conda run {w_flag} {wmw_conda_env} wmw"
-    else:
-        wmw_cmd = "wmw"
-
-    stop_file = shlex.quote(str(work_dir / ".wmw-stop"))
-    output_dir_arg = f" --output-dir {shlex.quote(str(work_dir.parent))}"
-
-    lines = [
-        "#!/usr/bin/env bash",
-        f"# wmw-generated script — batch {code} (cataloging only)",
-        "# Do not edit manually; re-run wmw process to regenerate.",
-        "# AIRTABLE_TOKEN must be exported in the environment before launching.",
-        "",
-        "set -euo pipefail",
-        f"exec >> {work_dir}/{code}.out 2>> {work_dir}/{code}.err",
-        'echo ""',
-        "echo \"=== $(date '+%Y-%m-%d %H:%M:%S') ===\"",
-        "echo \"=== $(date '+%Y-%m-%d %H:%M:%S') ===\" >&2",
-        "",
-        *conda_lines,
-        f"_WMW_STOP_FILE={stop_file}",
-        'rm -f "$_WMW_STOP_FILE"',
-        "_WMW_SUCCESS=0",
-        "_on_exit() {",
-        '    if [ "$_WMW_SUCCESS" -ne 1 ]; then',
-        '        if [ -f "$_WMW_STOP_FILE" ]; then',
-        f"            {wmw_cmd} set-status --study {code} --workflow cataloging --status stopped{output_dir_arg}",
-        "        else",
-        f"            {wmw_cmd} set-status --study {code} --workflow cataloging --status error{output_dir_arg}",
-        "        fi",
-        "    fi",
-        "}",
-        "trap _on_exit EXIT",
-        "",
-        f"{wmw_cmd} set-status --study {code} --workflow cataloging --status cataloging{output_dir_arg}",
-        cataloging_cmd,
-        _rename_workflow_tsv_line(code, work_dir, "cataloging"),
-        f"{wmw_cmd} set-status --study {code} --workflow cataloging --status cataloged{output_dir_arg}",
-        "_WMW_SUCCESS=1",
-        "",
-    ]
-    return "\n".join(lines)
 
 
 def generate_amr_script(
@@ -770,90 +544,67 @@ def generate_amr_script(
     slurm_partition: str | None = None,
     slurm_qos: str | None = None,
 ) -> str:
-    """Return a bash script that runs drakkar amr for *code* and updates Airtable.
+    """Return a bash script that runs drakkar amr only for *code*.
 
     AMR runs between cataloging and profiling: it needs the assemblies
     cataloging produces and nothing profiling or annotating adds.
-
-    ``drakkar amr -i`` discovers assemblies under cataloging/megahit of a drakkar
-    output directory and names each one after its folder, which is the wmw
-    sample code — so the amr_qc.tsv rows come back keyed the way Airtable
-    expects without a manifest.
     """
-    out_dir = shlex.quote(str(work_dir))
-
-    amr_flags = f"-i {out_dir} -o {out_dir} --env_path {DRAKKAR_ENV_PATH}"
-    if slurm:
-        amr_flags += " -p slurm"
-    if memory_multiplier not in (None, "", "1", 1, 1.0):
-        amr_flags += f" --memory-multiplier {memory_multiplier}"
-    if time_multiplier not in (None, "", "1", 1, 1.0):
-        amr_flags += f" --time-multiplier {time_multiplier}"
-    amr_flags = _with_slurm_options(
-        amr_flags,
+    return generate_pipeline_script(
+        code=code,
+        work_dir=work_dir,
+        conda_env=conda_env,
+        stages=("amr",),
+        slurm=slurm,
+        wmw_conda_env=wmw_conda_env,
+        memory_multiplier=memory_multiplier,
+        time_multiplier=time_multiplier,
         slurm_partition=slurm_partition,
         slurm_qos=slurm_qos,
     )
 
-    if conda_env:
-        c_flag = "-p" if str(conda_env).startswith(("/", "~", ".")) else "-n"
-        amr_cmd = f"conda run {c_flag} {conda_env} drakkar amr {amr_flags}"
-        conda_lines = [
-            'if [ -f "$(conda info --base 2>/dev/null)/etc/profile.d/conda.sh" ]; then',
-            '    source "$(conda info --base)/etc/profile.d/conda.sh"',
-            f"    conda activate {conda_env}",
-            "fi",
-            "",
-        ]
-    else:
-        amr_cmd = f"drakkar amr {amr_flags}"
-        conda_lines = []
 
-    if wmw_conda_env:
-        w_flag = "-p" if str(wmw_conda_env).startswith(("/", "~", ".")) else "-n"
-        wmw_cmd = f"conda run {w_flag} {wmw_conda_env} wmw"
-    else:
-        wmw_cmd = "wmw"
+def generate_profiling_script(
+    code: str,
+    work_dir: Path,
+    conda_env: str,
+    slurm: bool = False,
+    wmw_conda_env: str = "",
+    slurm_partition: str | None = None,
+    slurm_qos: str | None = None,
+) -> str:
+    """Return a bash script that runs drakkar profiling only for *code*."""
+    return generate_pipeline_script(
+        code=code,
+        work_dir=work_dir,
+        conda_env=conda_env,
+        stages=("profiling",),
+        slurm=slurm,
+        wmw_conda_env=wmw_conda_env,
+        slurm_partition=slurm_partition,
+        slurm_qos=slurm_qos,
+    )
 
-    stop_file = shlex.quote(str(work_dir / ".wmw-stop"))
-    output_dir_arg = f" --output-dir {shlex.quote(str(work_dir.parent))}"
 
-    lines = [
-        "#!/usr/bin/env bash",
-        f"# wmw-generated script — batch {code} (AMR only)",
-        "# Do not edit manually; re-run wmw process to regenerate.",
-        "# AIRTABLE_TOKEN must be exported in the environment before launching.",
-        "",
-        "set -euo pipefail",
-        f"exec >> {work_dir}/{code}.out 2>> {work_dir}/{code}.err",
-        'echo ""',
-        "echo \"=== $(date '+%Y-%m-%d %H:%M:%S') ===\"",
-        "echo \"=== $(date '+%Y-%m-%d %H:%M:%S') ===\" >&2",
-        "",
-        *conda_lines,
-        f"_WMW_STOP_FILE={stop_file}",
-        'rm -f "$_WMW_STOP_FILE"',
-        "_WMW_SUCCESS=0",
-        "_on_exit() {",
-        '    if [ "$_WMW_SUCCESS" -ne 1 ]; then',
-        '        if [ -f "$_WMW_STOP_FILE" ]; then',
-        f"            {wmw_cmd} set-status --study {code} --workflow amr --status stopped{output_dir_arg}",
-        "        else",
-        f"            {wmw_cmd} set-status --study {code} --workflow amr --status error{output_dir_arg}",
-        "        fi",
-        "    fi",
-        "}",
-        "trap _on_exit EXIT",
-        "",
-        f"cd {shlex.quote(str(work_dir))}",
-        f"{wmw_cmd} set-status --study {code} --workflow amr --status amr{output_dir_arg}",
-        amr_cmd,
-        *_amr_output_check_lines(work_dir),
-        f"{wmw_cmd} set-status --study {code} --workflow amr --status amr_done{output_dir_arg}",
-        "_WMW_SUCCESS=1",
-        "",
-    ]
-    return "\n".join(lines)
+def generate_annotation_script(
+    code: str,
+    work_dir: Path,
+    conda_env: str,
+    slurm: bool = False,
+    wmw_conda_env: str = "",
+    slurm_partition: str | None = None,
+    slurm_qos: str | None = None,
+) -> str:
+    """Return a bash script that runs drakkar annotating only for *code*."""
+    return generate_pipeline_script(
+        code=code,
+        work_dir=work_dir,
+        conda_env=conda_env,
+        stages=("annotating",),
+        slurm=slurm,
+        wmw_conda_env=wmw_conda_env,
+        slurm_partition=slurm_partition,
+        slurm_qos=slurm_qos,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1462,6 +1213,17 @@ def parse_genome_taxonomy_tsv(tsv_path: Path) -> dict[str, dict[str, Any]]:
     return result
 
 
+def _gzip_beside(source: Path, gz_path: Path) -> Path:
+    """Compress *source* to *gz_path*, reusing an archive that is already current."""
+    if gz_path.exists() and gz_path.stat().st_size > 0:
+        if gz_path.stat().st_mtime >= source.stat().st_mtime:
+            return gz_path
+
+    with source.open("rb") as src, gzip.open(gz_path, "wb") as dst:
+        shutil.copyfileobj(src, dst)
+    return gz_path
+
+
 def gzip_annotation_tsv(tsv_path: Path) -> Path:
     """Compress a per-genome annotation TSV beside the source and return .tsv.gz."""
     tsv_path = Path(tsv_path)
@@ -1472,17 +1234,40 @@ def gzip_annotation_tsv(tsv_path: Path) -> Path:
         gz_path = tsv_path.with_suffix(".tsv.gz")
     else:
         gz_path = tsv_path.with_name(f"{tsv_path.name}.tsv.gz")
+    return _gzip_beside(tsv_path, gz_path)
 
-    if gz_path.exists() and gz_path.stat().st_size > 0:
-        try:
-            if gz_path.stat().st_mtime >= tsv_path.stat().st_mtime:
-                return gz_path
-        except FileNotFoundError:
-            raise
 
-    with tsv_path.open("rb") as src, gzip.open(gz_path, "wb") as dst:
-        shutil.copyfileobj(src, dst)
-    return gz_path
+def contig_to_bin_files(work_dir: Path) -> dict[str, Path]:
+    """Return {assembly: final_contig_to_bin.tsv} for a drakkar cataloging run.
+
+    Binette writes one table per assembly as
+    cataloging/binette/{assembly}/final_contig_to_bin.tsv, listing the bin each
+    binned contig ended up in. The folder is named after the assembly, which is
+    the wmw sample code — the same convention megahit's output follows.
+    """
+    binette_dir = Path(work_dir) / "cataloging" / "binette"
+    if not binette_dir.is_dir():
+        return {}
+    return {
+        path.parent.name: path
+        for path in sorted(binette_dir.glob(f"*/{CONTIG_TO_BIN_FILE}"))
+        if path.is_file() and path.parent.name
+    }
+
+
+def gzip_contig_to_bin_tsv(tsv_path: Path, sample_code: str) -> Path:
+    """Compress a contig-to-bin table beside the source, named after the sample.
+
+    Every assembly's table carries the same file name, and Airtable takes the
+    attachment name from the path, so the archive is named
+    {sample_code}_contig_to_bin.tsv.gz to keep the samples apart in the base.
+    """
+    tsv_path = Path(tsv_path)
+    if tsv_path.name.lower().endswith(".gz"):
+        return tsv_path
+    code = str(sample_code).strip()
+    stem = f"{code}_contig_to_bin" if code else tsv_path.stem
+    return _gzip_beside(tsv_path, tsv_path.with_name(f"{stem}.tsv.gz"))
 
 
 def _strip_fasta_suffix(raw: str) -> str:
@@ -1556,16 +1341,7 @@ def gzip_fasta(fasta_path: Path) -> Path:
     else:
         gz_path = fasta_path.with_name(f"{fasta_path.name}.fa.gz")
 
-    if gz_path.exists() and gz_path.stat().st_size > 0:
-        try:
-            if gz_path.stat().st_mtime >= fasta_path.stat().st_mtime:
-                return gz_path
-        except FileNotFoundError:
-            raise
-
-    with fasta_path.open("rb") as src, gzip.open(gz_path, "wb") as dst:
-        shutil.copyfileobj(src, dst)
-    return gz_path
+    return _gzip_beside(fasta_path, gz_path)
 
 
 def parse_bin_metadata_csv(csv_path: Path) -> list[dict[str, Any]]:

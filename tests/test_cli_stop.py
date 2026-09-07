@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, call, patch
 
 from wmw import cli
 from wmw import config as cfg
+from wmw import drakkar
 
 
 def _completed(returncode: int = 0, stdout: str = "", stderr: str = ""):
@@ -762,6 +763,12 @@ def test_cmd_process_resume_launches_amr_when_cataloging_done(tmp_path):
     script_text = script_path.read_text()
     assert "drakkar amr" in script_text
     assert "--workflow amr" in script_text
+    # …and the stages after it, so no boundary needs another wmw process call.
+    assert (
+        script_text.index("drakkar amr")
+        < script_text.index("drakkar profiling")
+        < script_text.index("drakkar annotating")
+    )
     run.assert_not_called()  # screen not available, script written but not launched
 
 
@@ -877,8 +884,7 @@ def test_cmd_process_resume_without_outputs_launches_preprocessing(tmp_path):
     with (
         patch("wmw.cli._require_airtable", return_value=client),
         patch("wmw.drakkar.build_input_tsv") as build_input_tsv,
-        patch("wmw.drakkar.generate_preprocessing_script", return_value="#!/usr/bin/env bash\n") as gen_pre,
-        patch("wmw.drakkar.generate_cataloging_script") as gen_cat,
+        patch("wmw.drakkar.generate_pipeline_script", return_value="#!/usr/bin/env bash\n") as gen_script,
         patch("shutil.which", return_value="/usr/bin/screen"),
         patch("subprocess.run") as run,
     ):
@@ -887,13 +893,72 @@ def test_cmd_process_resume_without_outputs_launches_preprocessing(tmp_path):
     client.update_sample_preprocessing_stats.assert_not_called()
     client.update_sample_cataloging_stats.assert_not_called()
     build_input_tsv.assert_called_once()
-    gen_pre.assert_called_once()
-    gen_cat.assert_not_called()
+    gen_script.assert_called_once()
+    assert gen_script.call_args.kwargs["stages"] == drakkar.PIPELINE_STAGES
     assert (work_dir / "ST001.sh").exists()
     run.assert_called_once_with(
         ["screen", "-dmS", "ST001", "bash", str(work_dir / "ST001.sh")],
         check=True,
     )
+
+
+def test_resume_stage_picks_up_after_the_latest_finished_stage():
+    done = dict(
+        has_preprocessing=True,
+        has_cataloging=True,
+        has_amr=True,
+        has_profiling=True,
+        has_annotation=True,
+    )
+    assert cli._resume_stage(**done) is None
+    assert cli._resume_stage(**{**done, "has_annotation": False}) == "annotating"
+    assert cli._resume_stage(**{**done, "has_profiling": False, "has_annotation": False}) == "profiling"
+    assert cli._resume_stage(**dict.fromkeys(done, False)) == "preprocessing"
+    # A missing early summary does not drag a late study back to the start.
+    assert cli._resume_stage(**{**done, "has_preprocessing": False, "has_annotation": False}) == "annotating"
+
+
+def test_cmd_process_only_runs_the_requested_stage(tmp_path):
+    work_dir = tmp_path / "ST001"
+    args = argparse.Namespace(
+        batch="",
+        workflow="amr",
+        only=True,
+        slurm=False,
+        output_dir=str(tmp_path),
+        studies_table="Studies",
+        samples_table="Samples",
+        genomes_table="Genomes",
+        airtable_token="",
+        base_id="",
+    )
+
+    client = MagicMock()
+    ready_study = {
+        "id": "recStudy",
+        "fields": {"code": "ST001", "study_accession": "PRJEB001", "status": "ready"},
+    }
+
+    def fetch_by_status(_table, status):
+        return [ready_study] if status == "ready" else []
+
+    client.fetch_studies_by_status.side_effect = fetch_by_status
+    client.fetch_samples_for_study.return_value = [
+        {"id": "recS1", "fields": {"code": "SA000022", "status": "use"}},
+    ]
+
+    with (
+        patch("wmw.cli._require_airtable", return_value=client),
+        patch("wmw.drakkar.build_input_tsv"),
+        patch("shutil.which", return_value=None),
+        patch("subprocess.run"),
+    ):
+        assert cli.cmd_process(args) == 0
+
+    script_text = (work_dir / "ST001.sh").read_text(encoding="utf-8")
+    assert "drakkar amr" in script_text
+    assert "drakkar profiling" not in script_text
+    assert "drakkar annotating" not in script_text
 
 
 def test_study_priority_drakkar_kwargs_low_sets_lazy_slurm_options():
@@ -940,7 +1005,7 @@ def test_cmd_process_low_priority_passes_lazy_slurm_options(tmp_path):
 
     with (
         patch("wmw.cli._require_airtable", return_value=client),
-        patch("wmw.drakkar.generate_full_pipeline_script", return_value="#!/usr/bin/env bash\n") as gen_full,
+        patch("wmw.drakkar.generate_pipeline_script", return_value="#!/usr/bin/env bash\n") as gen_full,
         patch("shutil.which", return_value=None),
         patch("subprocess.run") as run,
     ):
@@ -948,13 +1013,14 @@ def test_cmd_process_low_priority_passes_lazy_slurm_options(tmp_path):
 
     assert (work_dir / "ST001.sh").exists()
     kwargs = gen_full.call_args.kwargs
+    assert kwargs["stages"] == drakkar.PIPELINE_STAGES
     assert kwargs["slurm"] is True
     assert kwargs["slurm_partition"] == "lazyqueue"
     assert kwargs["slurm_qos"] == "lazy"
     run.assert_not_called()
 
 
-def test_cmd_process_resume_after_preprocessing_launches_cataloging_only(tmp_path):
+def test_cmd_process_resume_after_preprocessing_launches_cataloging_onwards(tmp_path):
     work_dir = tmp_path / "ST001"
     work_dir.mkdir()
     preprocessing_tsv = work_dir / "ST001_preprocessing.tsv"
@@ -996,8 +1062,7 @@ def test_cmd_process_resume_after_preprocessing_launches_cataloging_only(tmp_pat
     with (
         patch("wmw.cli._require_airtable", return_value=client),
         patch("wmw.drakkar.build_input_tsv") as build_input_tsv,
-        patch("wmw.drakkar.generate_cataloging_script", return_value="#!/usr/bin/env bash\n") as gen_cat,
-        patch("wmw.drakkar.generate_preprocessing_script") as gen_pre,
+        patch("wmw.drakkar.generate_pipeline_script", return_value="#!/usr/bin/env bash\n") as gen_script,
         patch("shutil.which", return_value="/usr/bin/screen"),
         patch("subprocess.run") as run,
     ):
@@ -1012,8 +1077,14 @@ def test_cmd_process_resume_after_preprocessing_launches_cataloging_only(tmp_pat
     )
     client.update_sample_preprocessing_stats.assert_called_once()
     build_input_tsv.assert_called_once()
-    gen_cat.assert_called_once()
-    gen_pre.assert_not_called()
+    gen_script.assert_called_once()
+    # The whole tail of the pipeline runs, not just the stage that was owed.
+    assert gen_script.call_args.kwargs["stages"] == (
+        "cataloging",
+        "amr",
+        "profiling",
+        "annotating",
+    )
     assert (work_dir / "ST001.sh").exists()
     run.assert_called_once_with(
         ["screen", "-dmS", "ST001", "bash", str(work_dir / "ST001.sh")],

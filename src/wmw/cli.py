@@ -1157,6 +1157,49 @@ def _study_priority_drakkar_kwargs(fields: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _stages_to_run(first_stage: str, args: argparse.Namespace) -> tuple[str, ...]:
+    """Return the stages a launch script should chain, starting at *first_stage*.
+
+    A run goes all the way to the end of the pipeline unless `--only` asks for
+    the single stage — otherwise every stage boundary would need another
+    `wmw process` call to cross.
+    """
+    from wmw import drakkar
+
+    if getattr(args, "only", False):
+        return (first_stage,)
+    return drakkar.stages_from(first_stage)
+
+
+def _resume_stage(
+    has_preprocessing: bool,
+    has_cataloging: bool,
+    has_amr: bool,
+    has_profiling: bool,
+    has_annotation: bool,
+) -> str | None:
+    """Return the stage a resumed study restarts at, or None when it is finished.
+
+    The scan runs backwards, so the study picks up after the latest stage that
+    left outputs behind rather than being dragged back to an earlier one whose
+    summary file never landed.
+    """
+    from wmw import drakkar
+
+    completed = {
+        "preprocessing": has_preprocessing,
+        "cataloging": has_cataloging,
+        "amr": has_amr,
+        "profiling": has_profiling,
+        "annotating": has_annotation,
+    }
+    stages = drakkar.PIPELINE_STAGES
+    for idx in range(len(stages) - 1, -1, -1):
+        if completed[stages[idx]]:
+            return stages[idx + 1] if idx + 1 < len(stages) else None
+    return stages[0]
+
+
 def cmd_process(args: argparse.Namespace) -> int:
     from wmw import drakkar
 
@@ -1292,100 +1335,57 @@ def cmd_process(args: argparse.Namespace) -> int:
             if finalized_this_study:
                 n_finalized += 1
 
-            if has_profiling and has_annotation:
+            pending = _resume_stage(
+                has_preprocessing=has_preprocessing,
+                has_cataloging=has_cataloging,
+                has_amr=has_amr,
+                has_profiling=has_profiling,
+                # Annotation counts as done only once profiling is: the two are
+                # finalised together above.
+                has_annotation=has_profiling and has_annotation,
+            )
+            if pending is None:
                 continue
 
-            if has_profiling and missing_annotation_outputs:
+            if pending == "annotating" and missing_annotation_outputs:
                 missing = ", ".join(
                     str(path.relative_to(work_dir))
                     for path in missing_annotation_outputs
                 )
-                out.info(
-                    f"{code}: profiling done, annotation outputs incomplete ({missing}) "
-                    "— launching annotation task."
-                )
-                script_path = work_dir / f"{code}.sh"
-                script = drakkar.generate_annotation_script(
-                    code=code,
-                    work_dir=work_dir,
-                    conda_env=conda_env,
-                    slurm=slurm,
-                    wmw_conda_env=wmw_conda_env,
-                    **priority_drakkar_kwargs,
-                )
-                _write_and_maybe_launch_script(code, script_path, script)
-                n_generated += 1
-                continue
+                out.info(f"{code}: annotation outputs incomplete ({missing}).")
 
-            if has_cataloging and not has_amr:
-                out.info(f"{code}: cataloging done, AMR output absent — launching AMR task.")
-                script_path = work_dir / f"{code}.sh"
-                script = drakkar.generate_amr_script(
-                    code=code,
-                    work_dir=work_dir,
-                    conda_env=conda_env,
-                    slurm=slurm,
-                    wmw_conda_env=wmw_conda_env,
-                    memory_multiplier=fields.get("memory_boost") or None,
-                    time_multiplier=fields.get("time_boost") or None,
-                    **priority_drakkar_kwargs,
-                )
-                _write_and_maybe_launch_script(code, script_path, script)
-                n_generated += 1
-                continue
+            stages = _stages_to_run(pending, args)
+            out.info(
+                f"{code}: resuming at {pending} — launching {' → '.join(stages)}."
+            )
 
-            if has_amr and not has_profiling:
-                out.info(f"{code}: AMR done, profiling output absent — launching profiling task.")
-                script_path = work_dir / f"{code}.sh"
-                script = drakkar.generate_profiling_script(
-                    code=code,
-                    work_dir=work_dir,
-                    conda_env=conda_env,
-                    slurm=slurm,
-                    wmw_conda_env=wmw_conda_env,
-                    **priority_drakkar_kwargs,
-                )
-                _write_and_maybe_launch_script(code, script_path, script)
-                n_generated += 1
-                continue
+            input_tsv: Path | None = None
+            if any(stage in drakkar.TSV_STAGES for stage in stages):
+                samples = client.fetch_samples_for_study(samples_table, study_accession)
+                use_samples = [r for r in samples if r.get("fields", r).get("status") == "use"]
+                if not use_samples:
+                    out.warn(f"{code}: no samples with status 'use' — cannot launch pending Drakkar task.")
+                    continue
 
-            samples = client.fetch_samples_for_study(samples_table, study_accession)
-            use_samples = [r for r in samples if r.get("fields", r).get("status") == "use"]
-            if not use_samples:
-                out.warn(f"{code}: no samples with status 'use' — cannot launch pending Drakkar task.")
-                continue
+                out.info(f"{code}: {_pl(len(use_samples), 'sample')} with status 'use' available for resume.")
+                input_tsv = work_dir / f"{code}.tsv"
+                drakkar.build_input_tsv(samples, input_tsv)
+                out.info(f"  Input TSV:     {input_tsv}")
 
-            out.info(f"{code}: {_pl(len(use_samples), 'sample')} with status 'use' available for resume.")
             work_dir.mkdir(parents=True, exist_ok=True)
-            input_tsv = work_dir / f"{code}.tsv"
-            drakkar.build_input_tsv(samples, input_tsv)
-            out.info(f"  Input TSV:     {input_tsv}")
-
             script_path = work_dir / f"{code}.sh"
-            if has_preprocessing:
-                out.info(f"{code}: preprocessing output exists; launching pending cataloging task.")
-                script = drakkar.generate_cataloging_script(
-                    code=code,
-                    tsv_path=input_tsv,
-                    work_dir=work_dir,
-                    conda_env=conda_env,
-                    slurm=slurm,
-                    wmw_conda_env=wmw_conda_env,
-                    **priority_drakkar_kwargs,
-                )
-            else:
-                out.info(f"{code}: preprocessing output is missing; launching preprocessing followed by cataloging.")
-                script = drakkar.generate_preprocessing_script(
-                    code=code,
-                    tsv_path=input_tsv,
-                    work_dir=work_dir,
-                    conda_env=conda_env,
-                    slurm=slurm,
-                    wmw_conda_env=wmw_conda_env,
-                    memory_multiplier=fields.get("memory_boost") or None,
-                    time_multiplier=fields.get("time_boost") or None,
-                    **priority_drakkar_kwargs,
-                )
+            script = drakkar.generate_pipeline_script(
+                code=code,
+                work_dir=work_dir,
+                conda_env=conda_env,
+                stages=stages,
+                tsv_path=input_tsv,
+                slurm=slurm,
+                wmw_conda_env=wmw_conda_env,
+                memory_multiplier=fields.get("memory_boost") or None,
+                time_multiplier=fields.get("time_boost") or None,
+                **priority_drakkar_kwargs,
+            )
             _write_and_maybe_launch_script(code, script_path, script)
             n_generated += 1
             continue
@@ -1409,51 +1409,22 @@ def cmd_process(args: argparse.Namespace) -> int:
         drakkar.build_input_tsv(samples, input_tsv)
         out.info(f"  Input TSV:     {input_tsv}")
 
+        stages = _stages_to_run(workflow, args)
+        out.info(f"{code}: launching {' → '.join(stages)}.")
+
         script_path = work_dir / f"{code}.sh"
-        if workflow == "preprocessing":
-            script = drakkar.generate_full_pipeline_script(
-                code=code,
-                tsv_path=input_tsv,
-                work_dir=work_dir,
-                conda_env=conda_env,
-                slurm=slurm,
-                wmw_conda_env=wmw_conda_env,
-                memory_multiplier=fields.get("memory_boost") or None,
-                time_multiplier=fields.get("time_boost") or None,
-                **priority_drakkar_kwargs,
-            )
-        elif workflow == "profiling":
-            script = drakkar.generate_profiling_script(
-                code=code,
-                work_dir=work_dir,
-                conda_env=conda_env,
-                slurm=slurm,
-                wmw_conda_env=wmw_conda_env,
-                **priority_drakkar_kwargs,
-            )
-        elif workflow == "amr":
-            script = drakkar.generate_amr_script(
-                code=code,
-                work_dir=work_dir,
-                conda_env=conda_env,
-                slurm=slurm,
-                wmw_conda_env=wmw_conda_env,
-                memory_multiplier=fields.get("memory_boost") or None,
-                time_multiplier=fields.get("time_boost") or None,
-                **priority_drakkar_kwargs,
-            )
-        elif workflow == "annotating":
-            script = drakkar.generate_annotation_script(
-                code=code,
-                work_dir=work_dir,
-                conda_env=conda_env,
-                slurm=slurm,
-                wmw_conda_env=wmw_conda_env,
-                **priority_drakkar_kwargs,
-            )
-        else:
-            _die(f"Workflow {workflow!r} script generation is not yet implemented.")
-            return 1
+        script = drakkar.generate_pipeline_script(
+            code=code,
+            work_dir=work_dir,
+            conda_env=conda_env,
+            stages=stages,
+            tsv_path=input_tsv,
+            slurm=slurm,
+            wmw_conda_env=wmw_conda_env,
+            memory_multiplier=fields.get("memory_boost") or None,
+            time_multiplier=fields.get("time_boost") or None,
+            **priority_drakkar_kwargs,
+        )
 
         _write_and_maybe_launch_script(code, script_path, script)
         n_generated += 1
@@ -2906,6 +2877,114 @@ def _finalize_profiling_outputs(
     return True
 
 
+# Binette writes one contig-to-bin table per assembly, all under the same file
+# name, and the Samples attachment column it goes to ships blank in the config
+# so a base without the column keeps working — the same opt-in the AMR columns
+# use.
+_CONTIG_TO_BIN_FIELD = "contig_to_bin"
+_CONTIG_TO_BIN_CONFIG_KEY = "SAMPLES_COL_CONTIG_TO_BIN"
+
+
+def _upload_contig_to_bin_attachments(
+    client: Any,
+    samples_table: str,
+    files_by_code: dict[str, Path],
+    *,
+    prefix: str = "",
+    replace_existing: bool = False,
+) -> int:
+    """Attach each assembly's final_contig_to_bin.tsv to its Samples row, gzipped."""
+    from wmw import drakkar
+    from wmw.airtable import ATTACHMENT_MAX_BYTES, attachment_fits
+
+    label = f"{prefix}: " if prefix else ""
+    if not files_by_code:
+        return 0
+
+    field_id = str(cfg.get(_CONTIG_TO_BIN_CONFIG_KEY) or "").strip()
+    if not field_id:
+        out.info(
+            f"{label}{_CONTIG_TO_BIN_CONFIG_KEY} is not configured — "
+            "contig-to-bin tables not attached."
+        )
+        return 0
+
+    records = client.fetch_samples_by_code(samples_table, files_by_code.keys())
+
+    uploaded = 0
+    skipped_existing = 0
+    too_large: list[str] = []
+    missing: list[str] = []
+    failed: list[str] = []
+    for code, tsv_path in files_by_code.items():
+        record = records.get(code) or {}
+        record_id = str(record.get("id") or "").strip()
+        if not record_id:
+            missing.append(code)
+            continue
+
+        has_existing = bool((record.get("fields", {}) or {}).get(field_id))
+        if has_existing and not replace_existing:
+            skipped_existing += 1
+            continue
+
+        try:
+            gz_path = drakkar.gzip_contig_to_bin_tsv(tsv_path, code)
+        except OSError as exc:
+            failed.append(f"{code} ({exc})")
+            continue
+        if not attachment_fits(gz_path):
+            too_large.append(code)
+            continue
+
+        try:
+            # Airtable's upload endpoint appends rather than replaces, so a
+            # rerun clears the field instead of stacking a second copy on it.
+            if has_existing:
+                client.clear_sample_file(samples_table, record_id, _CONTIG_TO_BIN_FIELD)
+            client.upload_sample_file(
+                samples_table,
+                record_id,
+                _CONTIG_TO_BIN_FIELD,
+                gz_path,
+            )
+        except Exception as exc:
+            failed.append(f"{code} ({exc})")
+        else:
+            uploaded += 1
+
+    if uploaded:
+        out.success(f"{label}attached contig-to-bin tables for {_pl(uploaded, 'sample')}.")
+    if skipped_existing:
+        out.info(
+            f"{label}skipped {_pl(skipped_existing, 'contig-to-bin table')} "
+            "already attached in Airtable."
+        )
+    if missing:
+        preview = ", ".join(missing[:10])
+        suffix = "…" if len(missing) > 10 else "."
+        out.warn(
+            f"{label}no Airtable sample row found for {_pl(len(missing), 'assembly', 'assemblies')}: "
+            f"{preview}{suffix}"
+        )
+    if too_large:
+        preview = ", ".join(too_large[:10])
+        suffix = "…" if len(too_large) > 10 else "."
+        out.warn(
+            f"{label}{_pl(len(too_large), 'contig-to-bin table')} over the "
+            f"{ATTACHMENT_MAX_BYTES // (1024 * 1024)} MB Airtable attachment limit "
+            f"even compressed — not attached: {preview}{suffix}"
+        )
+    if failed:
+        preview = "; ".join(failed[:5])
+        suffix = "…" if len(failed) > 5 else "."
+        out.warn(
+            f"{label}could not attach contig-to-bin tables for "
+            f"{_pl(len(failed), 'sample')}: {preview}{suffix}"
+        )
+    return uploaded
+
+
 def _finalize_cataloging_outputs(
     client: Any,
     studies_table: str,
@@ -2966,6 +3045,14 @@ def _finalize_cataloging_outputs(
                     f"Airtable records found — stats not uploaded. "
                     f"Check that the sample 'code' field values match the assembly column."
                 )
+
+    _upload_contig_to_bin_attachments(
+        client,
+        samples_table,
+        drakkar.contig_to_bin_files(work_dir),
+        prefix=prefix,
+        replace_existing=replace_existing_attachments,
+    )
 
     genomes_processed = _populate_genome_records_from_outputs(
         client,
@@ -3285,6 +3372,41 @@ def cmd_upload_genome_files(args: argparse.Namespace) -> int:
         replace_existing_attachments=replace_files,
     )
     return 0 if processed else 1
+
+
+def cmd_upload_contig_to_bin(args: argparse.Namespace) -> int:
+    from wmw import drakkar
+
+    samples_table = _conf(args, "samples_table", "SAMPLES_TABLE") or "Samples"
+    output_dir_str = _conf(args, "output_dir", "DRAKKAR_OUTPUT_DIR", required=True)
+    study_code = args.study
+    replace_files = getattr(args, "replace_files", False)
+
+    out.section("WMW CONTIG-TO-BIN UPLOAD")
+    if not str(cfg.get(_CONTIG_TO_BIN_CONFIG_KEY) or "").strip():
+        _die(
+            f"{_CONTIG_TO_BIN_CONFIG_KEY} is not configured — "
+            "add the Samples attachment column and its field ID (wmw config --edit)."
+        )
+
+    work_dir = Path(output_dir_str).expanduser().resolve() / study_code
+    files_by_code = drakkar.contig_to_bin_files(work_dir)
+    if not files_by_code:
+        out.warn(
+            f"{study_code}: no {drakkar.CONTIG_TO_BIN_FILE} found under "
+            f"{work_dir / 'cataloging' / 'binette'} — nothing to attach."
+        )
+        return 1
+
+    client = _require_airtable(args, samples_table)
+    _upload_contig_to_bin_attachments(
+        client,
+        samples_table,
+        files_by_code,
+        prefix=study_code,
+        replace_existing=replace_files,
+    )
+    return 0
 
 
 def cmd_upload_erda(args: argparse.Namespace) -> int:
@@ -3701,8 +3823,9 @@ def _build_parser() -> argparse.ArgumentParser:
             "from Airtable, create a working directory under DRAKKAR_OUTPUT_DIR/<code>/, "
             "write a <code>.tsv input file, and write a <code>.sh launch script that "
             "runs Drakkar and logs progress back to Airtable. Studies with status "
-            "'resume' resolve pending Airtable tasks and launch the next missing "
-            "Drakkar task when needed."
+            "'resume' resolve pending Airtable tasks and restart at the first stage "
+            "whose outputs are missing. Either way the script runs on through the "
+            "remaining stages, so no stage boundary needs a second wmw process call."
         ),
     )
     _add_airtable_flags(p_process)
@@ -3724,9 +3847,18 @@ def _build_parser() -> argparse.ArgumentParser:
             "annotating",
         ],
         help=(
-            "Drakkar workflow stage to generate a script for (default: preprocessing, "
-            "which runs the whole chain preprocessing → cataloging → amr → profiling "
-            "→ annotating). The other values run that stage on its own."
+            "Pipeline stage the generated script starts at (default: preprocessing). "
+            "The script then runs every later stage in turn — preprocessing → "
+            "cataloging → amr → profiling → annotating — unless --only is given."
+        ),
+    )
+    p_process.add_argument(
+        "--only",
+        action="store_true",
+        help=(
+            "Run just one stage: the one named by --workflow, or, for a study with "
+            "status 'resume', the first stage whose outputs are missing. Without it "
+            "the script continues through the rest of the pipeline."
         ),
     )
     p_process.add_argument(
@@ -3916,6 +4048,45 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Replace existing FASTA attachments instead of skipping them.",
     )
     p_upload_genomes.set_defaults(func=cmd_upload_genome_files)
+
+    # ---- upload-contig-to-bin ----
+    p_contig_to_bin = sub.add_parser(
+        "upload-contig-to-bin",
+        help="Attach binette's contig-to-bin table to each sample of one study.",
+        description=(
+            "Attach cataloging/binette/{assembly}/final_contig_to_bin.tsv, gzipped, "
+            "to the Samples row of each assembly of one study. Cataloging "
+            "finalization does this automatically; run it by hand to backfill a "
+            "study that was cataloged before the column existed."
+        ),
+    )
+    _add_airtable_flags(p_contig_to_bin)
+    p_contig_to_bin.add_argument(
+        "--study",
+        metavar="CODE",
+        required=True,
+        help="Study code (batch label) whose contig-to-bin tables should be attached.",
+    )
+    p_contig_to_bin.add_argument(
+        "--output-dir",
+        metavar="DIR",
+        default="",
+        help="Override DRAKKAR_OUTPUT_DIR from config.",
+    )
+    p_contig_to_bin.add_argument(
+        "--samples-table",
+        metavar="TABLE",
+        default="",
+        help="Override Samples table name from config.",
+    )
+    p_contig_to_bin.add_argument(
+        "--replace-files",
+        dest="replace_files",
+        action="store_true",
+        default=False,
+        help="Replace existing contig-to-bin attachments instead of skipping them.",
+    )
+    p_contig_to_bin.set_defaults(func=cmd_upload_contig_to_bin)
 
     # ---- upload-erda ----
     p_upload_erda = sub.add_parser(

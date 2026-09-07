@@ -122,14 +122,24 @@ excluded by a filter (unknown ≠ excluded).
 ### `drakkar.py`
 Targets Drakkar 2.x. `build_input_tsv()` writes the Drakkar sample detail file
 (`sample`, `rawreads1`, `rawreads2`, `reference_name`, `reference_path`, plus `assembly`
-and `coverage` when any row sets them) from Airtable sample records. The
-`generate_*_script()` functions emit the bash script that `wmw process` launches: it runs
-`drakkar preprocessing → cataloging → amr → profiling → annotating` in sequence, wrapped
-in `conda run -n <env>` when `DRAKKAR_CONDA_ENV` is set, with `wmw set-status` calls and an
+and `coverage` when any row sets them) from Airtable sample records. `generate_pipeline_script()`
+emits the bash script that `wmw process` launches: it runs the stages it is given —
+`PIPELINE_STAGES` is `preprocessing → cataloging → amr → profiling → annotating`, and
+`stages_from(stage)` returns that stage plus everything after it — wrapped in
+`conda run -n <env>` when `DRAKKAR_CONDA_ENV` is set, with `wmw set-status` calls and an
 `EXIT` trap around each stage so a failure or a `.wmw-stop` file is reflected in Airtable.
-AMR sits between cataloging and profiling because it reads the assemblies cataloging
-produces and nothing the later stages add; `drakkar amr -i <work dir>` discovers them
-under `cataloging/megahit`.
+Every run therefore continues to the end of the pipeline unless a stage fails; the
+`set-status` calls are guarded so an Airtable outage costs the study a status update
+rather than the stages it has not reached yet, and the script parks such a study in
+`resume` so the next `wmw process` replays the missed finalization. The single-stage
+`generate_*_script()` helpers are thin wrappers over it. AMR sits between cataloging and
+profiling because it reads the assemblies cataloging produces and nothing the later
+stages add; `drakkar amr -i <work dir>` discovers them under `cataloging/megahit`.
+
+`contig_to_bin_files()` collects binette's per-assembly
+`cataloging/binette/<assembly>/final_contig_to_bin.tsv` tables, which
+`gzip_contig_to_bin_tsv()` compresses under the sample's own name for the
+Samples attachment column.
 
 The `parse_*` functions read Drakkar's output tables back into Airtable field IDs:
 `preprocessing.tsv`, `cataloging.tsv` and `profiling_genomes.tsv` at the output root,
@@ -176,6 +186,7 @@ between requests. Returns empty dict on any failure (publication metadata is opt
 | ERDA transfer runs last | Airtable writes happen first in `_finalize_cataloging_outputs()`, so a failed or slow transfer never costs the metadata. Per-file failures are collected and reported instead of aborting. |
 | ERDA transfer never auto-replaces | The attachment-replacement flag exists because Airtable *appends* on upload; SFTP has no such quirk, and re-sending multi-GB assemblies on every rerun would be pure cost. Files already present are skipped; `wmw upload-erda --replace-files` is the explicit override. |
 | All bins archived, not just the good ones | The Airtable Genomes table is curated (completeness > 50, contamination < 10); the ERDA copy is an archive of what binette actually produced. |
+| Contig-to-bin tables attach per sample, gzipped and renamed | The contig membership of a sample's bins belongs on that sample's row, not the study's. Every assembly's binette table is called `final_contig_to_bin.tsv` and Airtable names an attachment after the file it was uploaded from, so each is compressed to `{code}_contig_to_bin.tsv.gz` first — which also keeps most of them under the ~3.7 MB attachment limit. |
 | AMR runs between cataloging and profiling | It needs the assemblies cataloging produces and nothing profiling or annotating adds. Keeping it in the one sequential chain means one script, one screen session, one status field and one stop marker — running it concurrently would need a separate copy of all four, plus its own Snakemake output root to avoid locking against the other stages. |
 | AMR transfer runs inline | The result tables are small compressed TSVs, unlike the multi-GB assemblies that justify a detached `screen` session for the cataloging transfer. |
 | AMR result tables mirror ehio | The Airtable fields, the per-assembly `amr_qc.tsv` metrics and the study-prefixed ERDA copies follow the ehio AMR module, so results from both tools read the same way. |

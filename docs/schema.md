@@ -72,6 +72,7 @@ encoded attachment limit is reported and left on ERDA only.
 | `center_name` | text | ENA + SRA | Submitting institution |
 | `source` | text | derived | `"ENA"`, `"SRA"` or `"GSA"` |
 | `status` | text | derived | Default `"pending"`; user-controlled processing inclusion uses `use`, `pending`, or `ignore` |
+| `contig_to_bin` | attachment | drakkar cataloging | `cataloging/binette/{assembly}/final_contig_to_bin.tsv`, gzipped as `{code}_contig_to_bin.tsv.gz`; config `SAMPLES_COL_CONTIG_TO_BIN` |
 | `amr_amrfinder_hits` | number | drakkar amr | From `amr/amr_qc.tsv`; config `SAMPLES_COL_AMR_AMRFINDER_HITS` |
 | `amr_rgi_hits` | number | drakkar amr | config `SAMPLES_COL_AMR_RGI_HITS` |
 | `amr_mobility_regions` | number | drakkar amr | config `SAMPLES_COL_AMR_MOBILITY_REGIONS` |
@@ -79,6 +80,13 @@ encoded attachment limit is reported and left on ERDA only.
 | `amr_multi_tool_loci` | number | drakkar amr | Loci backed by both AMRFinderPlus and RGI; config `SAMPLES_COL_AMR_MULTI_TOOL_LOCI` |
 | `amr_mobility_links` | number | drakkar amr | config `SAMPLES_COL_AMR_MOBILITY_LINKS` |
 | `amr_mobile_loci` | number | drakkar amr | config `SAMPLES_COL_AMR_MOBILE_LOCI` |
+
+The contig-to-bin table is matched by its binette folder name against the
+sample `code`, the same way cataloging assembly stats are. It is attached
+gzipped and named after the sample, because every assembly's table carries the
+same file name and Airtable takes the attachment name from the path. A table
+still over the ~3.7 MB attachment limit after compression is skipped with a
+warning.
 
 AMR rows are matched by the `amr_qc.tsv` `assembly_id` column against the sample
 `code`, the same way cataloging assembly stats are. The two

@@ -337,6 +337,53 @@ def test_fetch_sample_record_ids_by_code(mock_client):
     assert "SA000023" in call_kwargs["formula"]
 
 
+def test_fetch_samples_by_code_returns_whole_records(mock_client):
+    mock_table = MagicMock()
+    mock_table.all.return_value = [
+        _make_record("recS1", {"code": "SA000022", "contig_to_bin": [{"id": "att1"}]}),
+        _make_record("recS2", {"code": "SA000023"}),
+    ]
+    mock_client._api.table.return_value = mock_table
+
+    result = mock_client.fetch_samples_by_code("Samples", ["SA000022", "SA000023"])
+
+    assert result["SA000022"]["id"] == "recS1"
+    assert result["SA000022"]["fields"]["contig_to_bin"] == [{"id": "att1"}]
+    assert result["SA000023"]["id"] == "recS2"
+    call_kwargs = mock_table.all.call_args[1]
+    assert "SA000022" in call_kwargs["formula"]
+    assert "SA000023" in call_kwargs["formula"]
+
+
+def test_upload_sample_file_translates_field_name(mock_client, tmp_path):
+    mock_table = MagicMock()
+    mock_client._samples_fm = {"code": "fldCODE", "contig_to_bin": "fldCTB"}
+    mock_client._api_fid = MagicMock()
+    mock_client._api_fid.table.return_value = mock_table
+    gz_path = tmp_path / "SA000022_contig_to_bin.tsv.gz"
+    gz_path.write_bytes(b"gzip")
+
+    mock_client.upload_sample_file("Samples", "recS1", "contig_to_bin", gz_path)
+
+    mock_table.upload_attachment.assert_called_once_with(
+        "recS1",
+        "fldCTB",
+        gz_path,
+        content_type="application/gzip",
+    )
+
+
+def test_clear_sample_file_empties_the_field(mock_client):
+    mock_table = MagicMock()
+    mock_client._samples_fm = {"contig_to_bin": "fldCTB"}
+    mock_client._api_fid = MagicMock()
+    mock_client._api_fid.table.return_value = mock_table
+
+    mock_client.clear_sample_file("Samples", "recS1", "contig_to_bin")
+
+    mock_table.update.assert_called_once_with("recS1", {"fldCTB": []})
+
+
 def test_create_genome_records_uses_field_id_table(mock_client):
     mock_table = MagicMock()
     mock_table.batch_create.return_value = [

@@ -133,6 +133,10 @@ SAMPLES_COL_ASSEMBLY_MAPPING_RATE_FOCAL: "fldrtVqB4JIBwP9DC"
 SAMPLES_COL_ASSEMBLY_MAPPING_RATE_ALL: "fldyoREcPpIXbZANB"
 SAMPLES_COL_MAGS_MAPPING_RATE: "fldo6y0xcR3Gssh6K"
 
+# Attachment column holding binette's per-assembly final_contig_to_bin.tsv
+# (gzipped, named after the sample). Leave blank to skip the upload.
+SAMPLES_COL_CONTIG_TO_BIN: "fldG40YIfBaX5O0NE"
+
 # --- Drakkar > AMR ---
 # One row of amr/amr_qc.tsv per assembly. The two '*_without_coordinates'
 # columns are caller diagnostics rather than results and are never written.

@@ -511,12 +511,16 @@ class AirtableClient:
         """Write AMR assembly stats to sample records, keyed by sample code."""
         return self._update_sample_stats_by_code(samples_table, stats_by_assembly)
 
-    def fetch_sample_record_ids_by_code(
+    def fetch_samples_by_code(
         self,
         samples_table: str,
         sample_codes: Iterable[Any],
-    ) -> dict[str, str]:
-        """Return {sample_code: Airtable record ID} for matching sample code values."""
+    ) -> dict[str, dict[str, Any]]:
+        """Return whole Samples records keyed by sample code.
+
+        Field keys are Airtable field IDs whenever a samples field map is
+        configured, so a caller inspecting a column addresses it by its ID.
+        """
         codes = list(
             dict.fromkeys(str(c).strip() for c in sample_codes if str(c).strip())
         )
@@ -524,9 +528,8 @@ class AirtableClient:
             return {}
 
         code_key = self._fld("code", self._samples_fm)
-        record_id_key = self._fld("record_id", self._samples_fm)
         tbl = self._tbl(samples_table, self._samples_fm)
-        code_to_id: dict[str, str] = {}
+        records_by_code: dict[str, dict[str, Any]] = {}
 
         # Batch formula lookups to stay within Airtable's formula length limit.
         for i in range(0, len(codes), 50):
@@ -539,10 +542,51 @@ class AirtableClient:
             for record in tbl.all(formula=formula):
                 code_val = record["fields"].get(code_key, "")
                 if code_val:
-                    code_to_id[code_val] = str(
-                        record["fields"].get(record_id_key) or record["id"]
-                    )
-        return code_to_id
+                    records_by_code[code_val] = record
+        return records_by_code
+
+    def fetch_sample_record_ids_by_code(
+        self,
+        samples_table: str,
+        sample_codes: Iterable[Any],
+    ) -> dict[str, str]:
+        """Return {sample_code: Airtable record ID} for matching sample code values."""
+        record_id_key = self._fld("record_id", self._samples_fm)
+        return {
+            code: str(record["fields"].get(record_id_key) or record["id"])
+            for code, record in self.fetch_samples_by_code(
+                samples_table, sample_codes
+            ).items()
+        }
+
+    def upload_sample_file(
+        self,
+        samples_table: str,
+        record_id: str,
+        field_name: str,
+        file_path: str | Path,
+        content_type: str = "application/gzip",
+    ) -> dict[str, Any]:
+        """Upload a local file to a Samples-table attachment field."""
+        field = self._fld(field_name, self._samples_fm)
+        tbl = self._tbl(samples_table, self._samples_fm)
+        return tbl.upload_attachment(
+            record_id,
+            field,
+            Path(file_path),
+            content_type=content_type,
+        )
+
+    def clear_sample_file(
+        self,
+        samples_table: str,
+        record_id: str,
+        field_name: str,
+    ) -> None:
+        """Clear an attachment field in the Samples table."""
+        field = self._fld(field_name, self._samples_fm)
+        tbl = self._tbl(samples_table, self._samples_fm)
+        tbl.update(record_id, {field: []})
 
     def create_genome_records(
         self,

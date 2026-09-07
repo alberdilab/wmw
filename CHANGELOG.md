@@ -8,6 +8,48 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.6.4] - 2026-09-07
+
+### Changed
+
+- **A `wmw process` run now goes through every remaining pipeline stage.** The
+  generated launch script chains the stage it starts at and all the stages after
+  it — `preprocessing → cataloging → amr → profiling → annotating` — instead of
+  stopping at the end of one stage and waiting for the study to be set back to
+  `resume` and `wmw process` to be run again. Each stage still reports its own
+  start and end status and installs its own `EXIT` trap, so a genuine failure is
+  attributed to the stage that caused it and stops the run; success simply flows
+  into the next stage. A study with status `resume` restarts at the stage after
+  the latest one that left outputs behind and then continues to the end, and
+  `--workflow amr|profiling|annotating` starts there and runs on rather than
+  running that stage alone.
+- **An Airtable write that fails no longer costs a run the stages it has not
+  reached.** The `wmw set-status` calls inside the launch script run under
+  `set -euo pipefail`, so any Airtable error — an outage, a rate limit, a
+  finalization that raised — used to kill the script between stages even though
+  the science outputs were on disk. They are now guarded: the failure is logged,
+  the pipeline continues, and the script parks the study in `resume` at the end
+  so the next `wmw process` replays the finalization that was missed.
+
+### Added
+
+- **`wmw process --only`** runs a single stage — the one named by `--workflow`,
+  or, for a study with status `resume`, the first stage whose outputs are
+  missing — for the times when the rest of the pipeline should not follow.
+- **Binette's contig-to-bin table is attached to each sample.** Cataloging
+  finalization now picks up
+  `cataloging/binette/{assembly}/final_contig_to_bin.tsv` — the table naming the
+  bin each binned contig ended up in — gzips it as
+  `{sample_code}_contig_to_bin.tsv.gz` and attaches it to the Samples row of
+  that assembly, so the contig membership of a sample's MAGs can be read
+  straight from the base. The column is opt-in through the new
+  `SAMPLES_COL_CONTIG_TO_BIN` config key, which ships pointing at the
+  `contig_to_bin` attachment field. A table already attached is left alone;
+  one that is still over Airtable's ~3.7 MB attachment limit after compression
+  is reported and skipped rather than failing the run.
+- **`wmw upload-contig-to-bin --study CODE`** attaches the same tables on
+  demand, for studies cataloged before the column existed. `--replace-files`
+  replaces attachments already in the base instead of skipping them.
 ## [0.6.3] - 2026-09-05
 
 ### Fixed

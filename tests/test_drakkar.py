@@ -180,6 +180,69 @@ def test_generate_full_pipeline_script_runs_amr_between_cataloging_and_profiling
     assert str(drakkar.amr_qc_path(tmp_path)) in script
 
 
+def test_stages_from_returns_the_stage_and_everything_after_it():
+    assert drakkar.stages_from("preprocessing") == drakkar.PIPELINE_STAGES
+    assert drakkar.stages_from("amr") == ("amr", "profiling", "annotating")
+    assert drakkar.stages_from("annotating") == ("annotating",)
+
+    with pytest.raises(ValueError):
+        drakkar.stages_from("binning")
+
+
+def test_generate_pipeline_script_chains_from_a_mid_pipeline_stage(tmp_path):
+    script = drakkar.generate_pipeline_script(
+        code="PRJ005",
+        work_dir=tmp_path,
+        conda_env="",
+        stages=drakkar.stages_from("amr"),
+    )
+
+    order = [
+        script.index("drakkar amr"),
+        script.index("drakkar profiling"),
+        script.index("drakkar annotating"),
+    ]
+    assert order == sorted(order)
+    assert "drakkar preprocessing" not in script
+    assert "drakkar cataloging" not in script
+    # Each stage keeps its own trap, so a failure is still attributed correctly.
+    assert "trap _on_exit_amr EXIT" in script
+    assert "trap _on_exit_profiling EXIT" in script
+    assert "trap _on_exit_annotating EXIT" in script
+
+
+def test_generate_pipeline_script_requires_a_tsv_only_for_the_early_stages(tmp_path):
+    drakkar.generate_pipeline_script(
+        code="PRJ005", work_dir=tmp_path, conda_env="", stages=("profiling",)
+    )
+
+    with pytest.raises(ValueError, match="tsv_path"):
+        drakkar.generate_pipeline_script(
+            code="PRJ005", work_dir=tmp_path, conda_env="", stages=("cataloging",)
+        )
+
+
+def test_generate_pipeline_script_survives_a_failed_airtable_update(tmp_path):
+    """A set-status hiccup must not cost the run the stages it has not reached."""
+    script = drakkar.generate_pipeline_script(
+        code="PRJ005",
+        tsv_path=tmp_path / "PRJ005.tsv",
+        work_dir=tmp_path,
+        conda_env="",
+    )
+
+    for stage, status in (
+        ("preprocessing", "preprocessed"),
+        ("cataloging", "cataloged"),
+        ("amr", "amr_done"),
+        ("profiling", "quantified"),
+        ("annotating", "completed"),
+    ):
+        assert f"|| _wmw_bookkeeping_failed {stage} {status}" in script
+    # …but the study is parked in 'resume' so the missed finalisation is replayed.
+    assert "--workflow annotating --status resume" in script
+
+
 def test_generate_preprocessing_script_no_conda(tmp_path):
     script = drakkar.generate_preprocessing_script(
         code="PRJ003",
@@ -222,7 +285,7 @@ def test_generate_cataloging_script_contains_key_elements(tmp_path):
     assert "wmw set-status --study PRJ001 --workflow cataloging --status cataloged" in script
     assert "wmw set-status --study PRJ001 --workflow cataloging --status error" in script
     assert "wmw set-status --study PRJ001 --workflow cataloging --status stopped" in script
-    assert "trap _on_exit EXIT" in script
+    assert "trap _on_exit_cataloging EXIT" in script
     assert "drakkar preprocessing" not in script
     assert f"--output-dir {tmp_path.parent}" in script
 
@@ -581,3 +644,49 @@ def test_gzip_fasta_writes_fa_gz(tmp_path):
     assert gz_path.name == "SA000022_bin_339957.fa.gz"
     with gzip.open(gz_path, "rt", encoding="utf-8") as fh:
         assert fh.read() == ">contig1\nACGT\n"
+
+
+def test_contig_to_bin_files_keyed_by_assembly(tmp_path):
+    binette_dir = tmp_path / "ST001" / "cataloging" / "binette"
+    for code in ("SA000022", "SA000023"):
+        (binette_dir / code).mkdir(parents=True)
+        (binette_dir / code / "final_contig_to_bin.tsv").write_text(
+            "contig\tbin\nk141_1\t1\n",
+            encoding="utf-8",
+        )
+    # A run that produced no final table is simply absent from the mapping.
+    (binette_dir / "SA000024").mkdir()
+
+    files = drakkar.contig_to_bin_files(tmp_path / "ST001")
+
+    assert files == {
+        "SA000022": binette_dir / "SA000022" / "final_contig_to_bin.tsv",
+        "SA000023": binette_dir / "SA000023" / "final_contig_to_bin.tsv",
+    }
+
+
+def test_contig_to_bin_files_empty_without_binette_dir(tmp_path):
+    assert drakkar.contig_to_bin_files(tmp_path / "ST001") == {}
+
+
+def test_gzip_contig_to_bin_tsv_names_archive_after_sample(tmp_path):
+    tsv_path = tmp_path / "final_contig_to_bin.tsv"
+    tsv_path.write_text("contig\tbin\nk141_1\t1\n", encoding="utf-8")
+
+    gz_path = drakkar.gzip_contig_to_bin_tsv(tsv_path, "SA000022")
+
+    assert gz_path.name == "SA000022_contig_to_bin.tsv.gz"
+    with gzip.open(gz_path, "rt", encoding="utf-8") as fh:
+        assert fh.read() == "contig\tbin\nk141_1\t1\n"
+
+
+def test_gzip_contig_to_bin_tsv_reuses_current_archive(tmp_path):
+    tsv_path = tmp_path / "final_contig_to_bin.tsv"
+    tsv_path.write_text("contig\tbin\nk141_1\t1\n", encoding="utf-8")
+
+    first = drakkar.gzip_contig_to_bin_tsv(tsv_path, "SA000022")
+    mtime = first.stat().st_mtime_ns
+    second = drakkar.gzip_contig_to_bin_tsv(tsv_path, "SA000022")
+
+    assert second == first
+    assert second.stat().st_mtime_ns == mtime
