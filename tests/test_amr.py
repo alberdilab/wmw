@@ -36,8 +36,16 @@ AMR_FIELD_IDS = {
 
 @pytest.fixture()
 def amr_config():
-    """Fill in the AMR field IDs, which ship blank so uploads stay opt-in."""
+    """Pin the AMR field IDs so a base's own IDs never steer these tests."""
     merged = {**cfg.load_config(), **AMR_FIELD_IDS}
+    with patch("wmw.config.load_config", return_value=merged):
+        yield merged
+
+
+@pytest.fixture()
+def no_amr_file_config():
+    """Blank every Studies AMR field ID — the opt-out a base without them has."""
+    merged = {**cfg.load_config(), **dict.fromkeys(AMR_FIELD_IDS, "")}
     with patch("wmw.config.load_config", return_value=merged):
         yield merged
 
@@ -137,12 +145,19 @@ class _FakeTransfer:
 class _FakeClient:
     """Records the Airtable writes the AMR finaliser makes."""
 
-    def __init__(self, *, updated: int = 1) -> None:
+    def __init__(self, *, updated: int = 1, studies: dict | None = None) -> None:
         self.updated = updated
         self.amr_stats: list[dict] = []
         self.statuses: list[tuple[str, str]] = []
         self.uploads: list[tuple[str, str]] = []
         self.cleared: list[str] = []
+        # None means every code resolves; a dict pins which ones do.
+        self.studies = studies
+
+    def fetch_study_by_code(self, studies_table, code):
+        if self.studies is None:
+            return {"id": f"rec{code}", "fields": {"code": code}}
+        return self.studies.get(code)
 
     def update_sample_amr_stats(self, samples_table, stats):
         self.amr_stats.append(stats)
@@ -580,7 +595,9 @@ def test_finalize_amr_stops_when_the_run_left_no_summary(tmp_path, amr_config):
     xfer.assert_not_called()
 
 
-def test_finalize_amr_attaches_nothing_when_no_file_field_is_configured(tmp_path):
+def test_finalize_amr_attaches_nothing_when_no_file_field_is_configured(
+    tmp_path, no_amr_file_config
+):
     _make_amr_output(tmp_path)
     client = _FakeClient()
     with patch("wmw.cli._upload_amr_outputs_to_erda"):
@@ -702,3 +719,145 @@ def test_amr_runs_between_cataloging_and_profiling_in_the_pipeline(tmp_path):
         < script.index("drakkar amr")
         < script.index("drakkar profiling")
     )
+
+
+# ---------------------------------------------------------------------------
+# wmw upload-amr — backfilling batches processed before the columns existed
+# ---------------------------------------------------------------------------
+
+def _upload_amr_args(tmp_path: Path, **over) -> argparse.Namespace:
+    base = dict(
+        study="",
+        output_dir=str(tmp_path),
+        studies_table="Studies",
+        samples_table="Samples",
+        replace_files=False,
+        dry_run=False,
+        airtable_token="tok",
+        base_id="appTest",
+    )
+    base.update(over)
+    return argparse.Namespace(**base)
+
+
+def test_amr_result_files_lists_what_the_run_left(tmp_path):
+    work_dir = _make_amr_output(tmp_path)
+    names = [p.name for p in drakkar.amr_result_files(work_dir)]
+    assert names == [*drakkar.AMR_TABLE_FILES, drakkar.AMR_MANIFEST_FILE]
+    assert drakkar.amr_result_files(tmp_path / "nope") == []
+
+
+def test_amr_result_files_ignores_the_plain_summaries(tmp_path):
+    """amr_qc.tsv is parsed into the Samples rows, never attached to a study."""
+    work_dir = _make_amr_output(tmp_path)
+    for name in drakkar.AMR_TABLE_FILES:
+        (drakkar.amr_results_dir(work_dir) / name).unlink()
+    (drakkar.amr_results_dir(work_dir) / "manifest.yaml").unlink()
+    assert drakkar.amr_result_files(work_dir) == []
+
+
+def test_upload_amr_attaches_every_table_of_one_study(tmp_path, amr_config):
+    _make_amr_output(tmp_path)
+    client = _FakeClient()
+    with patch("wmw.cli._require_airtable", return_value=client):
+        assert cli.cmd_upload_amr(_upload_amr_args(tmp_path, study="ST001")) == 0
+    assert [name for _, name in client.uploads] == [
+        "ST001_amr_hits.tsv.xz",
+        "ST001_amr_loci.tsv.xz",
+        "ST001_amr_drug_classes.tsv.xz",
+        "ST001_amr_mobility.tsv.xz",
+        "ST001_mobility_regions.tsv.xz",
+        "ST001_amr_manifest.yaml",
+    ]
+
+
+def test_upload_amr_backfills_every_batch_left_on_disk(tmp_path, amr_config):
+    """No --study is the 'old batches' case: the output tree says what ran."""
+    _make_amr_output(tmp_path, code="ST001")
+    _make_amr_output(tmp_path, code="ST002")
+    (tmp_path / "ST003" / "cataloging").mkdir(parents=True)  # no AMR run
+    client = _FakeClient()
+    with patch("wmw.cli._require_airtable", return_value=client):
+        assert cli.cmd_upload_amr(_upload_amr_args(tmp_path)) == 0
+    uploaded = {name.split("_", 1)[0] for _, name in client.uploads}
+    assert uploaded == {"ST001", "ST002"}
+    assert len(client.uploads) == 12
+
+
+def test_upload_amr_writes_the_sample_stats_alongside_the_tables(tmp_path, amr_config):
+    _make_amr_output(tmp_path)
+    client = _FakeClient()
+    with patch("wmw.cli._require_airtable", return_value=client):
+        cli.cmd_upload_amr(_upload_amr_args(tmp_path, study="ST001"))
+    assert client.amr_stats == [{"SA000022": {
+        "fldAmrFinderHits": 12, "fldAmrRgiHits": 9, "fldAmrMobRegions": 4,
+        "fldAmrLoci": 15, "fldAmrMultiTool": 6, "fldAmrMobLinks": 7,
+        "fldAmrMobileLoci": 3,
+    }}]
+
+
+def test_upload_amr_needs_no_qc_summary_to_attach_the_tables(tmp_path, amr_config):
+    """A lost amr_qc.tsv costs the stats, not the upload this command is for."""
+    work_dir = _make_amr_output(tmp_path)
+    drakkar.amr_qc_path(work_dir).unlink()
+    client = _FakeClient()
+    with patch("wmw.cli._require_airtable", return_value=client):
+        assert cli.cmd_upload_amr(_upload_amr_args(tmp_path, study="ST001")) == 0
+    assert len(client.uploads) == 6
+    assert client.amr_stats == []
+
+
+def test_upload_amr_skips_tables_already_attached(tmp_path, amr_config):
+    _make_amr_output(tmp_path)
+    client = _FakeClient(studies={"ST001": _study(
+        file_amr_hits=[{"filename": "ST001_amr_hits.tsv.xz"}]
+    )})
+    with patch("wmw.cli._require_airtable", return_value=client):
+        cli.cmd_upload_amr(_upload_amr_args(tmp_path, study="ST001"))
+    assert ("file_amr_hits", "ST001_amr_hits.tsv.xz") not in client.uploads
+    assert ("file_amr_loci", "ST001_amr_loci.tsv.xz") in client.uploads
+    assert client.cleared == []
+
+
+def test_upload_amr_replace_files_clears_before_re_uploading(tmp_path, amr_config):
+    _make_amr_output(tmp_path)
+    client = _FakeClient(studies={"ST001": _study(
+        file_amr_hits=[{"filename": "ST001_amr_hits.tsv.xz"}]
+    )})
+    with patch("wmw.cli._require_airtable", return_value=client):
+        cli.cmd_upload_amr(
+            _upload_amr_args(tmp_path, study="ST001", replace_files=True)
+        )
+    assert client.cleared == ["file_amr_hits"]
+    assert ("file_amr_hits", "ST001_amr_hits.tsv.xz") in client.uploads
+
+
+def test_upload_amr_dry_run_touches_no_table(tmp_path, amr_config):
+    _make_amr_output(tmp_path)
+    with patch("wmw.cli._require_airtable") as require:
+        assert cli.cmd_upload_amr(_upload_amr_args(tmp_path, dry_run=True)) == 0
+    require.assert_not_called()
+
+
+def test_upload_amr_reports_a_code_airtable_does_not_have(tmp_path, amr_config):
+    _make_amr_output(tmp_path, code="ST001")
+    _make_amr_output(tmp_path, code="ST002")
+    client = _FakeClient(studies={"ST002": _study("ST002")})
+    with patch("wmw.cli._require_airtable", return_value=client):
+        assert cli.cmd_upload_amr(_upload_amr_args(tmp_path)) == 1
+    assert {name.split("_", 1)[0] for _, name in client.uploads} == {"ST002"}
+
+
+def test_upload_amr_stops_when_no_studies_column_is_configured(
+    tmp_path, no_amr_file_config
+):
+    _make_amr_output(tmp_path)
+    with pytest.raises(SystemExit):
+        cli.cmd_upload_amr(_upload_amr_args(tmp_path, study="ST001"))
+
+
+def test_upload_amr_reports_an_output_tree_with_no_amr_run(tmp_path, amr_config):
+    with patch("wmw.cli._require_airtable") as require:
+        assert cli.cmd_upload_amr(_upload_amr_args(tmp_path)) == 1
+    require.assert_not_called()
+

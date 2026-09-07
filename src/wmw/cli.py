@@ -3409,6 +3409,107 @@ def cmd_upload_contig_to_bin(args: argparse.Namespace) -> int:
     return 0
 
 
+def _amr_study_codes(output_root: Path) -> list[str]:
+    """Return every study code under *output_root* whose amr/ folder holds results.
+
+    The output tree is the record of what has actually been run, so a backfill
+    over 'old batches' discovers its work from disk rather than from a status
+    in Airtable that a study processed before the columns existed never got.
+    """
+    from wmw import drakkar
+
+    if not output_root.is_dir():
+        return []
+    return sorted(
+        d.name for d in output_root.iterdir()
+        if d.is_dir() and drakkar.amr_result_files(d)
+    )
+
+
+def cmd_upload_amr(args: argparse.Namespace) -> int:
+    from wmw import drakkar
+
+    studies_table = _conf(args, "studies_table", "STUDIES_TABLE") or "Studies"
+    samples_table = _conf(args, "samples_table", "SAMPLES_TABLE") or "Samples"
+    output_dir_str = _conf(args, "output_dir", "DRAKKAR_OUTPUT_DIR", required=True)
+    replace_files = getattr(args, "replace_files", False)
+    dry_run = getattr(args, "dry_run", False)
+
+    out.section("WMW AMR UPLOAD")
+
+    file_keys = (*drakkar.AMR_TABLE_FILES.values(), drakkar.AMR_MANIFEST_CONFIG_KEY)
+    if not any(str(cfg.get(key) or "").strip() for key in file_keys):
+        _die(
+            "no STUDIES_COL_FILE_AMR_* field ID is configured — "
+            "add the Studies attachment columns and their field IDs (wmw config --edit)."
+        )
+
+    output_root = Path(output_dir_str).expanduser().resolve()
+    codes = [args.study] if args.study else _amr_study_codes(output_root)
+    if not codes:
+        out.warn(
+            f"no AMR result table found under {output_root}/*/amr — nothing to upload."
+        )
+        return 1
+
+    if dry_run:
+        for code in codes:
+            names = [f.name for f in drakkar.amr_result_files(output_root / code)]
+            out.info(
+                f"{code}: would attach {_pl(len(names), 'file')} — {', '.join(names)}"
+            )
+        out.info(f"Dry run: {_pl(len(codes), 'study', 'studies')} would be uploaded.")
+        return 0
+
+    client = _require_airtable(args, studies_table, samples_table)
+
+    attached = 0
+    stats_written = 0
+    unknown: list[str] = []
+    for code in codes:
+        study_record = client.fetch_study_by_code(studies_table, code)
+        if not study_record:
+            unknown.append(code)
+            out.warn(f"{code}: no study with this code in Airtable — skipped.")
+            continue
+
+        work_dir = output_root / code
+        attached += _upload_amr_table_attachments(
+            client,
+            studies_table,
+            study_record,
+            work_dir,
+            code,
+            prefix=code,
+            skip_existing=not replace_files,
+            replace_existing=replace_files,
+        )
+
+        # The per-assembly counts ride along when the run left them and the
+        # Samples columns are configured; a study missing either is not an
+        # error here, since the tables are what this command exists to upload.
+        stats = drakkar.parse_amr_qc_tsv(drakkar.amr_qc_path(work_dir))
+        if stats:
+            written = client.update_sample_amr_stats(samples_table, stats)
+            stats_written += written
+            if written:
+                out.success(
+                    f"{code}: uploaded AMR stats for "
+                    f"{_pl(written, 'assembly', 'assemblies')}."
+                )
+
+    stats_note = (
+        f", AMR stats for {_pl(stats_written, 'assembly', 'assemblies')}"
+        if stats_written
+        else ""
+    )
+    out.success(
+        f"Attached {_pl(attached, 'file')} across "
+        f"{_pl(len(codes) - len(unknown), 'study', 'studies')}{stats_note}."
+    )
+    return 1 if unknown else 0
+
+
 def cmd_upload_erda(args: argparse.Namespace) -> int:
     output_dir_str = _conf(args, "output_dir", "DRAKKAR_OUTPUT_DIR", required=True)
     study_code = args.study
@@ -4087,6 +4188,67 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Replace existing contig-to-bin attachments instead of skipping them.",
     )
     p_contig_to_bin.set_defaults(func=cmd_upload_contig_to_bin)
+
+    # ---- upload-amr ----
+    p_upload_amr = sub.add_parser(
+        "upload-amr",
+        help="Attach the aggregate AMR result tables of a study to its Studies row.",
+        description=(
+            "Attach the tables 'drakkar amr' writes — amr_hits, amr_loci, "
+            "amr_drug_classes, amr_mobility, mobility_regions and the manifest — "
+            "to the Studies record of each study, study-prefixed. AMR "
+            "finalization does this automatically; run it by hand to backfill "
+            "batches that were processed before the columns were configured. "
+            "With no --study, every batch under DRAKKAR_OUTPUT_DIR whose amr/ "
+            "folder holds result tables is uploaded. Tables already attached "
+            "are skipped unless --replace-files. The per-assembly counts in "
+            "amr_qc.tsv are written to the Samples rows as well when the "
+            "SAMPLES_COL_AMR_* columns are configured."
+        ),
+    )
+    _add_airtable_flags(p_upload_amr)
+    p_upload_amr.add_argument(
+        "--study",
+        metavar="CODE",
+        default="",
+        help=(
+            "Study code (batch label) to upload. Omit to upload every batch "
+            "under DRAKKAR_OUTPUT_DIR that has AMR result tables."
+        ),
+    )
+    p_upload_amr.add_argument(
+        "--output-dir",
+        metavar="DIR",
+        default="",
+        help="Override DRAKKAR_OUTPUT_DIR from config.",
+    )
+    p_upload_amr.add_argument(
+        "--studies-table",
+        metavar="TABLE",
+        default="",
+        help="Override Studies table name from config.",
+    )
+    p_upload_amr.add_argument(
+        "--samples-table",
+        metavar="TABLE",
+        default="",
+        help="Override Samples table name from config.",
+    )
+    p_upload_amr.add_argument(
+        "--replace-files",
+        dest="replace_files",
+        action="store_true",
+        default=False,
+        help="Replace existing AMR attachments instead of skipping them.",
+    )
+    p_upload_amr.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=False,
+        help="List the batches and files that would be uploaded, then stop.",
+    )
+    p_upload_amr.set_defaults(func=cmd_upload_amr)
 
     # ---- upload-erda ----
     p_upload_erda = sub.add_parser(

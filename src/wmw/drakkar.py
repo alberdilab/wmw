@@ -73,6 +73,21 @@ def amr_qc_path(work_dir: Path) -> Path:
     return Path(work_dir) / AMR_QC_FILE
 
 
+def amr_result_files(work_dir: Path) -> list[Path]:
+    """Return the aggregate AMR tables and manifest a run left in <work_dir>/amr/.
+
+    Unlike `amr_outputs_present`, this asks what is there to upload rather than
+    whether the run finished, so a study whose per-assembly summary is gone can
+    still have its result tables archived.
+    """
+    amr_dir = amr_results_dir(work_dir)
+    return [
+        amr_dir / name
+        for name in (*AMR_TABLE_FILES, AMR_MANIFEST_FILE)
+        if (amr_dir / name).is_file()
+    ]
+
+
 def amr_outputs_present(work_dir: Path) -> bool:
     """Return True when a drakkar amr run left its per-assembly summary behind.
 

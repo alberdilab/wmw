@@ -8,6 +8,36 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.6.5] - 2026-09-07
+
+### Added
+
+- **`wmw upload-amr`** attaches the aggregate AMR tables of a study to its
+  Studies record, for backfilling batches whose outputs are on the server but
+  never reached Airtable. With no `--study` it uploads every batch under
+  `DRAKKAR_OUTPUT_DIR` whose `amr/` folder holds result tables — discovery reads
+  the output tree rather than an Airtable status, since a study processed before
+  the columns were configured has no status that records the gap. Fields that
+  already hold an attachment are skipped unless `--replace-files`, `--dry-run`
+  lists what would go without contacting Airtable, and a study code the base
+  does not have is reported and skipped without stopping the rest. `amr_qc.tsv`
+  is not required; when it is present and the `SAMPLES_COL_AMR_*` columns are
+  configured, the per-assembly counts are written to the Samples rows too. ERDA
+  is untouched — `wmw upload-erda --what amr` remains the transfer.
+
+### Changed
+
+- **The AMR result tables are now uploaded to the Studies table.** The six
+  `STUDIES_COL_FILE_AMR_*` keys shipped blank, which left the upload switched
+  off, so `drakkar amr`'s aggregate tables reached ERDA but never Airtable. They
+  now carry the field IDs of the WMW base's `hits`, `loci`, `drug_classes`,
+  `mobility`, `regions` and `amr_manifest` columns, so `wmw process
+  --workflow amr` and `wmw set-status --workflow amr --status amred` attach
+  `{code}_amr_hits.tsv.xz`, `{code}_amr_loci.tsv.xz`,
+  `{code}_amr_drug_classes.tsv.xz`, `{code}_amr_mobility.tsv.xz`,
+  `{code}_mobility_regions.tsv.xz` and `{code}_amr_manifest.yaml` to the study
+  record. The upload path itself was already in place and tested; only the
+  config keys changed.
 ## [0.6.4] - 2026-09-07
 
 ### Changed

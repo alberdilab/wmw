@@ -11,7 +11,7 @@ Discovers wild-animal shotgun metagenome studies in ENA (or GSA), populates Airt
 ## Module map
 | File | Responsibility |
 |---|---|
-| `cli.py` | argparse; `cmd_scan`, `_scan_single_study`, `cmd_fetch`, `_resolve_fetch_params`, `cmd_process`, `cmd_status`, `cmd_config`, `cmd_update` |
+| `cli.py` | argparse; `cmd_scan`, `_scan_single_study`, `cmd_fetch`, `_resolve_fetch_params`, `cmd_process`, `cmd_upload_amr`, `cmd_status`, `cmd_config`, `cmd_update` |
 | `config.py` | YAML at `src/wmw/data/config.yaml`; `get()`, `require()`, `view_config()`, `edit_config()` |
 | `output.py` | Rich console; `info()` `warn()` `error()` `success()` `section()` `make_table()` `render_table()` |
 | `airtable.py` | `AirtableClient` — `upsert_studies()`, `upsert_samples()`, `refresh_sample_metadata()`, `set_sample_status()`, `fetch_studies_by_status()`, `set_study_status()`, `fetch_samples_by_code()`, `upload_sample_file()`, dedup by accession |
@@ -19,7 +19,7 @@ Discovers wild-animal shotgun metagenome studies in ENA (or GSA), populates Airt
 | `sra.py` | NCBI SRA via Biopython Entrez; `search_runs()`, `search_study()` — retained but not used in automated scan/fetch |
 | `gsa.py` | GSA (NGDC/CNCB) via its scraped web interface; `build_query()` (PubMed-style grammar), `search_study_accessions()` (scan), `fetch_study_metadata()` (browse + BioProject pages), `search_study()` (run records from the `.xlsx` metadata workbook), `resolve_taxonomy()`, `keyword_matches()`, `to_https()` |
 | `metadata.py` | `normalize_ena/sra_run/study()`, `filter_runs()` (host_tax_id, min_bases, library_strategy, library_source, instrument_platform), `deduplicate_runs()`, `studies_from_runs()`, `BIOSAMPLE_FIELDS`, `OPTIONAL_SAMPLE_FIELDS` |
-| `drakkar.py` | Drakkar 2.x bridge; `build_input_tsv()` → sample detail TSV; `generate_pipeline_script()` → bash launch script for any run of `PIPELINE_STAGES` (`stages_from()` gives a stage plus its tail), with `generate_*_script()` as thin wrappers; `parse_*_tsv()` → Airtable fields; AMR: `generate_amr_script()`, `parse_amr_qc_tsv()`, `amr_results_dir()`, `AMR_TABLE_FILES`; binette: `contig_to_bin_files()`, `gzip_contig_to_bin_tsv()` |
+| `drakkar.py` | Drakkar 2.x bridge; `build_input_tsv()` → sample detail TSV; `generate_pipeline_script()` → bash launch script for any run of `PIPELINE_STAGES` (`stages_from()` gives a stage plus its tail), with `generate_*_script()` as thin wrappers; `parse_*_tsv()` → Airtable fields; AMR: `generate_amr_script()`, `parse_amr_qc_tsv()`, `amr_results_dir()`, `amr_result_files()`, `AMR_TABLE_FILES`; binette: `contig_to_bin_files()`, `gzip_contig_to_bin_tsv()` |
 | `publications.py` | `fetch_from_pubmed()`, `fetch_from_crossref()`, `fetch_pdf_url()` (Unpaywall), `resolve_batch()` |
 | `transfer.py` | ERDA SFTP via paramiko; `SFTPTransfer` (`upload_stream()`, `upload_gzipped()`, `upload_file()`, `remote_exists()`, `remove_remote_dir()`), `gzip_into()` |
 
@@ -28,7 +28,7 @@ Discovers wild-animal shotgun metagenome studies in ENA (or GSA), populates Airt
 **Samples** — `run_accession`, `study_accession`, `sample_accession`, `experiment_accession`, `scientific_name`, `tax_id`, `instrument_platform`, `instrument_model`, `library_strategy`, `library_source`, `library_layout`, `base_count`, `read_count`, `fastq_ftp`, `fastq_md5`, `fastq_url_1`, `fastq_url_2`, `collection_date`, `first_public`, `geo_loc_name`, `host`, `host_tax_id`, `host_scientific_name`, `country`, `center_name`, `source`, `status`
 **BioSample/MIxS (opt-in, config keys blank by default)** — Samples: `lat`, `lon`, `host_sex`, `broad_scale_environmental_context`, `environmental_medium`. ENA joins these onto every `read_run` record, so no separate BioSample call
 **Cataloging attachments (opt-in)** — Samples: `contig_to_bin` (Attachment; `cataloging/binette/<assembly>/final_contig_to_bin.tsv`, gzipped as `<code>_contig_to_bin.tsv.gz`), config key `SAMPLES_COL_CONTIG_TO_BIN`
-**AMR (opt-in, all config keys blank by default)** — Studies: `file_amr_{hits,loci,drug_classes,mobility,mobility_regions,manifest}`; Samples: `amr_{amrfinder_hits,rgi_hits,mobility_regions,loci,multi_tool_loci,mobility_links,mobile_loci}` from `amr_qc.tsv`
+**AMR** — Studies: `file_amr_{hits,loci,drug_classes,mobility,mobility_regions,manifest}`, wired by `STUDIES_COL_FILE_AMR_*` to the base's `hits`, `loci`, `drug_classes`, `mobility`, `regions` and `amr_manifest` columns (config key name ≠ column name); Samples: `amr_{amrfinder_hits,rgi_hits,mobility_regions,loci,multi_tool_loci,mobility_links,mobile_loci}` from `amr_qc.tsv` — these `SAMPLES_COL_AMR_*` keys are still blank, so the per-assembly counts are not written yet
 
 ## Config keys (`src/wmw/data/config.yaml`)
 `SOURCE` `GSA_ORGANISM` `WMW_BASE` `STUDIES_TABLE` `SAMPLES_TABLE` `DRAKKAR_CONDA_ENV` `DRAKKAR_OUTPUT_DIR` `NCBI_EMAIL` `NCBI_API_KEY` `LIBRARY_SOURCE` `INSTRUMENT_PLATFORM` `MIN_BASES` `DATE_FIELD` `EXCLUDED_HOST_TAX_IDS` `SFTP_HOST` `SFTP_USER` `SFTP_PORT` `SFTP_IDENTITY` `SFTP_REMOTE_BASE` `SFTP_REMOTE_ASSEMBLY_DIR` `SFTP_REMOTE_BIN_DIR` `SFTP_REMOTE_AMR_DIR` `STUDIES_COL_FILE_AMR_*` `SAMPLES_COL_AMR_*` `SAMPLES_COL_CONTIG_TO_BIN` `SAMPLES_COL_LAT` `SAMPLES_COL_LON` `SAMPLES_COL_HOST_SEX` `SAMPLES_COL_BROAD_SCALE_ENVIRONMENTAL_CONTEXT` `SAMPLES_COL_ENVIRONMENTAL_MEDIUM`
@@ -48,6 +48,8 @@ wmw process --batch BATCH [--workflow preprocessing|cataloging|amr|profiling|ann
             [--only] [--slurm] [--output-dir DIR]
 wmw upload-contig-to-bin --study CODE [--output-dir DIR] [--samples-table TABLE]
                          [--replace-files]
+wmw upload-amr [--study CODE] [--output-dir DIR] [--studies-table TABLE]
+               [--samples-table TABLE] [--replace-files] [--dry-run]
 wmw upload-erda --study CODE [--what cataloging|amr|all] [--output-dir DIR]
                 [--sftp-host H] [--sftp-user U] [--sftp-identity PATH]
                 [--sftp-remote-base PATH] [--sftp-amr-dir NAME]
@@ -80,6 +82,7 @@ wmw update
 - Pipeline order: `preprocessing → cataloging → amr → profiling → annotating`. AMR sits after cataloging because `drakkar amr -i <work_dir>` reads `cataloging/megahit/<a>/<a>.fna`, naming each assembly after its folder (= sample code). It is an ordinary stage: same `<code>.sh`, screen, logs, `.wmw-stop`, and `status` (`amring` → `amred` in Airtable; the generated scripts still say `--status amr`/`amr_done` and `_PROCESS_STATUS_MAP` translates)
 - AMR archive: `_finalize_amr_outputs()` writes `amr/amr_qc.tsv` counts to Samples, attaches the 5 aggregate tables + manifest to Studies, and sends them study-prefixed to `{SFTP_REMOTE_BASE}/<code>/{SFTP_REMOTE_AMR_DIR}/` inline (`.tsv.xz` as-is, plain summaries gzipped) — small files, so no screen session
 - Contig-to-bin: `_upload_contig_to_bin_attachments()` attaches each `cataloging/binette/<assembly>/final_contig_to_bin.tsv` to the Samples row of that assembly, gzipped and renamed `<code>_contig_to_bin.tsv.gz` (Airtable names an attachment after its file, and every assembly's is called the same). Runs inline from `_finalize_cataloging_outputs()`; `wmw upload-contig-to-bin` is the manual backfill. Already-attached rows are skipped unless `--replace-files`; a table over the ~3.7 MB attachment limit is reported and skipped
+- `wmw upload-amr` is the manual backfill for the Studies AMR attachments: with no `--study` it discovers every batch under `DRAKKAR_OUTPUT_DIR` whose `amr/` folder holds tables (`drakkar.amr_result_files()`), because a study processed before the columns were configured has no Airtable status recording the gap. Already-attached fields are skipped unless `--replace-files`; `amr_qc.tsv` is optional, and the Samples stats ride along when it and the `SAMPLES_COL_AMR_*` keys are both there. ERDA is left to `wmw upload-erda --what amr`
 - ERDA transfers skip files already present; `replace_existing_attachments` is deliberately **not** propagated to them (it works around Airtable appending on upload). `wmw upload-erda --replace-files` is the explicit re-transfer
 
 ## Tests & release

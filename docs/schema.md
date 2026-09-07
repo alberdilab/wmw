@@ -25,15 +25,16 @@ linked to Studies by `study_accession`).
 | `pub_journal` | text | PubMed / CrossRef | Full journal name |
 | `pub_authors` | text | PubMed / CrossRef | Up to 5 names, then "et al." |
 | `pub_pdf` | attachment | Unpaywall | OA PDF; Airtable Attachment field; set only when an open-access PDF is found |
-| `file_amr_hits` | attachment | drakkar amr | `{code}_amr_hits.tsv.xz`; config `STUDIES_COL_FILE_AMR_HITS` |
-| `file_amr_loci` | attachment | drakkar amr | `{code}_amr_loci.tsv.xz`; config `STUDIES_COL_FILE_AMR_LOCI` |
-| `file_amr_drug_classes` | attachment | drakkar amr | `{code}_amr_drug_classes.tsv.xz`; config `STUDIES_COL_FILE_AMR_DRUG_CLASSES` |
-| `file_amr_mobility` | attachment | drakkar amr | `{code}_amr_mobility.tsv.xz`; config `STUDIES_COL_FILE_AMR_MOBILITY` |
-| `file_amr_mobility_regions` | attachment | drakkar amr | `{code}_mobility_regions.tsv.xz`; config `STUDIES_COL_FILE_AMR_MOBILITY_REGIONS` |
-| `file_amr_manifest` | attachment | drakkar amr | `{code}_amr_manifest.yaml` provenance record; config `STUDIES_COL_FILE_AMR_MANIFEST` |
+| `file_amr_hits` | attachment | drakkar amr | `{code}_amr_hits.tsv.xz`; config `STUDIES_COL_FILE_AMR_HITS` → Airtable column `hits` |
+| `file_amr_loci` | attachment | drakkar amr | `{code}_amr_loci.tsv.xz`; config `STUDIES_COL_FILE_AMR_LOCI` → Airtable column `loci` |
+| `file_amr_drug_classes` | attachment | drakkar amr | `{code}_amr_drug_classes.tsv.xz`; config `STUDIES_COL_FILE_AMR_DRUG_CLASSES` → Airtable column `drug_classes` |
+| `file_amr_mobility` | attachment | drakkar amr | `{code}_amr_mobility.tsv.xz`; config `STUDIES_COL_FILE_AMR_MOBILITY` → Airtable column `mobility` |
+| `file_amr_mobility_regions` | attachment | drakkar amr | `{code}_mobility_regions.tsv.xz`; config `STUDIES_COL_FILE_AMR_MOBILITY_REGIONS` → Airtable column `regions` |
+| `file_amr_manifest` | attachment | drakkar amr | `{code}_amr_manifest.yaml` provenance record; config `STUDIES_COL_FILE_AMR_MANIFEST` → Airtable column `amr_manifest` |
 
-Every AMR field above is blank in the shipped config, which disables that write.
-Fill in the Airtable field ID to switch it on. A table over Airtable's 5 MB
+The names in the first column are wmw's internal ones; each `STUDIES_COL_FILE_AMR_*`
+key binds it to the Airtable column named in the note. A blank key disables that
+write, so a base without the column keeps working. A table over Airtable's 5 MB
 encoded attachment limit is reported and left on ERDA only.
 
 ## Samples table

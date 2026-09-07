@@ -327,6 +327,18 @@ The five aggregate tables and the manifest are attached to the study record and
 archived on ERDA — see [wmw upload-erda](#wmw-upload-erda). A table over
 Airtable's 5 MB encoded attachment limit is reported and left on ERDA only.
 
+| `amr/` file | attached as | Studies config key | Airtable column |
+|---|---|---|---|
+| `amr_hits.tsv.xz` | `{code}_amr_hits.tsv.xz` | `STUDIES_COL_FILE_AMR_HITS` | `hits` |
+| `amr_loci.tsv.xz` | `{code}_amr_loci.tsv.xz` | `STUDIES_COL_FILE_AMR_LOCI` | `loci` |
+| `amr_drug_classes.tsv.xz` | `{code}_amr_drug_classes.tsv.xz` | `STUDIES_COL_FILE_AMR_DRUG_CLASSES` | `drug_classes` |
+| `amr_mobility.tsv.xz` | `{code}_amr_mobility.tsv.xz` | `STUDIES_COL_FILE_AMR_MOBILITY` | `mobility` |
+| `mobility_regions.tsv.xz` | `{code}_mobility_regions.tsv.xz` | `STUDIES_COL_FILE_AMR_MOBILITY_REGIONS` | `regions` |
+| `manifest.yaml` | `{code}_amr_manifest.yaml` | `STUDIES_COL_FILE_AMR_MANIFEST` | `amr_manifest` |
+
+To backfill batches that ran before these columns were configured, see
+[wmw upload-amr](#wmw-upload-amr).
+
 ## wmw stop
 
 Stop an ongoing `wmw process` run for one study code.
@@ -395,6 +407,41 @@ wmw upload-contig-to-bin --study CODE
   reported and skipped.
 - `SAMPLES_COL_CONTIG_TO_BIN` must name the attachment field; a blank key
   disables the upload everywhere.
+
+---
+
+## wmw upload-amr
+
+Attach the aggregate tables `drakkar amr` writes to the Studies record of each
+study. AMR finalization does this automatically; run it by hand to backfill
+batches that were processed before the `STUDIES_COL_FILE_AMR_*` columns were
+configured — the case the archive on the server is ahead of the base.
+
+```
+wmw upload-amr [--study CODE]         # omit to do every batch on disk
+               [--output-dir DIR]
+               [--studies-table TABLE] [--samples-table TABLE]
+               [--replace-files] [--dry-run]
+               [--airtable-token TOKEN] [--base-id BASE_ID]
+```
+
+- With no `--study`, every directory under `DRAKKAR_OUTPUT_DIR` whose `amr/`
+  folder holds at least one result table is uploaded. Discovery reads the output
+  tree rather than Airtable status, because a study processed before the columns
+  existed never got a status that records the gap.
+- Each file is attached study-prefixed (`{code}_amr_hits.tsv.xz`) — see the
+  table under [The AMR workflow](#the-amr-workflow) for the full mapping.
+- A study that already has an attachment in a field is skipped for that field;
+  `--replace-files` clears it first and uploads again (Airtable's upload
+  endpoint appends rather than replaces).
+- `amr/amr_qc.tsv` is not needed. When it is there and the `SAMPLES_COL_AMR_*`
+  columns are configured, the per-assembly counts are written to the Samples
+  rows too; otherwise only the tables are uploaded.
+- A study code with no matching Airtable record is reported and skipped, and
+  the command exits 1 — the other batches still upload.
+- Exits 1 without contacting Airtable when no `STUDIES_COL_FILE_AMR_*` key is
+  configured, or when no batch on disk has AMR results.
+- ERDA is not touched: `wmw upload-erda --what amr` is the transfer.
 
 ---
 

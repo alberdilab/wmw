@@ -46,13 +46,14 @@ STUDIES_COL_FILE_BASES: "fldABch5symh2R3le"
 
 # --- Studies table > AMR columns ---
 # Attachment fields for the aggregate tables 'drakkar amr' writes.
-# Leave a key blank to disable that upload.
-STUDIES_COL_FILE_AMR_HITS: ""
-STUDIES_COL_FILE_AMR_LOCI: ""
-STUDIES_COL_FILE_AMR_DRUG_CLASSES: ""
-STUDIES_COL_FILE_AMR_MOBILITY: ""
-STUDIES_COL_FILE_AMR_MOBILITY_REGIONS: ""
-STUDIES_COL_FILE_AMR_MANIFEST: ""
+# Leave a key blank to disable that upload. The Airtable column each ID points
+# at is named after the table rather than the config key, so it is noted here.
+STUDIES_COL_FILE_AMR_HITS: "fldYLc8OSSceGodhF"            # column: hits
+STUDIES_COL_FILE_AMR_LOCI: "fldfDgEvoCBAj3YS0"            # column: loci
+STUDIES_COL_FILE_AMR_DRUG_CLASSES: "fldj8J2ukkXqq5HJP"    # column: drug_classes
+STUDIES_COL_FILE_AMR_MOBILITY: "fldFlgKP2VrkAuq2Q"        # column: mobility
+STUDIES_COL_FILE_AMR_MOBILITY_REGIONS: "fldFpyHkuLgxHiR7i" # column: regions
+STUDIES_COL_FILE_AMR_MANIFEST: "fldQg1g2wvtyuwypR"        # column: amr_manifest
 
 # --- Samples table column IDs ---
 # Airtable field IDs (fldXXXXXXXXXXXXXX) for each column in the Samples table.
