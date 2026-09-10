@@ -256,7 +256,7 @@ def test_amr_script_reports_the_stage_transitions(tmp_path):
     work_dir = tmp_path / "ST001"
     script = drakkar.generate_amr_script("ST001", work_dir, conda_env="")
 
-    assert f"exec >> {work_dir}/ST001.out 2>> {work_dir}/ST001.err" in script
+    assert f"exec < /dev/null >> {work_dir}/ST001.out 2>> {work_dir}/ST001.err" in script
     assert f'_WMW_STOP_FILE={work_dir}/.wmw-stop' in script
     assert "--workflow amr --status amr " in script
     assert "--workflow amr --status amr_done" in script
@@ -294,8 +294,8 @@ def test_amr_script_runs_drakkar_inside_the_conda_env(tmp_path):
     script = drakkar.generate_amr_script(
         "ST001", tmp_path / "ST001", conda_env="/envs/drakkar", wmw_conda_env="/envs/wmw"
     )
-    assert "conda run -p /envs/drakkar drakkar amr" in script
-    assert "conda run -p /envs/wmw wmw set-status" in script
+    assert "/envs/drakkar/bin/drakkar amr" in script
+    assert "/envs/wmw/bin/wmw set-status" in script
 
 
 # ---------------------------------------------------------------------------

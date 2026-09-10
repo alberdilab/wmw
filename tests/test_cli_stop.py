@@ -60,6 +60,50 @@ def test_screen_sessions_for_code_includes_genome_upload_session():
     assert sessions == ["123.ST001", "124.ST001-genome-upload"]
 
 
+def test_running_study_statuses_covers_every_pipeline_stage():
+    assert set(cli._running_study_statuses()) == {
+        "preprocessing",
+        "cataloging",
+        "amring",
+        "quantifying",
+        "annotating",
+    }
+
+
+def test_stalled_studies_flags_running_batches_with_no_screen_session():
+    records = [
+        {"fields": {"code": "ST00361", "status": "cataloging"}},
+        {"fields": {"code": "ST00362", "status": "preprocessing"}},
+    ]
+    assert cli._stalled_studies(records, {"ST00362"}) == [("ST00361", "cataloging")]
+
+
+def test_report_stalled_studies_names_the_dead_batch():
+    client = MagicMock()
+    client.fetch_studies_by_status.side_effect = lambda table, status: (
+        [{"fields": {"code": "ST00361", "status": status}}]
+        if status == "cataloging"
+        else []
+    )
+    with patch.object(cli, "_screen_session_names", return_value=set()):
+        with patch.object(cli.out, "warn") as warn:
+            cli._report_stalled_studies(client, "Studies", None)
+    assert any("ST00361" in str(c) for c in warn.call_args_list)
+
+
+def test_report_stalled_studies_stays_quiet_while_the_screen_session_lives():
+    client = MagicMock()
+    client.fetch_studies_by_status.side_effect = lambda table, status: (
+        [{"fields": {"code": "ST00361", "status": status}}]
+        if status == "cataloging"
+        else []
+    )
+    with patch.object(cli, "_screen_session_names", return_value={"ST00361"}):
+        with patch.object(cli.out, "warn") as warn:
+            cli._report_stalled_studies(client, "Studies", None)
+    warn.assert_not_called()
+
+
 def test_cmd_stop_sets_status_stops_screen_and_cancels_matching_slurm_jobs(tmp_path):
     work_dir = tmp_path / "ST001"
     work_dir.mkdir()

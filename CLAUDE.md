@@ -90,7 +90,7 @@ wmw update
 - ERDA transfers skip files already present; `replace_existing_attachments` is deliberately **not** propagated to them (it works around Airtable appending on upload). `wmw upload-erda --replace-files` is the explicit re-transfer
 
 ## Tests & release
-`pytest tests/` (506 tests) · `python scripts/release.py X.Y.Z` (add `--dry-run` first)
+`pytest tests/` (514 tests) · `python scripts/release.py X.Y.Z` (add `--dry-run` first)
 
 ## Changelog policy
 - Every code change must be logged under the `[Unreleased]` section of `CHANGELOG.md` before the work is considered done.

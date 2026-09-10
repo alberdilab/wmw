@@ -304,6 +304,12 @@ _STAGE_STATUSES: dict[str, tuple[str, str]] = {
     "annotating":    ("annotating", "completed"),
 }
 
+# (stage, the status it reports when it starts). Mapped through the CLI's
+# status table, these are what Airtable shows while a launch script is running.
+STAGE_START_STATUSES: tuple[tuple[str, str], ...] = tuple(
+    (stage, start) for stage, (start, _done) in _STAGE_STATUSES.items()
+)
+
 _STAGE_LABELS: dict[str, str] = {
     "preprocessing": "preprocessing",
     "cataloging": "cataloging",
@@ -423,6 +429,8 @@ def _stage_block(
     return [
         "_WMW_SUCCESS=0",
         f"{trap_fn}() {{",
+        "    # Bookkeeping must not depend on the work dir still being readable.",
+        "    cd / 2>/dev/null || true",
         '    if [ "$_WMW_SUCCESS" -ne 1 ]; then',
         '        if [ -f "$_WMW_STOP_FILE" ]; then',
         f"            {_set_status_line(wmw_cmd, code, stage, 'stopped', output_dir_arg, guarded=False)}",
@@ -440,6 +448,25 @@ def _stage_block(
         "_WMW_SUCCESS=1",
         "",
     ]
+
+
+def _env_command(env: str, binary: str) -> str:
+    """Return the command that runs *binary* from conda environment *env*.
+
+    An env given as a path is called through its own ``bin/`` directory instead
+    of through ``conda run``: conda chdirs into the current working directory
+    before it execs the child, so a work dir that has become unreadable takes the
+    command down with it — including the ``wmw set-status`` call whose whole job
+    is to report that failure. Bash needs no access to the cwd to exec a binary,
+    so the direct call survives it. A named env still needs conda to resolve it,
+    and streams its output instead of letting conda buffer it until the end.
+    """
+    env = str(env).strip()
+    if not env:
+        return binary
+    if env.startswith(("/", "~", ".")):
+        return shlex.quote(str(Path(env).expanduser() / "bin" / binary))
+    return f"conda run --no-capture-output -n {shlex.quote(env)} {binary}"
 
 
 def generate_pipeline_script(
@@ -482,8 +509,7 @@ def generate_pipeline_script(
         )
 
     if conda_env:
-        c_flag = "-p" if str(conda_env).startswith(("/", "~", ".")) else "-n"
-        drakkar_prefix = f"conda run {c_flag} {conda_env} drakkar"
+        drakkar_prefix = _env_command(conda_env, "drakkar")
         conda_lines = [
             'if [ -f "$(conda info --base 2>/dev/null)/etc/profile.d/conda.sh" ]; then',
             '    source "$(conda info --base)/etc/profile.d/conda.sh"',
@@ -495,11 +521,7 @@ def generate_pipeline_script(
         drakkar_prefix = "drakkar"
         conda_lines = []
 
-    if wmw_conda_env:
-        w_flag = "-p" if str(wmw_conda_env).startswith(("/", "~", ".")) else "-n"
-        wmw_cmd = f"conda run {w_flag} {wmw_conda_env} wmw"
-    else:
-        wmw_cmd = "wmw"
+    wmw_cmd = _env_command(wmw_conda_env, "wmw")
 
     stop_file = shlex.quote(str(work_dir / ".wmw-stop"))
     output_dir_arg = f" --output-dir {shlex.quote(str(work_dir.parent))}"
@@ -514,7 +536,10 @@ def generate_pipeline_script(
         "# AIRTABLE_TOKEN must be exported in the environment before launching.",
         "",
         "set -euo pipefail",
-        f"exec >> {work_dir}/{code}.out 2>> {work_dir}/{code}.err",
+        # A detached screen session still gives conda a tty, on which it blocks
+        # for 40s asking to upload a crash report. Nothing here is interactive.
+        "export CONDA_REPORT_ERRORS=false",
+        f"exec < /dev/null >> {work_dir}/{code}.out 2>> {work_dir}/{code}.err",
         'echo ""',
         "echo \"=== $(date '+%Y-%m-%d %H:%M:%S') ===\"",
         "echo \"=== $(date '+%Y-%m-%d %H:%M:%S') ===\" >&2",
@@ -565,6 +590,7 @@ def generate_pipeline_script(
         'if [ "$_WMW_BOOKKEEPING_FAILED" -ne 0 ]; then',
         '    echo "wmw: some Airtable updates failed — leaving the study in '
         "'resume' so wmw process can finish them.\" >&2",
+        "    cd / 2>/dev/null || true",
         f"    {_set_status_line(wmw_cmd, code, stages[-1], 'resume', output_dir_arg, guarded=False)} || true",
         "fi",
         "",

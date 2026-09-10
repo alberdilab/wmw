@@ -134,9 +134,14 @@ Targets Drakkar 2.x. `build_input_tsv()` writes the Drakkar sample detail file
 and `coverage` when any row sets them) from Airtable sample records. `generate_pipeline_script()`
 emits the bash script that `wmw process` launches: it runs the stages it is given —
 `PIPELINE_STAGES` is `preprocessing → cataloging → amr → profiling → annotating`, and
-`stages_from(stage)` returns that stage plus everything after it — wrapped in
-`conda run -n <env>` when `DRAKKAR_CONDA_ENV` is set, with `wmw set-status` calls and an
-`EXIT` trap around each stage so a failure or a `.wmw-stop` file is reflected in Airtable.
+`stages_from(stage)` returns that stage plus everything after it — with `wmw set-status`
+calls and an `EXIT` trap around each stage so a failure or a `.wmw-stop` file is reflected
+in Airtable. `_env_command()` decides how each binary is reached: an env given as a path
+is called directly as `<env>/bin/<binary>`, an env given by name through
+`conda run --no-capture-output -n <env>`. The direct call matters because `conda run`
+chdirs into the current working directory before exec'ing the child, so a work dir that
+has stopped being readable takes down the `set-status` call whose job is to report that
+very failure; the traps also `cd /` before reporting, for the same reason.
 Every run therefore continues to the end of the pipeline unless a stage fails; the
 `set-status` calls are guarded so an Airtable outage costs the study a status update
 rather than the stages it has not reached yet, and the script parks such a study in

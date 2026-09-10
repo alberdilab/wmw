@@ -1628,6 +1628,26 @@ def _screen_sessions_for_code(screen_ls_output: str, code: str) -> list[str]:
     return sessions
 
 
+def _screen_session_names() -> set[str] | None:
+    """Return every live screen session name, or None if screen cannot be queried."""
+    import shutil
+    import subprocess as sp
+
+    if shutil.which("screen") is None:
+        return None
+
+    listed = sp.run(["screen", "-ls"], capture_output=True, text=True, check=False)
+    # `screen -ls` exits 1 when no sessions exist at all; that is not a failure.
+    text = (listed.stdout or "") + "\n" + (listed.stderr or "")
+    names: set[str] = set()
+    for line in text.splitlines():
+        parts = line.strip().split()
+        # Session tokens are always '<pid>.<name>', which skips the header lines.
+        if parts and "." in parts[0]:
+            names.add(_screen_session_name(parts[0]))
+    return names
+
+
 def _stop_screen_sessions(code: str) -> tuple[int, str]:
     import shutil
     import subprocess as sp
@@ -3691,6 +3711,87 @@ def cmd_upload_erda(args: argparse.Namespace) -> int:
 # wmw status
 # ---------------------------------------------------------------------------
 
+def _running_study_statuses() -> tuple[str, ...]:
+    """Return the Airtable statuses that mean a launch script should be running."""
+    from wmw import drakkar
+
+    return tuple(
+        dict.fromkeys(
+            _PROCESS_STATUS_MAP.get(pair, pair[1])
+            for pair in drakkar.STAGE_START_STATUSES
+        )
+    )
+
+
+def _running_study_records(
+    client: Any,
+    studies_table: str,
+    batch: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return the study records whose status says a launch script is running."""
+    running = set(_running_study_statuses())
+    if batch:
+        record = client.fetch_study_by_code(studies_table, batch)
+        records = [record] if record else []
+    else:
+        records = [
+            rec
+            for status in running
+            for rec in client.fetch_studies_by_status(studies_table, status)
+        ]
+    return [
+        rec
+        for rec in records
+        if str(rec.get("fields", {}).get("status", "") or "").strip() in running
+    ]
+
+
+def _stalled_studies(
+    records: Sequence[dict[str, Any]],
+    sessions: set[str],
+) -> list[tuple[str, str]]:
+    """Return (code, status) for running studies that have no screen session left.
+
+    A launch script killed outright — an OOM kill, a work dir that stopped being
+    readable, a dropped session — never reaches its EXIT trap, so the study keeps
+    the 'running' status its stage set on the way in. Airtable cannot tell that
+    from a batch that really is running; the missing screen session can.
+    """
+    stalled: list[tuple[str, str]] = []
+    for rec in records:
+        fields = rec.get("fields", {})
+        code = str(fields.get("code", "") or "").strip()
+        status = str(fields.get("status", "") or "").strip()
+        if code and code not in sessions:
+            stalled.append((code, status))
+    return sorted(stalled)
+
+
+def _report_stalled_studies(client: Any, studies_table: str, batch: str | None) -> None:
+    """Warn about studies Airtable still calls running that nothing is running."""
+    records = _running_study_records(client, studies_table, batch)
+    if not records:
+        return
+
+    sessions = _screen_session_names()
+    if sessions is None:
+        out.warn("'screen' not found — cannot check whether running batches are alive.")
+        return
+
+    stalled = _stalled_studies(records, sessions)
+    if not stalled:
+        return
+
+    out.warn(
+        f"{_pl(len(stalled), 'batch', 'batches')} marked as running with no screen "
+        "session in this account — a launch script killed outright never records "
+        "its outcome:"
+    )
+    for code, status in stalled:
+        out.warn(f"  {code}: Airtable says {status!r}, no screen session {code!r}.")
+    out.info("Check <CODE>.err in the work dir, then re-run 'wmw process --batch <CODE>'.")
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     studies_table = _conf(args, "studies_table", "STUDIES_TABLE") or "Studies"
     samples_table = _conf(args, "samples_table", "SAMPLES_TABLE") or "Samples"
@@ -3718,6 +3819,11 @@ def cmd_status(args: argparse.Namespace) -> int:
         out.render_table(tbl)
 
     out.info(f"Total samples: {len(samples)}")
+
+    try:
+        _report_stalled_studies(client, studies_table, batch)
+    except Exception as exc:  # reconciling must not cost the sample summary
+        out.warn(f"Could not check for stalled batches: {exc}")
     return 0
 
 

@@ -8,6 +8,42 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.6.10] - 2026-09-10
+
+### Fixed
+
+- **A failing run could leave its study looking busy forever.** The launch
+  script's `EXIT` trap reports a failure with `wmw set-status --status error`,
+  and that call went through `conda run -p <env> wmw`. `conda run` chdirs into
+  the current working directory before it execs the child, so when a batch's
+  work dir stopped being readable mid-run the trap itself died with
+  `PermissionError: [Errno 13] Permission denied: '<output dir>'` — on a
+  directory `set-status` never touches, since it only talks to Airtable. The
+  study kept the `cataloging` status its stage had set on the way in, and
+  nothing recorded the failure.
+
+  `_env_command()` now calls an env given as a path directly as
+  `<env>/bin/<binary>`: bash needs no access to the cwd to exec a binary. Each
+  stage's trap also `cd`s to `/` before reporting. An env given by name still
+  needs conda to resolve it and now runs under `conda run --no-capture-output`,
+  so drakkar's output streams into `<code>.out`/`<code>.err` as it happens
+  instead of being buffered by conda and surfacing only inside a crash report.
+
+- **conda no longer blocks the script for 40 seconds on a crash.** A detached
+  `screen` session still hands conda a tty, so on an unexpected error conda
+  asked whether to upload a crash report and waited for an answer that was never
+  coming. The script now exports `CONDA_REPORT_ERRORS=false` and redirects stdin
+  from `/dev/null`.
+
+### Added
+
+- **`wmw status` reports stalled batches.** A launch script killed outright — an
+  OOM kill, a work dir that stopped being readable, a lost login session — never
+  reaches its `EXIT` trap, so nothing records the outcome and Airtable cannot
+  tell the difference between that and a batch that is still running. `wmw
+  status` now checks every study whose status says a stage is in progress
+  against the live `screen` sessions, and warns about the ones nothing is
+  running.
 ## [0.6.9] - 2026-09-07
 
 ### Changed

@@ -547,6 +547,11 @@ wmw status [--batch BATCH] [--airtable-token TOKEN] [--base-id BASE_ID]
 
 Prints a Rich table of `status → count` for samples (filtered by batch if given).
 
+It then reconciles the Studies table against what is actually running: a study whose
+status says a stage is in progress, with no screen session of that name in this account,
+is reported as stalled. A launch script that is killed outright never reaches its `EXIT` trap, so it
+leaves the study looking busy forever; this is what catches that.
+
 ---
 
 ## wmw config

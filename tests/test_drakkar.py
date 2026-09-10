@@ -380,8 +380,8 @@ def test_generate_preprocessing_script_wmw_conda_env(tmp_path):
         conda_env="/envs/drakkar",
         wmw_conda_env="/envs/wmw",
     )
-    assert "conda run -p /envs/wmw wmw set-status" in script
-    assert "conda run -p /envs/drakkar drakkar preprocessing" in script
+    assert "/envs/wmw/bin/wmw set-status" in script
+    assert "/envs/drakkar/bin/drakkar preprocessing" in script
 
 
 # generate_cataloging_script
@@ -438,8 +438,56 @@ def test_generate_cataloging_script_wmw_conda_env(tmp_path):
         conda_env="/envs/drakkar",
         wmw_conda_env="/envs/wmw",
     )
-    assert "conda run -p /envs/wmw wmw set-status" in script
-    assert "conda run -p /envs/drakkar drakkar cataloging" in script
+    assert "/envs/wmw/bin/wmw set-status" in script
+    assert "/envs/drakkar/bin/drakkar cataloging" in script
+
+
+def test_path_style_envs_bypass_conda_run(tmp_path):
+    script = drakkar.generate_preprocessing_script(
+        code="PRJ005",
+        tsv_path=tmp_path / "PRJ005.tsv",
+        work_dir=tmp_path,
+        conda_env="/envs/drakkar",
+        wmw_conda_env="/envs/wmw",
+    )
+    # `conda run` chdirs into the cwd before exec'ing the child, so an unreadable
+    # work dir takes the command down with it — including the status report.
+    assert "conda run" not in script
+
+
+def test_named_envs_still_use_conda_run_without_buffering(tmp_path):
+    script = drakkar.generate_preprocessing_script(
+        code="PRJ006",
+        tsv_path=tmp_path / "PRJ006.tsv",
+        work_dir=tmp_path,
+        conda_env="drakkar",
+        wmw_conda_env="wmw",
+    )
+    assert "conda run --no-capture-output -n drakkar drakkar preprocessing" in script
+    assert "conda run --no-capture-output -n wmw wmw set-status" in script
+
+
+def test_exit_trap_leaves_the_work_dir_before_reporting(tmp_path):
+    script = drakkar.generate_preprocessing_script(
+        code="PRJ007",
+        tsv_path=tmp_path / "PRJ007.tsv",
+        work_dir=tmp_path,
+        conda_env="/envs/drakkar",
+    )
+    trap_body = script.split("_on_exit_preprocessing() {", 1)[1].split("\n}", 1)[0]
+    assert "cd / 2>/dev/null || true" in trap_body
+    assert trap_body.index("cd /") < trap_body.index("set-status")
+
+
+def test_script_gives_conda_no_tty_to_prompt_on(tmp_path):
+    script = drakkar.generate_preprocessing_script(
+        code="PRJ008",
+        tsv_path=tmp_path / "PRJ008.tsv",
+        work_dir=tmp_path,
+        conda_env="/envs/drakkar",
+    )
+    assert "export CONDA_REPORT_ERRORS=false" in script
+    assert "exec < /dev/null >>" in script
 
 
 def test_annotation_outputs_present_requires_gene_annotations_and_taxonomy(tmp_path):
