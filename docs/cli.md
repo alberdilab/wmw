@@ -255,15 +255,15 @@ wmw process [--batch BATCH]
 ```
 
 **Execution order:**
-1. Fetch studies where `status` is `"ready"`, `"resume"`, or `"rerun"` (filtered by `--batch` if given)
-2. For `status="resume"`, upload any existing preprocessing/cataloging/profiling outputs to Airtable
+1. Fetch studies where `status` is `"ready"`, `"resume"`, `"unlock"`, or `"rerun"` (filtered by `--batch` if given)
+2. For `status="resume"` or `"unlock"`, upload any existing preprocessing/cataloging/profiling outputs to Airtable. `"unlock"` is otherwise a resume whose launch script first runs `drakkar unlock` on the work dir
 3. If resume still has a pending Drakkar task, restart at the stage after the latest one that left outputs behind
 4. For `status="ready"` or `"rerun"`, fetch the study's samples and write `{output_dir}/{code}/{code}.tsv` with samples whose status is `"use"`
 5. Resolve the study's sequencing platform from the samples' `instrument_platform` and pass it to `drakkar preprocessing --platform` (`illumina` or `bgi`); a study whose samples disagree is reported and preprocessed as its majority platform
 6. Write `{output_dir}/{code}/{code}.sh`, which chains the starting stage and **every stage after it** — `--only` limits it to the one stage
 7. Studies with `Priority = Low` add `--slurm-partition lazyqueue --slurm-qos lazy` to generated Drakkar commands
 8. Launch the script in a detached `screen` session named `{code}`
-9. Generated scripts update the Study status through `preprocessing`, `preprocessed`, `cataloging`, `cataloged`, `amring`, `amred`, `quantifying`, `quantified`, `annotating`, `Done`, `error`, or `stopped`
+9. Generated scripts update the Study status through `preprocessing`, `preprocessed`, `cataloging`, `cataloged`, `amring`, `amred`, `quantifying`, `quantified`, `annotating`, `Done`, `error`, `stopped`, or `locked`
 10. Genome FASTA attachment uploads are detached into a `{code}-genome-upload`
    `screen` session when finalization is run outside an existing `screen`; if
    `screen` is unavailable, upload falls back to the current process
@@ -290,6 +290,24 @@ science outputs are on disk either way, and the script parks the study in
 Set the study back to `resume` and run `wmw process --batch CODE` again to pick up
 after a genuine failure; the run restarts at the stage that failed and continues
 through the rest of the pipeline.
+
+**A zero exit is not enough.** drakkar exits 0 when it refuses to start, so a
+stage reports done only once the files the next stage needs exist:
+`{code}_preprocessing.tsv`, `cataloging/final/all_bin_{paths.txt,metadata.csv}`,
+`amr/amr_qc.tsv`, `profiling_genomes/final/{counts,bases}.tsv`, and the
+annotation tables. A stage that is missing them fails with `error`; drakkar's own
+explanation is in `{code}.out`.
+
+**Leftover Snakemake locks.** A run that is killed outright (an OOM kill, a lost
+session) never releases `{code}/.snakemake/locks`, and drakkar will not start on
+a locked directory. Each stage checks for a lock before calling drakkar and, if
+it finds one, sets the study to `locked` and stops. The script does not clear
+the lock itself, because it may belong to a run that is still going. Once
+nothing is running in the work dir, set the study to `unlock` and run `wmw
+process` again. `unlock` is a `resume` whose launch script first runs `drakkar
+unlock -o <work dir>`. That runs inside the screen session, because outside one
+drakkar stops to ask for confirmation. If the lock survives the unlock, the
+first stage finds it again and the study returns to `locked`.
 
 ---
 

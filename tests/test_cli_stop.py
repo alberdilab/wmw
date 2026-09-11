@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
@@ -267,6 +268,44 @@ def test_cmd_set_status_warns_when_airtable_lacks_the_status_option(tmp_path):
         assert cli.cmd_set_status(args) == 0
 
     client.set_study_status.assert_called_once_with("Studies", ["recStudy"], "amring")
+
+
+def test_set_status_accepts_every_status_a_launch_script_reports(tmp_path):
+    """The script swallows a set-status failure, so a rejected label is silently lost."""
+    script = drakkar.generate_full_pipeline_script(
+        code="ST001", tsv_path=tmp_path / "ST001.tsv", work_dir=tmp_path, conda_env=""
+    )
+    reported = set(re.findall(r"--workflow (\S+) --status (\S+)", script))
+    assert ("cataloging", "locked") in reported
+    assert ("annotating", "resume") in reported
+
+    parser = cli._build_parser()
+    for workflow, status in sorted(reported):
+        parser.parse_args(
+            ["set-status", "--study", "ST001", "--workflow", workflow, "--status", status]
+        )
+
+
+def test_cmd_set_status_locked_writes_locked(tmp_path):
+    args = argparse.Namespace(
+        study="ST001",
+        workflow="cataloging",
+        status="locked",
+        output_dir=str(tmp_path),
+        studies_table="Studies",
+        samples_table="Samples",
+        genomes_table="Genomes",
+        airtable_token="",
+        base_id="",
+    )
+
+    client = MagicMock()
+    client.fetch_study_by_code.return_value = {"id": "recStudy", "fields": {"code": "ST001"}}
+
+    with patch("wmw.cli._require_airtable", return_value=client):
+        assert cli.cmd_set_status(args) == 0
+
+    client.set_study_status.assert_called_once_with("Studies", ["recStudy"], "locked")
 
 
 def test_cmd_set_status_annotating_completed_uploads_annotation_stats_and_file(tmp_path):
@@ -814,6 +853,53 @@ def test_cmd_process_resume_launches_amr_when_cataloging_done(tmp_path):
         < script_text.index("drakkar annotating")
     )
     run.assert_not_called()  # screen not available, script written but not launched
+
+
+def test_cmd_process_unlock_resumes_with_a_drakkar_unlock_first(tmp_path):
+    """'unlock' is a resume whose launch script clears the Snakemake lock first."""
+    args = argparse.Namespace(
+        batch="",
+        workflow="preprocessing",
+        slurm=False,
+        output_dir=str(tmp_path),
+        studies_table="Studies",
+        samples_table="Samples",
+        genomes_table="Genomes",
+        airtable_token="",
+        base_id="",
+    )
+
+    client = MagicMock()
+    studies = {
+        "unlock": {
+            "id": "recLocked",
+            "fields": {"code": "ST001", "study_accession": "PRJEB001", "status": "unlock"},
+        },
+        "resume": {
+            "id": "recResume",
+            "fields": {"code": "ST002", "study_accession": "PRJEB002", "status": "resume"},
+        },
+    }
+    client.fetch_studies_by_status.side_effect = (
+        lambda _table, status: [studies[status]] if status in studies else []
+    )
+    client.fetch_samples_for_study.return_value = [
+        {"id": "recS1", "fields": {"code": "SA000022", "status": "use"}},
+    ]
+
+    with (
+        patch("wmw.cli._require_airtable", return_value=client),
+        patch("wmw.drakkar.build_input_tsv"),
+        patch("shutil.which", return_value=None),
+    ):
+        assert cli.cmd_process(args) == 0
+
+    unlocked = (tmp_path / "ST001" / "ST001.sh").read_text()
+    resumed = (tmp_path / "ST002" / "ST002.sh").read_text()
+    assert unlocked.index(f"drakkar unlock -o {tmp_path / 'ST001'}") < unlocked.index(
+        "drakkar preprocessing"
+    )
+    assert "drakkar unlock" not in resumed
 
 
 def test_cmd_process_resume_launches_profiling_when_amr_done(tmp_path):

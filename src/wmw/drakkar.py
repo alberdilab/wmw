@@ -97,27 +97,67 @@ def amr_outputs_present(work_dir: Path) -> bool:
     return amr_qc_path(work_dir).exists()
 
 
-def _amr_output_check_lines(work_dir: Path) -> list[str]:
-    qc_path = amr_qc_path(work_dir)
+CATALOGING_OUTPUT_FILES = (
+    Path("cataloging") / "final" / "all_bin_paths.txt",
+    Path("cataloging") / "final" / "all_bin_metadata.csv",
+)
+
+PROFILING_OUTPUT_FILES = (
+    Path("profiling_genomes") / "final" / "counts.tsv",
+    Path("profiling_genomes") / "final" / "bases.tsv",
+)
+
+
+def _stage_required_outputs(stage: str, code: str, work_dir: Path) -> tuple[str, list[Path]]:
+    """Return (label, files) *stage* must leave behind before it may report done."""
+    if stage == "preprocessing":
+        return "preprocessing", [work_dir / f"{code}_preprocessing.tsv"]
+    if stage == "cataloging":
+        return "cataloging", [work_dir / rel_path for rel_path in CATALOGING_OUTPUT_FILES]
+    if stage == "amr":
+        return "AMR", [amr_qc_path(work_dir)]
+    if stage == "profiling":
+        return "profiling", [work_dir / rel_path for rel_path in PROFILING_OUTPUT_FILES]
+    return "annotation", [work_dir / rel_path for rel_path in ANNOTATION_OUTPUT_FILES]
+
+
+def _output_check_lines(code: str, label: str, paths: Sequence[Path]) -> list[str]:
+    """Return lines that fail the stage unless every file in *paths* exists.
+
+    drakkar exits 0 when it refuses to start — a leftover Snakemake lock, a
+    database change it will not mix into existing outputs — so a zero exit alone
+    would report a stage done that never ran.
+    """
+    checks = " || ".join(f"[ ! -f {shlex.quote(str(path))} ]" for path in paths)
+    noun, pronoun = ("output", "it") if len(paths) == 1 else ("outputs", "them")
+    rendered = " and ".join(str(path) for path in paths)
     return [
-        f"if [ ! -f {shlex.quote(str(qc_path))} ]; then",
-        f"    echo \"Missing required AMR output: {qc_path}\" >&2",
+        f"if {checks}; then",
+        f"    echo \"Missing required {label} {noun}: {rendered}\" >&2",
+        f"    echo \"drakkar exited without writing {pronoun}; its own messages are in {code}.out.\" >&2",
         "    exit 1",
         "fi",
     ]
 
 
-def _annotation_output_check_lines(work_dir: Path) -> list[str]:
-    checks = [
-        f"[ ! -f {shlex.quote(str(work_dir / rel_path))} ]"
-        for rel_path in ANNOTATION_OUTPUT_FILES
-    ]
-    rendered_files = " and ".join(
-        str(work_dir / rel_path) for rel_path in ANNOTATION_OUTPUT_FILES
-    )
+def _snakemake_lock_check_lines(work_dir: Path) -> list[str]:
+    """Return lines that stop a stage whose work dir still holds a Snakemake lock.
+
+    A run killed outright never releases its lock, and drakkar will not start on
+    a locked directory: given a tty it offers to delete the whole directory, and
+    without one (the script's stdin is /dev/null) it prints an error and exits 0.
+    The lock may equally belong to a run that is still going, so it is reported
+    — the stage's trap sets the study to 'locked' — rather than cleared; setting
+    the study to 'unlock' is how the user says it is safe to clear.
+    """
+    locks_dir = work_dir / ".snakemake" / "locks"
     return [
-        f"if {' || '.join(checks)}; then",
-        f"    echo \"Missing required annotation outputs: {rendered_files}\" >&2",
+        f'if [ -n "$(ls -A {shlex.quote(str(locks_dir))} 2>/dev/null)" ]; then',
+        f"    echo \"wmw: {work_dir} holds a Snakemake lock — another run is using it, "
+        "or one did not exit cleanly.\" >&2",
+        "    echo \"wmw: if nothing is running there, set the study to 'unlock' "
+        "and run wmw process again.\" >&2",
+        "    _WMW_LOCKED=1",
         "    exit 1",
         "fi",
     ]
@@ -387,13 +427,11 @@ def _stage_drakkar_flags(
 
 def _stage_post_lines(stage: str, code: str, work_dir: Path) -> list[str]:
     """Return the lines that run between a stage's command and its 'done' status."""
+    lines: list[str] = []
     if stage in ("preprocessing", "cataloging"):
-        return [_rename_workflow_tsv_line(code, work_dir, stage)]
-    if stage == "amr":
-        return _amr_output_check_lines(work_dir)
-    if stage == "annotating":
-        return _annotation_output_check_lines(work_dir)
-    return []
+        lines.append(_rename_workflow_tsv_line(code, work_dir, stage))
+    label, required = _stage_required_outputs(stage, code, work_dir)
+    return lines + _output_check_lines(code, label, required)
 
 
 def _set_status_line(
@@ -434,6 +472,8 @@ def _stage_block(
         '    if [ "$_WMW_SUCCESS" -ne 1 ]; then',
         '        if [ -f "$_WMW_STOP_FILE" ]; then',
         f"            {_set_status_line(wmw_cmd, code, stage, 'stopped', output_dir_arg, guarded=False)}",
+        '        elif [ "$_WMW_LOCKED" -eq 1 ]; then',
+        f"            {_set_status_line(wmw_cmd, code, stage, 'locked', output_dir_arg, guarded=False)}",
         "        else",
         f"            {_set_status_line(wmw_cmd, code, stage, 'error', output_dir_arg, guarded=False)}",
         "        fi",
@@ -442,6 +482,7 @@ def _stage_block(
         f"trap {trap_fn} EXIT",
         "",
         _set_status_line(wmw_cmd, code, stage, start_status, output_dir_arg),
+        *_snakemake_lock_check_lines(work_dir),
         drakkar_cmd,
         *_stage_post_lines(stage, code, work_dir),
         _set_status_line(wmw_cmd, code, stage, done_status, output_dir_arg),
@@ -482,6 +523,7 @@ def generate_pipeline_script(
     slurm_partition: str | None = None,
     slurm_qos: str | None = None,
     platform: str | None = None,
+    unlock: bool = False,
 ) -> str:
     """Return a bash script that runs *stages* back to back for *code*.
 
@@ -493,6 +535,10 @@ def generate_pipeline_script(
     *platform* is passed to `drakkar preprocessing --platform`; it is ignored by
     every other stage. Leaving it None omits the flag and lets drakkar apply its
     own illumina default.
+
+    *unlock* runs `drakkar unlock` on the work dir before the first stage. It is
+    part of the script rather than of `wmw process` because drakkar asks for
+    confirmation outside a screen session, and the script is where one exists.
     """
     stages = tuple(stages)
     if not stages:
@@ -547,6 +593,7 @@ def generate_pipeline_script(
         *conda_lines,
         f"_WMW_STOP_FILE={stop_file}",
         'rm -f "$_WMW_STOP_FILE"',
+        "_WMW_LOCKED=0",
         "_WMW_BOOKKEEPING_FAILED=0",
         "_wmw_bookkeeping_failed() {",
         '    echo "wmw: Airtable update failed ($1 -> $2); continuing the pipeline." >&2',
@@ -554,6 +601,16 @@ def generate_pipeline_script(
         "}",
         "",
     ]
+
+    if unlock:
+        # The study was set to 'unlock': the user vouches that nothing is running
+        # in the work dir, so a lock a killed run left behind can go. Whether it
+        # went is left to the first stage's lock check, which reports 'locked'.
+        lines.extend([
+            f"{drakkar_prefix} unlock -o {shlex.quote(str(work_dir))} "
+            '|| echo "wmw: drakkar unlock failed." >&2',
+            "",
+        ])
 
     cd_emitted = False
     for stage in stages:

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import gzip
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -513,6 +515,139 @@ def test_generate_annotation_script_checks_required_outputs(tmp_path):
     assert "genome_taxonomy.tsv" in script
     assert "Missing required annotation outputs" in script
     assert "wmw set-status --study PRJ001 --workflow annotating --status completed" in script
+
+
+def test_every_stage_checks_its_outputs_before_reporting_done(tmp_path):
+    """drakkar exits 0 when it refuses to start, so exit 0 alone proves nothing."""
+    script = drakkar.generate_full_pipeline_script(
+        code="PRJ009",
+        tsv_path=tmp_path / "PRJ009.tsv",
+        work_dir=tmp_path,
+        conda_env="",
+    )
+    for stage, done, required in (
+        ("preprocessing", "preprocessed", tmp_path / "PRJ009_preprocessing.tsv"),
+        ("cataloging", "cataloged", tmp_path / "cataloging/final/all_bin_paths.txt"),
+        ("cataloging", "cataloged", tmp_path / "cataloging/final/all_bin_metadata.csv"),
+        ("amr", "amr_done", drakkar.amr_qc_path(tmp_path)),
+        ("profiling", "quantified", tmp_path / "profiling_genomes/final/counts.tsv"),
+        ("profiling", "quantified", tmp_path / "profiling_genomes/final/bases.tsv"),
+        ("annotating", "completed", tmp_path / "annotating/genome_taxonomy.tsv"),
+    ):
+        check = script.index(f"[ ! -f {required} ]", script.index(f"drakkar {stage} "))
+        assert check < script.index(f"--workflow {stage} --status {done}")
+
+
+def test_every_stage_refuses_to_start_on_a_snakemake_lock(tmp_path):
+    script = drakkar.generate_full_pipeline_script(
+        code="PRJ010",
+        tsv_path=tmp_path / "PRJ010.tsv",
+        work_dir=tmp_path,
+        conda_env="",
+    )
+    lock_check = f'if [ -n "$(ls -A {tmp_path / ".snakemake" / "locks"} 2>/dev/null)" ]'
+    assert script.count(lock_check) == len(drakkar.PIPELINE_STAGES)
+    for stage in drakkar.PIPELINE_STAGES:
+        drakkar_call = script.index(f"drakkar {stage} ")
+        assert script.rindex(lock_check, 0, drakkar_call) > script.rindex(
+            f"trap _on_exit_{stage} EXIT", 0, drakkar_call
+        )
+    # The lock is reported, never cleared: it may belong to a run still going.
+    assert "drakkar unlock" not in script
+    assert "--workflow cataloging --status locked" in script
+
+
+def test_unlock_runs_drakkar_unlock_before_the_first_stage(tmp_path):
+    script = drakkar.generate_pipeline_script(
+        code="PRJ012",
+        work_dir=tmp_path,
+        conda_env="/envs/drakkar",
+        stages=drakkar.stages_from("amr"),
+        unlock=True,
+    )
+    unlock_call = script.index(f"/envs/drakkar/bin/drakkar unlock -o {tmp_path}")
+    assert unlock_call < script.index("trap _on_exit_amr EXIT")
+    assert script.count("drakkar unlock -o") == 1
+
+
+def _run_stubbed_script(tmp_path, drakkar_body, locked=False, unlock=False):
+    """Run a cataloging-onward script against stub drakkar/wmw binaries."""
+    work_dir = tmp_path / "out" / "PRJ011"
+    work_dir.mkdir(parents=True)
+    calls = tmp_path / "calls.log"
+    for env, binary, body in (("drakkar", "drakkar", drakkar_body), ("wmw", "wmw", "exit 0")):
+        stub = tmp_path / "envs" / env / "bin" / binary
+        stub.parent.mkdir(parents=True)
+        stub.write_text(f'#!/usr/bin/env bash\necho "{binary} $*" >> {calls}\n{body}\n')
+        stub.chmod(0o755)
+    if locked:
+        (work_dir / ".snakemake" / "locks").mkdir(parents=True)
+        (work_dir / ".snakemake" / "locks" / "0.input.lock").write_text("")
+
+    script = drakkar.generate_pipeline_script(
+        code="PRJ011",
+        work_dir=work_dir,
+        conda_env=str(tmp_path / "envs" / "drakkar"),
+        stages=drakkar.stages_from("cataloging"),
+        tsv_path=work_dir / "PRJ011.tsv",
+        wmw_conda_env=str(tmp_path / "envs" / "wmw"),
+        unlock=unlock,
+    )
+    script_path = work_dir / "PRJ011.sh"
+    script_path.write_text(script)
+    # No conda on PATH, so the activation block is skipped as it is on a host without it.
+    subprocess.run(["bash", str(script_path)], env={"PATH": "/usr/bin:/bin"}, check=False)
+    return calls.read_text().splitlines(), (work_dir / "PRJ011.err").read_text()
+
+
+def _statuses(calls):
+    """Return the --status values the script reported, in order."""
+    return [c.split("--status ")[1].split()[0] for c in calls if c.startswith("wmw ")]
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_a_drakkar_refusal_is_reported_as_an_error_not_as_done(tmp_path):
+    calls, err = _run_stubbed_script(
+        tmp_path, 'echo "ERROR: Output directory is locked"; exit 0'
+    )
+    assert _statuses(calls) == ["cataloging", "error"]
+    assert "Missing required cataloging outputs" in err
+    assert "its own messages are in PRJ011.out" in err
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_a_leftover_snakemake_lock_sets_the_study_to_locked(tmp_path):
+    calls, err = _run_stubbed_script(tmp_path, "exit 0", locked=True)
+    assert not [c for c in calls if c.startswith("drakkar ")]
+    assert _statuses(calls) == ["cataloging", "locked"]
+    assert "holds a Snakemake lock" in err
+    assert "set the study to 'unlock'" in err
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_unlock_clears_the_lock_and_the_run_carries_on(tmp_path):
+    work_dir = tmp_path / "out" / "PRJ011"
+    body = f"""case "$1" in
+  unlock) rm -rf {work_dir}/.snakemake/locks;;
+  cataloging) mkdir -p {work_dir}/cataloging/final
+              touch {work_dir}/cataloging/final/all_bin_paths.txt {work_dir}/cataloging/final/all_bin_metadata.csv;;
+  amr) mkdir -p {work_dir}/amr; touch {work_dir}/amr/amr_qc.tsv;;
+  profiling) mkdir -p {work_dir}/profiling_genomes/final
+             touch {work_dir}/profiling_genomes/final/counts.tsv {work_dir}/profiling_genomes/final/bases.tsv;;
+  annotating) mkdir -p {work_dir}/annotating
+              touch {work_dir}/annotating/gene_annotations.tsv.xz {work_dir}/annotating/genome_taxonomy.tsv;;
+esac"""
+    calls, _err = _run_stubbed_script(tmp_path, body, locked=True, unlock=True)
+    assert calls[0] == f"drakkar unlock -o {work_dir}"
+    assert _statuses(calls)[-1] == "completed"
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_a_failed_unlock_leaves_the_study_locked(tmp_path):
+    calls, err = _run_stubbed_script(tmp_path, "exit 1", locked=True, unlock=True)
+    assert [c.split()[1] for c in calls if c.startswith("drakkar ")] == ["unlock"]
+    assert _statuses(calls) == ["cataloging", "locked"]
+    assert "drakkar unlock failed" in err
 
 
 def test_parse_genome_annotation_tsv_reads_legacy_wide_table(tmp_path):

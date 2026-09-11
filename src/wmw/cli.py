@@ -1357,9 +1357,9 @@ def cmd_process(args: argparse.Namespace) -> int:
 
     import shutil
 
-    out.info("Fetching studies with status 'ready', 'resume', or 'rerun' from Airtable…")
+    out.info("Fetching studies with status 'ready', 'resume', 'unlock', or 'rerun' from Airtable…")
     actionable_studies: list[dict] = []
-    for status_val in ("ready", "resume", "rerun"):
+    for status_val in ("ready", "resume", "unlock", "rerun"):
         actionable_studies.extend(
             client.fetch_studies_by_status(studies_table, status=status_val)
         )
@@ -1371,7 +1371,7 @@ def cmd_process(args: argparse.Namespace) -> int:
         ]
 
     if not actionable_studies:
-        label = f"code={batch_filter!r}" if batch_filter else "status 'ready'/'resume'/'rerun'"
+        label = f"code={batch_filter!r}" if batch_filter else "status 'ready'/'resume'/'unlock'/'rerun'"
         out.info(f"No studies with {label} found.")
         return 0
 
@@ -1391,8 +1391,14 @@ def cmd_process(args: argparse.Namespace) -> int:
 
         work_dir = output_dir / code
 
-        if study_status == "resume":
-            out.info(f"{code}: status 'resume' — resolving pending Drakkar and Airtable tasks.")
+        # 'unlock' is a resume whose launch script first clears the Snakemake
+        # lock a killed run left behind (the study was 'locked' until then).
+        if study_status in ("resume", "unlock"):
+            unlock = study_status == "unlock"
+            out.info(
+                f"{code}: status {study_status!r} — resolving pending Drakkar and Airtable tasks"
+                + ("; the launch script runs 'drakkar unlock' first." if unlock else ".")
+            )
             preprocessing_tsv = _existing_workflow_tsv_path(work_dir, code, "preprocessing")
             cataloging_tsv = _existing_workflow_tsv_path(work_dir, code, "cataloging")
             bin_metadata_path = work_dir / "cataloging" / "final" / "all_bin_metadata.csv"
@@ -1527,6 +1533,7 @@ def cmd_process(args: argparse.Namespace) -> int:
                 memory_multiplier=fields.get("memory_boost") or None,
                 time_multiplier=fields.get("time_boost") or None,
                 platform=platform,
+                unlock=unlock,
                 **priority_drakkar_kwargs,
             )
             _write_and_maybe_launch_script(code, script_path, script)
@@ -1858,20 +1865,24 @@ _PROCESS_STATUS_MAP: dict[tuple[str, str], str] = {
     ("preprocessing", "preprocessed"):  "preprocessed",
     ("preprocessing", "stopped"):       "stopped",
     ("preprocessing", "error"):         "error",
+    ("preprocessing", "locked"):        "locked",
     ("cataloging",    "cataloging"):    "cataloging",
     ("cataloging",    "cataloged"):     "cataloged",
     ("cataloging",    "stopped"):       "stopped",
     ("cataloging",    "error"):         "error",
+    ("cataloging",    "locked"):        "locked",
     ("profiling",     "quantifying"):   "quantifying",
     ("profiling",     "quantified"):    "quantified",
     ("profiling",     "stopped"):       "stopped",
     ("profiling",     "error"):         "error",
+    ("profiling",     "locked"):        "locked",
     ("annotating",   "annotating"):    "annotating",
     ("annotating",   "completed"):     "Done",
     ("annotating",   "annotated"):     "Done",
     ("annotating",   "Done"):          "Done",
     ("annotating",   "stopped"):       "stopped",
     ("annotating",   "error"):         "error",
+    ("annotating",   "locked"):        "locked",
     ("amr",          "amr"):           "amring",
     ("amr",          "amring"):        "amring",
     ("amr",          "amr_done"):      "amred",
@@ -1879,6 +1890,7 @@ _PROCESS_STATUS_MAP: dict[tuple[str, str], str] = {
     ("amr",          "completed"):     "amred",
     ("amr",          "stopped"):       "stopped",
     ("amr",          "error"):         "error",
+    ("amr",          "locked"):        "locked",
 }
 
 
@@ -4181,8 +4193,10 @@ def _build_parser() -> argparse.ArgumentParser:
             "write a <code>.tsv input file, and write a <code>.sh launch script that "
             "runs Drakkar and logs progress back to Airtable. Studies with status "
             "'resume' resolve pending Airtable tasks and restart at the first stage "
-            "whose outputs are missing. Either way the script runs on through the "
-            "remaining stages, so no stage boundary needs a second wmw process call."
+            "whose outputs are missing; 'unlock' does the same after clearing the "
+            "Snakemake lock that set the study to 'locked'. Either way the script runs "
+            "on through the remaining stages, so no stage boundary needs a second wmw "
+            "process call."
         ),
     )
     _add_airtable_flags(p_process)
@@ -4214,7 +4228,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Run just one stage: the one named by --workflow, or, for a study with "
-            "status 'resume', the first stage whose outputs are missing. Without it "
+            "status 'resume' or 'unlock', the first stage whose outputs are missing. Without it "
             "the script continues through the rest of the pipeline."
         ),
     )
@@ -4337,6 +4351,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "amred",
             "stopped",
             "error",
+            "locked",
+            "resume",
         ],
         help="New status to set.",
     )

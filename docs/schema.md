@@ -16,7 +16,7 @@ linked to Studies by `study_accession`).
 | `tax_id` | text | ENA + SRA | NCBI taxon ID of the metagenome |
 | `first_public` | text | ENA + SRA | ISO date |
 | `center_name` | text | ENA + SRA | Submitting institution |
-| `status` | text | derived | Default `"new"`; processing states include `ready`, `preprocessing`, `preprocessed`, `cataloging`, `cataloged`, `error`, and `stopped` |
+| `status` | text | derived | Default `"new"`; processing states include `ready`, `preprocessing`, `preprocessed`, `cataloging`, `cataloged`, `error`, `stopped`, `locked`, and `unlock` |
 | `pubmed_id` | text | ENA | From ENA study record; used to seed PubMed lookup |
 | `pub_doi` | text | PubMed / CrossRef | |
 | `pub_url` | text | resolved | `https://doi.org/{doi}` or PubMed URL |
@@ -155,7 +155,10 @@ written to what is a date-typed Airtable column.
 
 ## Status lifecycle
 
-**Studies:** `new` → (manual review) → `approved` → `indexed` → `ready` → `preprocessing` → `preprocessed` → `cataloging` → `cataloged` → `amring` → `amred`. Failed or externally cancelled runs use `error` or `stopped`.
+**Studies:** `new` → (manual review) → `approved` → `indexed` → `ready` → `preprocessing` → `preprocessed` → `cataloging` → `cataloged` → `amring` → `amred`. Failed or externally cancelled runs use `error` or `stopped`. A
+stage that finds a leftover Snakemake lock in the work dir sets `locked`. Once
+nothing is running there, set `unlock` (a `resume` that runs `drakkar unlock`
+first) and run `wmw process` again.
 
 **Samples:** `use` rows are included in Drakkar input TSVs. `pending` and `ignore` rows are excluded.
 

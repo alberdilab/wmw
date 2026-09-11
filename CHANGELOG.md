@@ -8,6 +8,55 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.6.11] - 2026-09-11
+
+### Added
+
+- **`locked` and `unlock` study statuses.** A stage that finds a Snakemake lock
+  in its work dir (see below) now sets the study to `locked` instead of `error`,
+  so a lock is told apart from a real failure at a glance. Setting the study to
+  `unlock` tells `wmw process` that nothing is running there. It is then handled
+  like `resume`: outputs are finalized, and the launch script restarts at the
+  stage after the latest one that left outputs. The difference is that the
+  script first runs `drakkar unlock -o <work dir>`. The unlock runs inside the
+  screen session rather than in `wmw process`, because drakkar stops to ask for
+  confirmation when it is run outside one. If the lock survives the unlock, the
+  first stage finds it again and the study returns to `locked`.
+
+### Fixed
+
+- **A resumed run died seconds after its screen session started.** A run that
+  is killed outright leaves its Snakemake lock in `<work dir>/.snakemake/locks`,
+  and drakkar will not start on a locked directory. Given a tty it asks whether
+  to delete the whole directory; without one it prints `Output directory is
+  locked and no interactive prompt is available` and exits **0**. Since v0.6.10
+  the launch script's stdin is `/dev/null`, so every resume of a killed batch
+  took the second branch: the stage was reported done without running, and the
+  next stage then failed on its missing input. Resuming cataloging, for
+  instance, recorded `cataloged` and then `error` from AMR on a missing
+  `amr_qc.tsv`, all within seconds.
+
+  Every stage now checks for a lock before calling drakkar. If it finds one, it
+  sets the study to `locked` and writes the remedy to `<code>.err`: once nothing
+  is running there, set the study to `unlock`. The script does not clear the
+  lock on its own, because it may belong to a run that is still going.
+
+- **Studies were never parked in `resume` after a failed Airtable update.** When
+  a status update failed mid-run, the launch script meant to leave the study in
+  `resume` at the end so the next `wmw process` would replay the missed
+  finalization. But `wmw set-status` did not accept `resume`, and the script's
+  `|| true` hid the argparse error. `set-status` now accepts `resume` and
+  `locked`, and a test checks that it accepts every status a generated script
+  reports.
+
+- **A stage is only reported done once its outputs exist.** drakkar exits 0 on
+  its other refusals too (a database change it will not mix into existing
+  outputs, for example), and only AMR and annotation checked for their results.
+  Preprocessing now requires `<code>_preprocessing.tsv`, cataloging
+  `cataloging/final/all_bin_{paths.txt,metadata.csv}`, and profiling
+  `profiling_genomes/final/{counts,bases}.tsv` before reporting done. A stage
+  that is missing its outputs fails with `error`, and the message in
+  `<code>.err` points to drakkar's own explanation in `<code>.out`.
 ## [0.6.10] - 2026-09-10
 
 ### Fixed
