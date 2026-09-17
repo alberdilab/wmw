@@ -29,7 +29,7 @@ Airtable ──► wmw process ──► build manifest ──► drakkar <workf
                                                           └──► ERDA (assemblies + final bins)
 
                             amr outputs ──► Airtable (per-assembly counts, table attachments)
-                                                          └──► ERDA (AMR result tables)
+                                                          └──► ERDA (AMR result tables, prodigal gene calls)
 ```
 
 ## Module responsibilities
@@ -232,5 +232,8 @@ between requests. Returns empty dict on any failure (publication metadata is opt
 | Contig-to-bin tables attach per sample, gzipped and renamed | The contig membership of a sample's bins belongs on that sample's row, not the study's. Every assembly's binette table is called `final_contig_to_bin.tsv` and Airtable names an attachment after the file it was uploaded from, so each is compressed to `{code}_contig_to_bin.tsv.gz` first — which also keeps most of them under the ~3.7 MB attachment limit. |
 | AMR runs between cataloging and profiling | It needs the assemblies cataloging produces and nothing profiling or annotating adds. Keeping it in the one sequential chain means one script, one screen session, one status field and one stop marker — running it concurrently would need a separate copy of all four, plus its own Snakemake output root to avoid locking against the other stages. |
 | AMR transfer runs inline | The result tables are small compressed TSVs, unlike the multi-GB assemblies that justify a detached `screen` session for the cataloging transfer. |
+| AMR gene calls get their own `screen` session | The prodigal `.faa`/`.ffn` files are about as large as the assemblies, so they are detached like those. They are finalized right after cataloging, while the assembly transfer may still be running, so they use a separate `{code}-erda-genes` session and script: bash reads a script while it runs, and rewriting a live session's script would corrupt it. |
+| Gene calls only from a finished AMR run | Prodigal writes these files as it runs. A copy taken mid-run would be archived truncated, and every later transfer would skip it as already present, so `amr/amr_qc.tsv` must exist first. |
+| `upload-erda` without `--study` discovers batches on disk | As with `wmw upload-amr`, the output tree records what has actually been run. A batch that ran before a payload was archived has no Airtable status recording the gap. `--replace-files` still needs `--study`, so remote folders cannot be cleared for every batch at once. |
 | AMR result tables mirror ehio | The Airtable fields, the per-assembly `amr_qc.tsv` metrics and the study-prefixed ERDA copies follow the ehio AMR module, so results from both tools read the same way. |
-| Transfer detached into its own `screen` | A multi-GB upload must not hold up status updates or the next Drakkar stage, and `{code}-erda-upload` can be killed independently by `wmw stop`. |
+| Transfer detached into its own `screen` | A multi-GB upload must not hold up status updates or the next Drakkar stage, and `{code}-erda-upload` / `{code}-erda-genes` can be killed independently by `wmw stop`. A transfer started from inside a screen session, as a launch script's `wmw set-status` is, runs inline instead. |

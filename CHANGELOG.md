@@ -8,6 +8,43 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.6.12] - 2026-09-17
+
+### Added
+
+- **The AMR run's gene calls are archived on ERDA.** Before AMRFinderPlus runs,
+  `drakkar amr` calls genes with prodigal and keeps the results as
+  `amr/raw/prodigal/{assembly}.faa` (proteins) and `.ffn` (nucleotides). AMR
+  finalization now also gzips these into the SFTP connection and sends them to
+  `{SFTP_REMOTE_BASE}/{code}/{SFTP_REMOTE_GENE_DIR}/{assembly}.faa.gz` and
+  `.ffn.gz`, which is `/WMW/{code}/genes/` with the new `SFTP_REMOTE_GENE_DIR`
+  key's default. The files are about as large as the assemblies, so like the
+  assembly transfer this runs in a detached screen session when one can be
+  started, called `{code}-erda-genes` so it never collides with a
+  `{code}-erda-upload` transfer that is still running. `wmw stop` stops it too.
+  Inside a launch script, which already runs in screen, it runs inline, as the
+  assembly transfer does. Nothing is launched for a batch with no gene calls or
+  with ERDA not configured. The `.gff` intermediates are not sent.
+- **`wmw upload-erda --what genes`** sends those files by hand, and
+  **`--what all`** now includes them. Only a finished AMR run
+  (`amr/amr_qc.tsv` present) is sent. Prodigal writes into these files as it
+  runs, so a copy taken mid-run would be archived truncated and then skipped as
+  already present by every later transfer.
+- **`wmw upload-erda` without `--study`** goes through every batch under
+  `DRAKKAR_OUTPUT_DIR` that has files of the selected kind, which is how batches
+  that ran before this release get their gene calls archived
+  (`wmw upload-erda --what genes`). Files already on ERDA are skipped, so an
+  interrupted run can simply be restarted. `--replace-files` still needs
+  `--study`, so remote folders cannot be cleared for every batch at once. The
+  new **`--dry-run`** lists each batch's files and their uncompressed size and
+  transfers nothing. `--sftp-gene-dir` overrides `SFTP_REMOTE_GENE_DIR`.
+
+### Changed
+
+- **`wmw upload-erda --what all` only sends what a batch has.** A batch that has
+  not reached AMR still gets its assemblies and bins archived, and the command
+  no longer fails because the AMR outputs are missing. A single `--what` for a
+  named study with nothing to send still exits 1.
 ## [0.6.11] - 2026-09-11
 
 ### Added

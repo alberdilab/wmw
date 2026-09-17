@@ -361,6 +361,10 @@ rather than results and are never written.
 The five aggregate tables and the manifest are attached to the study record and
 archived on ERDA — see [wmw upload-erda](#wmw-upload-erda). A table over
 Airtable's 5 MB encoded attachment limit is reported and left on ERDA only.
+The prodigal gene calls in `amr/raw/prodigal/` (`{assembly}.faa` and `.ffn`) are
+archived on ERDA too, in a detached `{code}-erda-genes` `screen` session. To
+archive them for batches that ran before this was automatic, run
+`wmw upload-erda --what genes` with no `--study`.
 
 | `amr/` file | attached as | Studies config key | Airtable column |
 |---|---|---|---|
@@ -390,7 +394,7 @@ wmw stop --batch CODE                 # --study CODE is an alias
 2. Write `{output_dir}/{code}/.wmw-stop` so generated script traps report `stopped`
 3. Stop the detached `screen` session named `{code}`, any
    `{code}-genome-upload` attachment-upload session, and any
-   `{code}-erda-upload` ERDA transfer session
+   `{code}-erda-upload` or `{code}-erda-genes` ERDA transfer session
 4. Best-effort cancel matching Slurm jobs. Matches include the study output path and Drakkar COMMENT values like `rule_fastp_wildcards_SA000022`, where `SA000022` is a sample `code` in that study.
 
 ---
@@ -482,24 +486,45 @@ wmw upload-amr [--study CODE]         # omit to do every batch on disk
 
 ## wmw upload-erda
 
-Transfer the assemblies and the binette-refined final bins of one study to
-ERDA, or its AMR result tables. The cataloging transfer is normally launched
-automatically in a detached `{code}-erda-upload` `screen` session when
-cataloging outputs are finalized; the AMR tables are small and are transferred
-inline when AMR outputs are finalized. Both happen from `wmw process` (resume)
-and from `wmw set-status`. Run this by hand to retry a failed transfer.
+Transfer the assemblies and binette-refined final bins of a study to ERDA,
+along with its AMR result tables or the prodigal gene calls of its AMR run.
+These transfers normally start automatically when the matching outputs are
+finalized:
+- the cataloging transfer in a detached `{code}-erda-upload` `screen` session
+- the AMR tables inline, because they are small
+- the gene calls in a detached `{code}-erda-genes` session
+
+This happens from both `wmw process` (resume) and `wmw set-status`. A transfer
+started from inside a screen session, as a launch script's own `set-status`
+call is, runs inline instead. Run this command by hand to retry a failed
+transfer, or leave out `--study` to archive every batch on disk.
 
 ```
-wmw upload-erda --study CODE
-                [--what {cataloging,amr,all}]  # default: cataloging
+wmw upload-erda [--study CODE]               # omit to do every batch on disk
+                [--what {cataloging,amr,genes,all}]  # default: cataloging
                 [--output-dir DIR]           # or config DRAKKAR_OUTPUT_DIR
                 [--sftp-host HOST]           # or config SFTP_HOST
                 [--sftp-user USER]           # or config SFTP_USER
                 [--sftp-identity PATH]       # or config SFTP_IDENTITY
                 [--sftp-remote-base PATH]    # or config SFTP_REMOTE_BASE
                 [--sftp-amr-dir NAME]        # or config SFTP_REMOTE_AMR_DIR
-                [--replace-files] [--verbose]
+                [--sftp-gene-dir NAME]       # or config SFTP_REMOTE_GENE_DIR
+                [--replace-files] [--dry-run] [--verbose]
 ```
+
+**Backfilling old batches**
+
+```
+wmw upload-erda --what genes --dry-run   # list batches, file counts, sizes
+wmw upload-erda --what genes             # send them; rerun to resume
+```
+
+Without `--study`, every directory under `DRAKKAR_OUTPUT_DIR` that has files of
+the selected kind is transferred, and a batch with none is left out. Files
+already on ERDA are skipped, so an interrupted backfill picks up where it
+stopped. The transfer runs in the foreground, so start a long backfill inside
+`screen` or `tmux`. `--replace-files` still needs `--study`, so remote folders
+cannot be cleared for every batch at once.
 
 **What is transferred — `--what cataloging`**
 
@@ -530,6 +555,25 @@ once it is downloaded away from its folder:
 
 The `.tsv.xz` tables drakkar writes are already compressed, so they go up
 byte-for-byte; only the plain-text summaries are gzipped into the connection.
+
+**What is transferred — `--what genes`**
+
+| Local | ERDA |
+|---|---|
+| `amr/raw/prodigal/{assembly}.faa` | `{SFTP_REMOTE_BASE}/{code}/{SFTP_REMOTE_GENE_DIR}/{assembly}.faa.gz` |
+| `amr/raw/prodigal/{assembly}.ffn` | `{SFTP_REMOTE_BASE}/{code}/{SFTP_REMOTE_GENE_DIR}/{assembly}.ffn.gz` |
+
+With the shipped defaults that is `/WMW/{code}/genes/`. The `.gff` and
+`.amrfinder.gff` files in the same folder are AMRFinderPlus intermediates and
+are not sent. Gene calls are sent only from a finished AMR run, one where
+`amr/amr_qc.tsv` exists. Prodigal writes into these files as it runs, so a copy
+taken mid-run would be archived truncated and then skipped as already present
+by every later transfer.
+
+**What is transferred — `--what all`**
+
+Each of the above that the batch has files for. A batch that has not reached
+AMR still gets its assemblies and bins archived.
 
 **Notes**
 - Both assemblies and bins are gzipped straight into the SFTP connection, so a

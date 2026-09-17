@@ -19,7 +19,7 @@ Discovers wild-animal shotgun metagenome studies in ENA (or GSA), populates Airt
 | `sra.py` | NCBI SRA via Biopython Entrez; `search_runs()`, `search_study()` — retained but not used in automated scan/fetch |
 | `gsa.py` | GSA (NGDC/CNCB) via its scraped web interface; `build_query()` (PubMed-style grammar), `search_study_accessions()` (scan), `fetch_study_metadata()` (browse + BioProject pages), `search_study()` (run records from the `.xlsx` metadata workbook), `bioproject_studies()`/`resolve_study_accession()` (PRJCA → CRA), `is_gsa_accession()`, `resolve_taxonomy()`, `keyword_matches()`, `to_https()` |
 | `metadata.py` | `normalize_ena/sra_run/study()`, `filter_runs()` (host_tax_id, min_bases, library_strategy, library_source, instrument_platform), `deduplicate_runs()`, `studies_from_runs()`, `BIOSAMPLE_FIELDS`, `OPTIONAL_SAMPLE_FIELDS` |
-| `drakkar.py` | Drakkar 2.x bridge; `build_input_tsv()` → sample detail TSV; `generate_pipeline_script()` → bash launch script for any run of `PIPELINE_STAGES` (`stages_from()` gives a stage plus its tail), with `generate_*_script()` as thin wrappers; `platform_from_instrument()`/`resolve_batch_platform()` → `drakkar preprocessing --platform illumina|bgi`; `parse_*_tsv()` → Airtable fields; AMR: `generate_amr_script()`, `parse_amr_qc_tsv()`, `amr_results_dir()`, `amr_result_files()`, `AMR_TABLE_FILES`; binette: `contig_to_bin_files()`, `gzip_contig_to_bin_tsv()` |
+| `drakkar.py` | Drakkar 2.x bridge; `build_input_tsv()` → sample detail TSV; `generate_pipeline_script()` → bash launch script for any run of `PIPELINE_STAGES` (`stages_from()` gives a stage plus its tail), with `generate_*_script()` as thin wrappers; `platform_from_instrument()`/`resolve_batch_platform()` → `drakkar preprocessing --platform illumina|bgi`; `parse_*_tsv()` → Airtable fields; AMR: `generate_amr_script()`, `parse_amr_qc_tsv()`, `amr_results_dir()`, `amr_result_files()`, `amr_gene_call_files()`, `AMR_TABLE_FILES`; binette: `contig_to_bin_files()`, `gzip_contig_to_bin_tsv()` |
 | `publications.py` | `fetch_from_pubmed()`, `fetch_from_crossref()`, `fetch_pdf_url()` (Unpaywall), `resolve_batch()` |
 | `transfer.py` | ERDA SFTP via paramiko; `SFTPTransfer` (`upload_stream()`, `upload_gzipped()`, `upload_file()`, `remote_exists()`, `remove_remote_dir()`), `gzip_into()` |
 
@@ -32,7 +32,7 @@ Discovers wild-animal shotgun metagenome studies in ENA (or GSA), populates Airt
 **AMR** — Studies: `file_amr_{hits,loci,drug_classes,mobility,mobility_regions,manifest}`, wired by `STUDIES_COL_FILE_AMR_*` to the base's `hits`, `loci`, `drug_classes`, `mobility`, `regions` and `amr_manifest` columns (config key name ≠ column name); Samples: `amr_{amrfinder_hits,rgi_hits,mobility_regions,loci,multi_tool_loci,mobility_links,mobile_loci}` from `amr_qc.tsv` — these `SAMPLES_COL_AMR_*` keys are still blank, so the per-assembly counts are not written yet
 
 ## Config keys (`src/wmw/data/config.yaml`)
-`SOURCE` `GSA_ORGANISM` `WMW_BASE` `STUDIES_TABLE` `SAMPLES_TABLE` `DRAKKAR_CONDA_ENV` `DRAKKAR_OUTPUT_DIR` `NCBI_EMAIL` `NCBI_API_KEY` `LIBRARY_SOURCE` `INSTRUMENT_PLATFORM` `MIN_BASES` `DATE_FIELD` `EXCLUDED_HOST_TAX_IDS` `SFTP_HOST` `SFTP_USER` `SFTP_PORT` `SFTP_IDENTITY` `SFTP_REMOTE_BASE` `SFTP_REMOTE_ASSEMBLY_DIR` `SFTP_REMOTE_BIN_DIR` `SFTP_REMOTE_AMR_DIR` `STUDIES_COL_FILE_AMR_*` `SAMPLES_COL_AMR_*` `SAMPLES_COL_CONTIG_TO_BIN` `SAMPLES_COL_LAT` `SAMPLES_COL_LON` `SAMPLES_COL_HOST_SEX` `SAMPLES_COL_BROAD_SCALE_ENVIRONMENTAL_CONTEXT` `SAMPLES_COL_ENVIRONMENTAL_MEDIUM`
+`SOURCE` `GSA_ORGANISM` `WMW_BASE` `STUDIES_TABLE` `SAMPLES_TABLE` `DRAKKAR_CONDA_ENV` `DRAKKAR_OUTPUT_DIR` `NCBI_EMAIL` `NCBI_API_KEY` `LIBRARY_SOURCE` `INSTRUMENT_PLATFORM` `MIN_BASES` `DATE_FIELD` `EXCLUDED_HOST_TAX_IDS` `SFTP_HOST` `SFTP_USER` `SFTP_PORT` `SFTP_IDENTITY` `SFTP_REMOTE_BASE` `SFTP_REMOTE_ASSEMBLY_DIR` `SFTP_REMOTE_BIN_DIR` `SFTP_REMOTE_AMR_DIR` `SFTP_REMOTE_GENE_DIR` `STUDIES_COL_FILE_AMR_*` `SAMPLES_COL_AMR_*` `SAMPLES_COL_CONTIG_TO_BIN` `SAMPLES_COL_LAT` `SAMPLES_COL_LON` `SAMPLES_COL_HOST_SEX` `SAMPLES_COL_BROAD_SCALE_ENVIRONMENTAL_CONTEXT` `SAMPLES_COL_ENVIRONMENTAL_MEDIUM`
 
 ## CLI commands
 ```
@@ -51,10 +51,10 @@ wmw upload-contig-to-bin --study CODE [--output-dir DIR] [--samples-table TABLE]
                          [--replace-files]
 wmw upload-amr [--study CODE] [--output-dir DIR] [--studies-table TABLE]
                [--samples-table TABLE] [--replace-files] [--dry-run]
-wmw upload-erda --study CODE [--what cataloging|amr|all] [--output-dir DIR]
+wmw upload-erda [--study CODE] [--what cataloging|amr|genes|all] [--output-dir DIR]
                 [--sftp-host H] [--sftp-user U] [--sftp-identity PATH]
-                [--sftp-remote-base PATH] [--sftp-amr-dir NAME]
-                [--replace-files] [--verbose]
+                [--sftp-remote-base PATH] [--sftp-amr-dir NAME] [--sftp-gene-dir NAME]
+                [--replace-files] [--dry-run] [--verbose]
 wmw status  [--batch BATCH]
 wmw config  --view | --edit
 wmw update
@@ -90,10 +90,12 @@ wmw update
 - Contig-to-bin: `_upload_contig_to_bin_attachments()` attaches each `cataloging/binette/<assembly>/final_contig_to_bin.tsv` to the Samples row of that assembly, gzipped and renamed `<code>_contig_to_bin.tsv.gz` (Airtable names an attachment after its file, and every assembly's is called the same). Runs inline from `_finalize_cataloging_outputs()`; `wmw upload-contig-to-bin` is the manual backfill. Already-attached rows are skipped unless `--replace-files`; a table over the ~3.7 MB attachment limit is reported and skipped
 - `wmw upload-amr` is the manual backfill for the Studies AMR attachments: with no `--study` it discovers every batch under `DRAKKAR_OUTPUT_DIR` whose `amr/` folder holds tables (`drakkar.amr_result_files()`), because a study processed before the columns were configured has no Airtable status recording the gap. Already-attached fields are skipped unless `--replace-files`; `amr_qc.tsv` is optional, and the Samples stats ride along when it and the `SAMPLES_COL_AMR_*` keys are both there. ERDA is left to `wmw upload-erda --what amr`
 - Unsplit paired runs: an SRA run submitted as already-trimmed reads loses its pairing at load time — the loader stores every read as its own single-read spot (one file's reads, then the other's, each spot carrying a zero-length mate), so ENA serves one flat `<run>.fastq.gz` holding **both** mates rather than a `_1`/`_2` pair. No per-mate URL exists to fetch, but the two halves are equal and each read keeps its read index, so splitting is a read-count halving the archive URL alone supports. wmw stays out of the data path: `_split_fastq_urls()` routes that URL to `fastq_url_unsplit` (not `fastq_url_1` — the file is not R1), `build_input_tsv()` emits it as `rawreads_unsplit` with `rawreads1`/`rawreads2` blanked for that row, and drakkar splits it before preprocessing. `metadata.unsplit_paired_runs()` drives the `fetch`/`process` warnings
+- AMR gene calls: `_transfer_amr_genes_to_erda()` sends `amr/raw/prodigal/{assembly}.{faa,ffn}` gzipped to `{SFTP_REMOTE_BASE}/<code>/{SFTP_REMOTE_GENE_DIR}/`, called from `_finalize_amr_outputs()` after the AMR tables. They are about as large as the assemblies, so they go through a `<code>-erda-genes` screen session with its own script (`_launch_erda_upload_screen(what="genes")`), separate from the cataloging session that may still be running. Like every detached transfer, they run inline when `STY` is set. `_upload_amr_genes_to_erda()` refuses a run without `amr_qc.tsv`: prodigal writes these files in place, so a mid-run copy would be archived truncated and then skipped forever
+- `wmw upload-erda` without `--study` discovers batches on disk (`_erda_upload_plan()` / `_erda_payload_files()`). Each batch is sent only the payloads it has files for, and `--replace-files` requires `--study`. `_ready_erda_settings()` is the shared configured/user/paramiko gate
 - ERDA transfers skip files already present; `replace_existing_attachments` is deliberately **not** propagated to them (it works around Airtable appending on upload). `wmw upload-erda --replace-files` is the explicit re-transfer
 
 ## Tests & release
-`pytest tests/` (524 tests) · `python scripts/release.py X.Y.Z` (add `--dry-run` first)
+`pytest tests/` (547 tests) · `python scripts/release.py X.Y.Z` (add `--dry-run` first)
 
 ## Changelog policy
 - Every code change must be logged under the `[Unreleased]` section of `CHANGELOG.md` before the work is considered done.

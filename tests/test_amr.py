@@ -73,6 +73,20 @@ def _make_amr_output(root: Path, code: str = "ST001", *, qc: str = QC_ROW) -> Pa
     return work_dir
 
 
+def _make_gene_calls(root: Path, code: str = "ST001", assemblies=("SA000022",)) -> Path:
+    """Add the prodigal gene calls 'drakkar amr' leaves in amr/raw/prodigal/."""
+    work_dir = root / code
+    gene_dir = work_dir / drakkar.AMR_GENE_CALL_DIR
+    gene_dir.mkdir(parents=True, exist_ok=True)
+    for assembly in assemblies:
+        (gene_dir / f"{assembly}.faa").write_text(f">{assembly}_1\nMKV\n", encoding="utf-8")
+        (gene_dir / f"{assembly}.ffn").write_text(f">{assembly}_1\nATGAAAGTT\n", encoding="utf-8")
+        # AMRFinderPlus intermediates, never archived
+        (gene_dir / f"{assembly}.gff").write_text("##gff-version 3\n", encoding="utf-8")
+        (gene_dir / f"{assembly}.amrfinder.gff").write_text("##gff-version 3\n", encoding="utf-8")
+    return work_dir
+
+
 def _make_assemblies(root: Path, code: str = "ST001") -> Path:
     work_dir = root / code
     megahit = work_dir / "cataloging" / "megahit" / "SA000022"
@@ -94,7 +108,9 @@ def _amr_args(output_dir: Path, **overrides) -> argparse.Namespace:
         sftp_assembly_dir="",
         sftp_bin_dir="",
         sftp_amr_dir="",
+        sftp_gene_dir="",
         replace_files=False,
+        dry_run=False,
         verbose=False,
     )
     for key, value in overrides.items():
@@ -459,6 +475,212 @@ def test_upload_amr_to_erda_continues_past_one_failed_table(tmp_path):
     assert "/WMW/ST001/amr/ST001_amr_loci.tsv.xz" in fake.streamed
 
 
+# ---------------------------------------------------------------------------
+# prodigal gene calls
+# ---------------------------------------------------------------------------
+
+def test_amr_gene_call_files_returns_only_proteins_and_nucleotides(tmp_path):
+    work_dir = _make_gene_calls(tmp_path, assemblies=("SA000022", "SA000438"))
+    assert [p.name for p in drakkar.amr_gene_call_files(work_dir)] == [
+        "SA000022.faa", "SA000022.ffn", "SA000438.faa", "SA000438.ffn",
+    ]
+
+
+def test_amr_gene_call_files_is_empty_without_the_prodigal_folder(tmp_path):
+    assert drakkar.amr_gene_call_files(tmp_path / "ST001") == []
+
+
+def test_upload_genes_to_erda_sends_every_gene_call_gzipped(tmp_path):
+    _make_amr_output(tmp_path)
+    _make_gene_calls(tmp_path, assemblies=("SA000022", "SA000438"))
+    fake = _FakeTransfer()
+
+    with (
+        patch("wmw.transfer.SFTPTransfer", return_value=fake),
+        patch("wmw.transfer.paramiko_available", return_value=True),
+    ):
+        assert cli._upload_amr_genes_to_erda(_amr_args(tmp_path), "ST001", tmp_path) is True
+
+    assert sorted(fake.streamed) == [
+        "/WMW/ST001/genes/SA000022.faa.gz",
+        "/WMW/ST001/genes/SA000022.ffn.gz",
+        "/WMW/ST001/genes/SA000438.faa.gz",
+        "/WMW/ST001/genes/SA000438.ffn.gz",
+    ]
+    assert gzip.decompress(fake.streamed["/WMW/ST001/genes/SA000438.ffn.gz"]) == (
+        b">SA000438_1\nATGAAAGTT\n"
+    )
+    assert fake.removed_dirs == []
+
+
+def test_upload_genes_to_erda_skips_files_already_present(tmp_path):
+    _make_amr_output(tmp_path)
+    _make_gene_calls(tmp_path)
+    fake = _FakeTransfer(existing={"/WMW/ST001/genes/SA000022.faa.gz"})
+    with (
+        patch("wmw.transfer.SFTPTransfer", return_value=fake),
+        patch("wmw.transfer.paramiko_available", return_value=True),
+    ):
+        assert cli._upload_amr_genes_to_erda(_amr_args(tmp_path), "ST001", tmp_path) is True
+    assert list(fake.streamed) == ["/WMW/ST001/genes/SA000022.ffn.gz"]
+
+
+def test_upload_genes_to_erda_replace_clears_the_remote_folder_first(tmp_path):
+    _make_amr_output(tmp_path)
+    _make_gene_calls(tmp_path)
+    fake = _FakeTransfer(existing={"/WMW/ST001/genes/SA000022.faa.gz"})
+    with (
+        patch("wmw.transfer.SFTPTransfer", return_value=fake),
+        patch("wmw.transfer.paramiko_available", return_value=True),
+    ):
+        cli._upload_amr_genes_to_erda(
+            _amr_args(tmp_path), "ST001", tmp_path, replace_existing=True
+        )
+    assert fake.removed_dirs == ["/WMW/ST001/genes"]
+    assert "/WMW/ST001/genes/SA000022.faa.gz" in fake.streamed
+
+
+def test_upload_genes_to_erda_honours_a_custom_remote_folder(tmp_path):
+    _make_amr_output(tmp_path)
+    _make_gene_calls(tmp_path)
+    fake = _FakeTransfer()
+    with (
+        patch("wmw.transfer.SFTPTransfer", return_value=fake),
+        patch("wmw.transfer.paramiko_available", return_value=True),
+    ):
+        cli._upload_amr_genes_to_erda(
+            _amr_args(tmp_path, sftp_gene_dir="prodigal"), "ST001", tmp_path
+        )
+    assert sorted(fake.streamed) == [
+        "/WMW/ST001/prodigal/SA000022.faa.gz",
+        "/WMW/ST001/prodigal/SA000022.ffn.gz",
+    ]
+
+
+def test_upload_genes_to_erda_refuses_an_unfinished_run(tmp_path):
+    """A file prodigal is still writing would be archived truncated, then skipped forever."""
+    work_dir = _make_amr_output(tmp_path)
+    _make_gene_calls(tmp_path)
+    drakkar.amr_qc_path(work_dir).unlink()
+    with (
+        patch("wmw.transfer.SFTPTransfer") as sftp,
+        patch("wmw.transfer.paramiko_available", return_value=True),
+    ):
+        assert cli._upload_amr_genes_to_erda(_amr_args(tmp_path), "ST001", tmp_path) is False
+    sftp.assert_not_called()
+
+
+def test_upload_genes_to_erda_reports_nothing_to_send_without_gene_calls(tmp_path):
+    _make_amr_output(tmp_path)
+    with (
+        patch("wmw.transfer.SFTPTransfer") as sftp,
+        patch("wmw.transfer.paramiko_available", return_value=True),
+    ):
+        assert cli._upload_amr_genes_to_erda(_amr_args(tmp_path), "ST001", tmp_path) is False
+    sftp.assert_not_called()
+
+
+def test_upload_genes_to_erda_continues_past_one_failed_file(tmp_path):
+    _make_amr_output(tmp_path)
+    _make_gene_calls(tmp_path)
+    fake = _FakeTransfer()
+    real_upload = fake.upload_gzipped
+
+    def flaky(source, remote_path, verbose=False, skip_existing=True):
+        if remote_path.endswith("SA000022.faa.gz"):
+            raise OSError("connection reset")
+        return real_upload(source, remote_path, verbose, skip_existing)
+
+    fake.upload_gzipped = flaky
+    with (
+        patch("wmw.transfer.SFTPTransfer", return_value=fake),
+        patch("wmw.transfer.paramiko_available", return_value=True),
+    ):
+        assert cli._upload_amr_genes_to_erda(_amr_args(tmp_path), "ST001", tmp_path) is False
+    assert list(fake.streamed) == ["/WMW/ST001/genes/SA000022.ffn.gz"]
+
+
+def test_genes_transfer_launches_its_own_screen_session(tmp_path):
+    _make_amr_output(tmp_path)
+    _make_gene_calls(tmp_path)
+    with (
+        patch.dict("os.environ", {}, clear=True),
+        patch("wmw.transfer.paramiko_available", return_value=True),
+        patch("shutil.which", return_value="/usr/bin/screen"),
+        patch("subprocess.run") as run,
+        patch("wmw.cli._upload_amr_genes_to_erda") as inline,
+    ):
+        cli._transfer_amr_genes_to_erda(
+            _amr_args(tmp_path), "ST001", tmp_path, in_screen=True
+        )
+
+    inline.assert_not_called()
+    # Never the cataloging session or script: that transfer may still be running.
+    assert run.call_args[0][0][:3] == ["screen", "-dmS", "ST001-erda-genes"]
+    text = (tmp_path / "ST001" / "ST001_upload_erda_genes.sh").read_text(encoding="utf-8")
+    assert "upload-erda --study ST001 --what genes" in text
+    assert not (tmp_path / "ST001" / "ST001_upload_erda.sh").exists()
+
+
+def test_genes_transfer_runs_inline_inside_a_screen_session(tmp_path):
+    _make_amr_output(tmp_path)
+    _make_gene_calls(tmp_path)
+    with (
+        patch.dict("os.environ", {"STY": "1234.ST001"}),
+        patch("wmw.transfer.paramiko_available", return_value=True),
+        patch("subprocess.run") as run,
+        patch("wmw.cli._upload_amr_genes_to_erda") as inline,
+    ):
+        cli._transfer_amr_genes_to_erda(
+            _amr_args(tmp_path), "ST001", tmp_path, in_screen=True
+        )
+    inline.assert_called_once()
+    run.assert_not_called()
+
+
+def test_genes_transfer_launches_nothing_when_there_is_nothing_to_send(tmp_path):
+    _make_amr_output(tmp_path)
+    with (
+        patch.dict("os.environ", {}, clear=True),
+        patch("wmw.transfer.paramiko_available", return_value=True),
+        patch("subprocess.run") as run,
+        patch("wmw.cli._upload_amr_genes_to_erda") as inline,
+    ):
+        cli._transfer_amr_genes_to_erda(
+            _amr_args(tmp_path), "ST001", tmp_path, in_screen=True
+        )
+    run.assert_not_called()
+    inline.assert_not_called()
+
+
+def test_genes_transfer_launches_nothing_when_erda_is_not_configured(tmp_path):
+    _make_amr_output(tmp_path)
+    _make_gene_calls(tmp_path)
+    with (
+        patch.dict("os.environ", {}, clear=True),
+        patch("wmw.config.get", return_value=""),
+        patch("subprocess.run") as run,
+        patch("wmw.cli._upload_amr_genes_to_erda") as inline,
+    ):
+        cli._transfer_amr_genes_to_erda(
+            _amr_args(tmp_path, sftp_host="", sftp_remote_base=""),
+            "ST001", tmp_path, in_screen=True,
+        )
+    run.assert_not_called()
+    inline.assert_not_called()
+
+
+def test_stop_matches_the_gene_call_upload_session():
+    sessions = cli._screen_sessions_for_code(
+        "\t123.ST001\t(Detached)\n"
+        "\t125.ST001-erda-upload\t(Detached)\n"
+        "\t126.ST001-erda-genes\t(Detached)\n"
+        "\t127.ST002-erda-genes\t(Detached)\n",
+        "ST001",
+    )
+    assert sessions == ["123.ST001", "125.ST001-erda-upload", "126.ST001-erda-genes"]
+
+
 def test_upload_file_sends_the_bytes_unchanged(tmp_path):
     source = tmp_path / "table.tsv.xz"
     source.write_bytes(b"\xfd7zXZ raw bytes")
@@ -497,6 +719,123 @@ def test_cmd_upload_erda_what_all_transfers_both_payloads(tmp_path):
         assert cli.cmd_upload_erda(_amr_args(tmp_path, what="all")) == 0
     assert "/WMW/ST001/assemblies/SA000022_contigs.fasta.gz" in fake.streamed
     assert "/WMW/ST001/amr/ST001_amr_hits.tsv.xz" in fake.streamed
+
+
+def test_cmd_upload_erda_what_genes_transfers_only_the_gene_calls(tmp_path):
+    _make_amr_output(tmp_path)
+    _make_gene_calls(tmp_path)
+    fake = _FakeTransfer()
+    with (
+        patch("wmw.transfer.SFTPTransfer", return_value=fake),
+        patch("wmw.transfer.paramiko_available", return_value=True),
+    ):
+        assert cli.cmd_upload_erda(_amr_args(tmp_path, what="genes")) == 0
+    assert sorted(fake.streamed) == [
+        "/WMW/ST001/genes/SA000022.faa.gz",
+        "/WMW/ST001/genes/SA000022.ffn.gz",
+    ]
+
+
+def test_cmd_upload_erda_named_study_without_gene_calls_fails(tmp_path):
+    _make_amr_output(tmp_path)
+    with (
+        patch("wmw.transfer.SFTPTransfer") as sftp,
+        patch("wmw.transfer.paramiko_available", return_value=True),
+    ):
+        assert cli.cmd_upload_erda(_amr_args(tmp_path, what="genes")) == 1
+    sftp.assert_not_called()
+
+
+def test_cmd_upload_erda_without_study_archives_every_batch_on_disk(tmp_path):
+    for code in ("ST001", "ST002"):
+        _make_amr_output(tmp_path, code)
+        _make_gene_calls(tmp_path, code, assemblies=(f"SA{code[-3:]}",))
+    _make_amr_output(tmp_path, "ST003")          # AMR run from before prodigal was kept
+    (tmp_path / "ST004").mkdir()                 # a batch that never reached AMR
+    fake = _FakeTransfer()
+
+    with (
+        patch("wmw.transfer.SFTPTransfer", return_value=fake),
+        patch("wmw.transfer.paramiko_available", return_value=True),
+    ):
+        assert cli.cmd_upload_erda(_amr_args(tmp_path, study="", what="genes")) == 0
+
+    assert sorted(fake.streamed) == [
+        "/WMW/ST001/genes/SA001.faa.gz",
+        "/WMW/ST001/genes/SA001.ffn.gz",
+        "/WMW/ST002/genes/SA002.faa.gz",
+        "/WMW/ST002/genes/SA002.ffn.gz",
+    ]
+
+
+def test_cmd_upload_erda_without_study_fails_when_a_batch_is_incomplete(tmp_path):
+    _make_amr_output(tmp_path, "ST001")
+    _make_gene_calls(tmp_path, "ST001")
+    work_dir = _make_amr_output(tmp_path, "ST002")
+    _make_gene_calls(tmp_path, "ST002")
+    drakkar.amr_qc_path(work_dir).unlink()       # still running
+    fake = _FakeTransfer()
+
+    with (
+        patch("wmw.transfer.SFTPTransfer", return_value=fake),
+        patch("wmw.transfer.paramiko_available", return_value=True),
+    ):
+        assert cli.cmd_upload_erda(_amr_args(tmp_path, study="", what="genes")) == 1
+
+    assert all(p.startswith("/WMW/ST001/") for p in fake.streamed)
+    assert len(fake.streamed) == 2
+
+
+def test_cmd_upload_erda_without_study_reports_an_empty_tree(tmp_path):
+    (tmp_path / "ST001").mkdir()
+    with patch("wmw.transfer.SFTPTransfer") as sftp:
+        assert cli.cmd_upload_erda(_amr_args(tmp_path, study="", what="genes")) == 1
+    sftp.assert_not_called()
+
+
+def test_cmd_upload_erda_refuses_to_replace_every_batch_at_once(tmp_path):
+    _make_amr_output(tmp_path)
+    _make_gene_calls(tmp_path)
+    with (
+        patch("wmw.transfer.SFTPTransfer") as sftp,
+        pytest.raises(SystemExit),
+    ):
+        cli.cmd_upload_erda(_amr_args(tmp_path, study="", what="genes", replace_files=True))
+    sftp.assert_not_called()
+
+
+def test_cmd_upload_erda_dry_run_transfers_nothing(tmp_path):
+    _make_amr_output(tmp_path)
+    _make_gene_calls(tmp_path)
+    with (
+        patch("wmw.transfer.SFTPTransfer") as sftp,
+        patch("wmw.transfer.paramiko_available", return_value=True),
+    ):
+        assert cli.cmd_upload_erda(
+            _amr_args(tmp_path, study="", what="all", dry_run=True)
+        ) == 0
+    sftp.assert_not_called()
+
+
+def test_cmd_upload_erda_what_all_skips_payloads_a_batch_does_not_have(tmp_path):
+    _make_amr_output(tmp_path)
+    _make_gene_calls(tmp_path)
+    with (
+        patch("wmw.cli._upload_cataloging_outputs_to_erda") as cataloging,
+        patch("wmw.cli._upload_amr_outputs_to_erda", return_value=True) as amr,
+        patch("wmw.cli._upload_amr_genes_to_erda", return_value=True) as genes,
+    ):
+        assert cli.cmd_upload_erda(_amr_args(tmp_path, what="all")) == 0
+    cataloging.assert_not_called()
+    amr.assert_called_once()
+    genes.assert_called_once()
+
+
+def test_upload_erda_parser_accepts_genes_without_a_study():
+    args = cli._build_parser().parse_args(["upload-erda", "--what", "genes", "--dry-run"])
+    assert args.study == ""
+    assert args.what == "genes"
+    assert args.dry_run is True
 
 
 def test_cmd_upload_erda_defaults_to_cataloging(tmp_path):
@@ -539,12 +878,17 @@ def test_finalize_amr_writes_stats_attaches_tables_and_transfers(tmp_path, amr_c
     _make_amr_output(tmp_path)
     client = _FakeClient()
 
-    with patch("wmw.cli._upload_amr_outputs_to_erda") as xfer:
+    with (
+        patch("wmw.cli._upload_amr_outputs_to_erda") as xfer,
+        patch("wmw.cli._transfer_amr_genes_to_erda") as genes,
+    ):
         assert cli._finalize_amr_outputs(
             client, "Studies", "Samples", _study(), tmp_path,
             set_status=True, transfer_args=_amr_args(tmp_path),
         ) is True
 
+    genes.assert_called_once()
+    assert genes.call_args.kwargs["in_screen"] is True
     assert client.amr_stats == [{"SA000022": {
         "fldAmrFinderHits": 12,
         "fldAmrRgiHits": 9,
@@ -584,7 +928,10 @@ def test_finalize_amr_stops_when_the_run_left_no_summary(tmp_path, amr_config):
     drakkar.amr_qc_path(work_dir).unlink()
     client = _FakeClient()
 
-    with patch("wmw.cli._upload_amr_outputs_to_erda") as xfer:
+    with (
+        patch("wmw.cli._upload_amr_outputs_to_erda") as xfer,
+        patch("wmw.cli._transfer_amr_genes_to_erda") as genes,
+    ):
         assert cli._finalize_amr_outputs(
             client, "Studies", "Samples", _study(), tmp_path,
             set_status=True, transfer_args=_amr_args(tmp_path),
@@ -593,6 +940,7 @@ def test_finalize_amr_stops_when_the_run_left_no_summary(tmp_path, amr_config):
     assert client.statuses == []
     assert client.uploads == []
     xfer.assert_not_called()
+    genes.assert_not_called()
 
 
 def test_finalize_amr_attaches_nothing_when_no_file_field_is_configured(

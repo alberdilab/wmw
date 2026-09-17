@@ -59,6 +59,12 @@ AMR_MANIFEST_CONFIG_KEY = "STUDIES_COL_FILE_AMR_MANIFEST"
 
 AMR_QC_FILE = Path("amr") / "amr_qc.tsv"
 
+# Gene calls 'drakkar amr' makes with prodigal before AMRFinderPlus, one pair per
+# assembly: {assembly}.faa (proteins) and {assembly}.ffn (nucleotides). They are
+# regular outputs, not temp(), so they stay behind to be archived on ERDA.
+AMR_GENE_CALL_DIR = Path("amr") / "raw" / "prodigal"
+AMR_GENE_CALL_SUFFIXES = (".faa", ".ffn")
+
 # Binette's per-assembly contig membership table, attached to the Samples row.
 CONTIG_TO_BIN_FILE = "final_contig_to_bin.tsv"
 
@@ -86,6 +92,21 @@ def amr_result_files(work_dir: Path) -> list[Path]:
         for name in (*AMR_TABLE_FILES, AMR_MANIFEST_FILE)
         if (amr_dir / name).is_file()
     ]
+
+
+def amr_gene_call_files(work_dir: Path) -> list[Path]:
+    """Return the prodigal .faa and .ffn gene calls a drakkar amr run left behind.
+
+    The other files in that folder (.gff and the .amrfinder.gff derived from
+    it) are intermediates for AMRFinderPlus and are not returned.
+    """
+    gene_dir = Path(work_dir) / AMR_GENE_CALL_DIR
+    if not gene_dir.is_dir():
+        return []
+    return sorted(
+        p for p in gene_dir.iterdir()
+        if p.suffix in AMR_GENE_CALL_SUFFIXES and p.is_file()
+    )
 
 
 def amr_outputs_present(work_dir: Path) -> bool:

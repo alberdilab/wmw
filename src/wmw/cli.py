@@ -36,6 +36,9 @@ from wmw import output as out
 
 _GENOME_UPLOAD_SCREEN_SUFFIX = "-genome-upload"
 _ERDA_UPLOAD_SCREEN_SUFFIX = "-erda-upload"
+_ERDA_GENES_SCREEN_SUFFIX = "-erda-genes"
+# What 'wmw upload-erda --what' can send, in the order '--what all' sends it.
+_ERDA_PAYLOADS: tuple[str, ...] = ("cataloging", "amr", "genes")
 _GENOME_MIN_COMPLETENESS = 50.0
 _GENOME_MAX_CONTAMINATION = 10.0
 _LOW_PRIORITY_SLURM_PARTITION = "lazyqueue"
@@ -1611,8 +1614,11 @@ def _genome_upload_screen_name(code: str) -> str:
     return f"{code}{_GENOME_UPLOAD_SCREEN_SUFFIX}"
 
 
-def _erda_upload_screen_name(code: str) -> str:
-    return f"{code}{_ERDA_UPLOAD_SCREEN_SUFFIX}"
+def _erda_upload_screen_name(code: str, what: str = "cataloging") -> str:
+    # The gene calls get a session of their own: they are finalized right after
+    # cataloging, while the assembly transfer may well still be running.
+    suffix = _ERDA_GENES_SCREEN_SUFFIX if what == "genes" else _ERDA_UPLOAD_SCREEN_SUFFIX
+    return f"{code}{suffix}"
 
 
 def _screen_session_matches_code(session_name: str, code: str) -> bool:
@@ -1620,6 +1626,7 @@ def _screen_session_matches_code(session_name: str, code: str) -> bool:
         code,
         _genome_upload_screen_name(code),
         _erda_upload_screen_name(code),
+        _erda_upload_screen_name(code, "genes"),
     }
 
 
@@ -2367,7 +2374,25 @@ def _erda_settings(args: argparse.Namespace) -> dict[str, Any] | None:
         "assembly_dir": _conf(args, "sftp_assembly_dir", "SFTP_REMOTE_ASSEMBLY_DIR") or "assemblies",
         "bin_dir": _conf(args, "sftp_bin_dir", "SFTP_REMOTE_BIN_DIR") or "bins",
         "amr_dir": _conf(args, "sftp_amr_dir", "SFTP_REMOTE_AMR_DIR") or "amr",
+        "gene_dir": _conf(args, "sftp_gene_dir", "SFTP_REMOTE_GENE_DIR") or "genes",
     }
+
+
+def _ready_erda_settings(args: argparse.Namespace, label: str = "") -> dict[str, Any] | None:
+    """Return ERDA settings when a transfer can run, or None after saying why not."""
+    from wmw.transfer import paramiko_available
+
+    settings = _erda_settings(args)
+    if settings is None:
+        out.info(f"{label}SFTP_HOST or SFTP_REMOTE_BASE not configured — skipping ERDA transfer.")
+        return None
+    if not settings["user"]:
+        out.warn(f"{label}SFTP_USER is not configured — skipping ERDA transfer.")
+        return None
+    if not paramiko_available():
+        out.warn(f"{label}paramiko is not installed — skipping ERDA transfer (pip install paramiko).")
+        return None
+    return settings
 
 
 def _upload_cataloging_outputs_to_erda(
@@ -2391,18 +2416,11 @@ def _upload_cataloging_outputs_to_erda(
     them or found them already there — and False when the archive is incomplete.
     """
     from wmw import drakkar
-    from wmw.transfer import SFTPTransfer, gzip_into, paramiko_available
+    from wmw.transfer import SFTPTransfer, gzip_into
 
     label = f"{prefix}: " if prefix else ""
-    settings = _erda_settings(args)
+    settings = _ready_erda_settings(args, label)
     if settings is None:
-        out.info(f"{label}SFTP_HOST or SFTP_REMOTE_BASE not configured — skipping ERDA transfer.")
-        return False
-    if not settings["user"]:
-        out.warn(f"{label}SFTP_USER is not configured — skipping ERDA transfer.")
-        return False
-    if not paramiko_available():
-        out.warn(f"{label}paramiko is not installed — skipping ERDA transfer (pip install paramiko).")
         return False
 
     work_dir = output_root / study_code
@@ -2544,22 +2562,15 @@ def _upload_amr_outputs_to_erda(
     sent them or found them already there — and False when the archive is
     incomplete.
     """
-    from wmw.transfer import SFTPTransfer, paramiko_available
+    from wmw import drakkar
+    from wmw.transfer import SFTPTransfer
 
     label = f"{prefix}: " if prefix else ""
-    settings = _erda_settings(args)
+    settings = _ready_erda_settings(args, label)
     if settings is None:
-        out.info(f"{label}SFTP_HOST or SFTP_REMOTE_BASE not configured — skipping ERDA transfer.")
-        return False
-    if not settings["user"]:
-        out.warn(f"{label}SFTP_USER is not configured — skipping ERDA transfer.")
-        return False
-    if not paramiko_available():
-        out.warn(f"{label}paramiko is not installed — skipping ERDA transfer (pip install paramiko).")
         return False
 
     work_dir = output_root / study_code
-    from wmw import drakkar
 
     files = _amr_erda_files(work_dir, study_code)
     if not files:
@@ -2618,6 +2629,118 @@ def _upload_amr_outputs_to_erda(
     return bool(uploaded or skipped) and not failed
 
 
+def _upload_amr_genes_to_erda(
+    args: argparse.Namespace,
+    study_code: str,
+    output_root: Path,
+    *,
+    prefix: str = "",
+    replace_existing: bool = False,
+) -> bool:
+    """Transfer the prodigal gene calls of one study's AMR run to ERDA.
+
+    Every amr/raw/prodigal/{assembly}.faa and .ffn goes to {base}/{code}/{genes}/
+    {assembly}.faa.gz and .ffn.gz, gzipped into the SFTP connection. Files
+    already present are skipped unless `replace_existing` is set, which clears
+    the remote folder first.
+
+    Only a finished run is sent: prodigal writes these files in place, so one
+    taken mid-run would be archived truncated and then skipped as present on
+    every later transfer.
+
+    Returns True when the study's gene calls are on ERDA — whether this call
+    sent them or found them already there — and False when the archive is
+    incomplete.
+    """
+    from wmw import drakkar
+    from wmw.transfer import SFTPTransfer
+
+    label = f"{prefix}: " if prefix else ""
+    settings = _ready_erda_settings(args, label)
+    if settings is None:
+        return False
+
+    work_dir = output_root / study_code
+    if not drakkar.amr_outputs_present(work_dir):
+        out.warn(
+            f"{label}{drakkar.amr_qc_path(work_dir)} not found — the AMR run is not "
+            "finished, so its gene calls are not transferred."
+        )
+        return False
+    files = drakkar.amr_gene_call_files(work_dir)
+    if not files:
+        out.warn(f"{label}no .faa or .ffn gene calls found under {work_dir / drakkar.AMR_GENE_CALL_DIR}.")
+        return False
+
+    remote_gene_dir = f"{settings['remote_base']}/{study_code}/{settings['gene_dir']}"
+    verbose = bool(getattr(args, "verbose", False))
+    timeout = float(getattr(args, "connect_timeout", 300.0) or 300.0)
+    total_mb = sum(f.stat().st_size for f in files) / (1024 * 1024)
+
+    out.info(
+        f"{label}transferring {_pl(len(files), 'gene-call file')} ({total_mb:.0f} MB) → "
+        f"{settings['user']}@{settings['host']}:{remote_gene_dir} …"
+    )
+
+    uploaded = skipped = 0
+    failed: list[str] = []
+    try:
+        with SFTPTransfer(
+            host=settings["host"],
+            username=settings["user"],
+            port=settings["port"],
+            key_path=settings["identity"],
+            timeout=timeout,
+        ) as xfer:
+            if replace_existing:
+                xfer.remove_remote_dir(remote_gene_dir)
+                out.info(f"{label}cleared {remote_gene_dir} for replacement.")
+
+            for source in files:
+                remote_path = f"{remote_gene_dir}/{source.name}.gz"
+                if xfer.remote_exists(remote_path):
+                    skipped += 1
+                    continue
+                size_mb = source.stat().st_size / (1024 * 1024)
+                out.info(f"{label}  compressing and uploading {source.name} ({size_mb:.0f} MB) …")
+                try:
+                    xfer.upload_gzipped(source, remote_path, verbose=verbose, skip_existing=False)
+                except Exception as exc:
+                    failed.append(f"{source.name} ({exc})")
+                else:
+                    uploaded += 1
+    except Exception as exc:
+        out.warn(f"{label}ERDA transfer failed: {exc}")
+        return False
+
+    skip_msg = f", {skipped} already present (skipped)" if skipped else ""
+    if uploaded:
+        out.success(f"{label}transferred {_pl(uploaded, 'gene-call file')} to {remote_gene_dir}{skip_msg}.")
+    else:
+        out.info(f"{label}nothing new to transfer to {remote_gene_dir}{skip_msg}.")
+    if failed:
+        preview = "; ".join(failed[:5])
+        suffix = "…" if len(failed) > 5 else "."
+        out.warn(f"{label}could not transfer {_pl(len(failed), 'gene-call file')}: {preview}{suffix}")
+
+    return bool(uploaded or skipped) and not failed
+
+
+def _erda_payload_files(what: str, work_dir: Path, study_code: str) -> list[Path]:
+    """Return the local files 'wmw upload-erda --what <what>' would send for one batch."""
+    from wmw import drakkar
+
+    if what == "cataloging":
+        bin_paths = drakkar.parse_bin_paths_txt(
+            work_dir / "cataloging" / "final" / "all_bin_paths.txt"
+        )
+        bins = sorted(p for p in bin_paths.values() if p.exists())
+        return _find_assembly_fastas(work_dir) + bins
+    if what == "amr":
+        return [source for source, _, _ in _amr_erda_files(work_dir, study_code)]
+    return drakkar.amr_gene_call_files(work_dir)
+
+
 def _launch_erda_upload_screen(
     args: argparse.Namespace,
     study_code: str,
@@ -2625,8 +2748,9 @@ def _launch_erda_upload_screen(
     *,
     prefix: str = "",
     replace_files: bool = False,
+    what: str = "cataloging",
 ) -> bool:
-    """Launch the slow ERDA transfer in a detached screen session."""
+    """Launch the slow ERDA transfer of *what* in a detached screen session."""
     label = f"{prefix}: " if prefix else ""
     if os.environ.get("STY"):
         return False
@@ -2640,10 +2764,13 @@ def _launch_erda_upload_screen(
 
     work_dir = output_root / study_code
     work_dir.mkdir(parents=True, exist_ok=True)
-    session_name = _erda_upload_screen_name(study_code)
-    script_path = work_dir / f"{study_code}_upload_erda.sh"
-    stdout_path = work_dir / f"{study_code}_upload_erda.out"
-    stderr_path = work_dir / f"{study_code}_upload_erda.err"
+    session_name = _erda_upload_screen_name(study_code, what)
+    # Each payload writes its own script: bash reads a script as it runs, so a
+    # second launch must never rewrite the file a live session is executing.
+    stem = f"{study_code}_upload_erda" if what == "cataloging" else f"{study_code}_upload_erda_{what}"
+    script_path = work_dir / f"{stem}.sh"
+    stdout_path = work_dir / f"{stem}.out"
+    stderr_path = work_dir / f"{stem}.err"
 
     cmd = [
         sys.executable,
@@ -2652,6 +2779,8 @@ def _launch_erda_upload_screen(
         "upload-erda",
         "--study",
         study_code,
+        "--what",
+        what,
         "--output-dir",
         str(output_root),
     ]
@@ -2661,7 +2790,7 @@ def _launch_erda_upload_screen(
     script = "\n".join(
         [
             "#!/usr/bin/env bash",
-            f"# wmw-generated script — batch {study_code} ERDA transfer",
+            f"# wmw-generated script — batch {study_code} ERDA transfer ({what})",
             "# Do not edit manually; re-run wmw process or wmw set-status to regenerate.",
             "",
             "set -euo pipefail",
@@ -2729,6 +2858,39 @@ def _transfer_cataloging_outputs_to_erda(
         prefix=prefix,
         replace_existing=replace_existing,
     )
+
+
+def _transfer_amr_genes_to_erda(
+    args: argparse.Namespace | None,
+    study_code: str,
+    output_root: Path,
+    *,
+    prefix: str = "",
+    in_screen: bool = False,
+) -> None:
+    """Detach the gene-call transfer into a screen session, or run it inline.
+
+    Unlike the cataloging transfer, nothing is launched for a study that has
+    nothing to send, so a resume over many batches does not open a session per
+    batch just to find ERDA unconfigured or the gene calls missing.
+    """
+    from wmw import drakkar
+
+    if args is None or not study_code:
+        return
+    label = f"{prefix}: " if prefix else ""
+    work_dir = output_root / study_code
+    if not drakkar.amr_gene_call_files(work_dir) or _ready_erda_settings(args, label) is None:
+        return
+    if in_screen and _launch_erda_upload_screen(
+        args,
+        study_code,
+        output_root,
+        prefix=prefix,
+        what="genes",
+    ):
+        return
+    _upload_amr_genes_to_erda(args, study_code, output_root, prefix=prefix)
 
 
 def _finalize_preprocessing_outputs(
@@ -3433,6 +3595,15 @@ def _finalize_amr_outputs(
     # 'wmw upload-erda --what amr --replace-files' forces a re-transfer.
     if transfer_args is not None:
         _upload_amr_outputs_to_erda(transfer_args, study_code, output_root, prefix=prefix)
+        # The prodigal gene calls run to the size of the assemblies, so like
+        # those they are detached into a screen session when one can be started.
+        _transfer_amr_genes_to_erda(
+            transfer_args,
+            study_code,
+            output_root,
+            prefix=prefix,
+            in_screen=True,
+        )
 
     return True
 
@@ -3692,30 +3863,103 @@ def cmd_upload_amr(args: argparse.Namespace) -> int:
     return 1 if unknown else 0
 
 
+def _erda_upload_plan(
+    output_root: Path, study_code: str, what: str
+) -> list[tuple[str, list[str]]]:
+    """Return (batch code, payloads to send) for 'wmw upload-erda'.
+
+    Each batch is sent only the payloads it has files for, so '--what all' over
+    a batch that has not reached AMR yet still archives its cataloging outputs.
+    Without a study code, batches are discovered from the output tree, as
+    'wmw upload-amr' does, and one with nothing to send is left out. A named
+    study with nothing to send keeps its request, so the uploader reports why.
+    """
+    selected = list(_ERDA_PAYLOADS) if what == "all" else [what]
+    if study_code:
+        codes = [study_code]
+    elif output_root.is_dir():
+        codes = sorted(d.name for d in output_root.iterdir() if d.is_dir())
+    else:
+        codes = []
+
+    plan: list[tuple[str, list[str]]] = []
+    for code in codes:
+        work_dir = output_root / code
+        present = [name for name in selected if _erda_payload_files(name, work_dir, code)]
+        if study_code and not present:
+            present = selected
+        if present:
+            plan.append((code, present))
+    return plan
+
+
 def cmd_upload_erda(args: argparse.Namespace) -> int:
+    from wmw import drakkar
+
     output_dir_str = _conf(args, "output_dir", "DRAKKAR_OUTPUT_DIR", required=True)
-    study_code = args.study
+    study_code = getattr(args, "study", "") or ""
     what = getattr(args, "what", "cataloging")
     replace_existing = getattr(args, "replace_files", False)
+    dry_run = getattr(args, "dry_run", False)
 
     out.section("WMW ERDA TRANSFER")
+    if replace_existing and not study_code:
+        _die(
+            "--replace-files clears the remote folders before sending, so it needs "
+            "--study; it is not applied to every batch at once."
+        )
     output_root = Path(output_dir_str).expanduser().resolve()
+
+    plan = _erda_upload_plan(output_root, study_code, what)
+    if not plan:
+        out.warn(f"no batch under {output_root} has {what} outputs to transfer.")
+        return 1
+    if not study_code:
+        out.info(f"found {_pl(len(plan), 'batch', 'batches')} with outputs to transfer under {output_root}.")
+
+    if dry_run:
+        gib = 1024 ** 3
+        total_files = total_bytes = 0
+        for code, payloads in plan:
+            work_dir = output_root / code
+            for name in payloads:
+                files = _erda_payload_files(name, work_dir, code)
+                size = sum(f.stat().st_size for f in files)
+                total_files += len(files)
+                total_bytes += size
+                note = ""
+                if name == "genes" and files and not drakkar.amr_outputs_present(work_dir):
+                    note = " — AMR run not finished, would be skipped"
+                out.info(f"{code}: {name} — {_pl(len(files), 'file')} ({size / gib:.2f} GB){note}")
+        out.info(
+            f"Dry run: {_pl(total_files, 'file')} ({total_bytes / gib:.2f} GB before "
+            "compression) found; nothing transferred. Files already on ERDA are skipped "
+            "by a real run."
+        )
+        return 0
 
     uploaders = {
         "cataloging": _upload_cataloging_outputs_to_erda,
         "amr": _upload_amr_outputs_to_erda,
+        "genes": _upload_amr_genes_to_erda,
     }
-    selected = list(uploaders) if what == "all" else [what]
     results = [
         uploaders[name](
             args,
-            study_code,
+            code,
             output_root,
-            prefix=study_code,
+            prefix=code,
             replace_existing=replace_existing,
         )
-        for name in selected
+        for code, payloads in plan
+        for name in payloads
     ]
+    if not study_code:
+        incomplete = results.count(False)
+        if incomplete:
+            out.warn(f"{_pl(incomplete, 'transfer')} did not complete — rerun to retry; finished files are skipped.")
+        else:
+            out.success(f"All {_pl(len(plan), 'batch', 'batches')} are archived on ERDA.")
     return 0 if all(results) else 1
 
 
@@ -4525,30 +4769,37 @@ def _build_parser() -> argparse.ArgumentParser:
     # ---- upload-erda ----
     p_upload_erda = sub.add_parser(
         "upload-erda",
-        help="Transfer assemblies, final bins or AMR result tables of one study to ERDA.",
+        help="Transfer assemblies, final bins, AMR tables or gene calls to ERDA.",
         description=(
-            "Transfer the assemblies and the binette-refined final bins of one "
-            "study to ERDA, or its AMR result tables. Both are normally sent "
-            "automatically when the corresponding outputs are finalised — the "
-            "cataloging ones in a detached '{code}-erda-upload' screen session, "
-            "the small AMR tables inline. Run this by hand to retry a failed "
-            "transfer."
+            "Transfer the assemblies and the binette-refined final bins of a "
+            "study to ERDA, its AMR result tables, or the prodigal gene calls "
+            "(.faa/.ffn) of its AMR run. All are normally sent automatically "
+            "when the corresponding outputs are finalised — assemblies and gene "
+            "calls in detached '{code}-erda-upload' and '{code}-erda-genes' "
+            "screen sessions, the small AMR tables inline. Run this by hand to "
+            "retry a failed transfer, or without --study to archive every batch "
+            "on disk."
         ),
     )
     p_upload_erda.add_argument(
         "--study",
         metavar="CODE",
-        required=True,
-        help="Study code (batch label) whose outputs should be transferred.",
+        default="",
+        help=(
+            "Study code (batch label) whose outputs should be transferred. Omit "
+            "to transfer every batch under DRAKKAR_OUTPUT_DIR that has outputs "
+            "of the selected kind."
+        ),
     )
     p_upload_erda.add_argument(
         "--what",
         metavar="OUTPUTS",
         default="cataloging",
-        choices=["cataloging", "amr", "all"],
+        choices=[*_ERDA_PAYLOADS, "all"],
         help=(
             "Which outputs to transfer: 'cataloging' (assemblies and bins, the "
-            "default), 'amr' (the aggregate AMR result tables), or 'all'."
+            "default), 'amr' (the aggregate AMR result tables), 'genes' (the "
+            "prodigal .faa/.ffn gene calls of the AMR run), or 'all'."
         ),
     )
     p_upload_erda.add_argument(
@@ -4588,11 +4839,24 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Override SFTP_REMOTE_AMR_DIR from config (default: amr).",
     )
     p_upload_erda.add_argument(
+        "--sftp-gene-dir",
+        metavar="NAME",
+        default="",
+        help="Override SFTP_REMOTE_GENE_DIR from config (default: genes).",
+    )
+    p_upload_erda.add_argument(
         "--replace-files",
         dest="replace_files",
         action="store_true",
         default=False,
-        help="Clear the remote folders selected by --what before transferring.",
+        help="Clear the remote folders selected by --what before transferring (needs --study).",
+    )
+    p_upload_erda.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=False,
+        help="List the batches and files that would be transferred, then stop.",
     )
     p_upload_erda.add_argument(
         "--verbose",

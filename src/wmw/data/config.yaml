@@ -211,6 +211,7 @@ DRAKKAR_OUTPUT_DIR: "/projects/alberdilab/scratch/jpl786/wmw"  # Root output dir
 #   {SFTP_REMOTE_BASE}/{code}/{SFTP_REMOTE_ASSEMBLY_DIR}  assemblies, gzipped
 #   {SFTP_REMOTE_BASE}/{code}/{SFTP_REMOTE_BIN_DIR}       bin FASTAs, gzipped
 #   {SFTP_REMOTE_BASE}/{code}/{SFTP_REMOTE_AMR_DIR}       AMR result tables, batch-prefixed
+#   {SFTP_REMOTE_BASE}/{code}/{SFTP_REMOTE_GENE_DIR}      prodigal .faa/.ffn gene calls, gzipped
 # Leave SFTP_HOST or SFTP_REMOTE_BASE empty to disable ERDA transfers entirely.
 SFTP_HOST: "io.erda.dk"
 SFTP_USER: "antton.alberdi@snm.ku.dk"   # ERDA account used for the transfer
@@ -220,6 +221,7 @@ SFTP_REMOTE_BASE: "/WMW"                # Top-level ERDA folder holding the wmw 
 SFTP_REMOTE_ASSEMBLY_DIR: "assemblies"  # Per-study subfolder for assembly FASTAs
 SFTP_REMOTE_BIN_DIR: "bins"             # Per-study subfolder for bin FASTAs
 SFTP_REMOTE_AMR_DIR: "amr"              # Per-study subfolder for the AMR result tables
+SFTP_REMOTE_GENE_DIR: "genes"           # Per-study subfolder for the AMR run's gene calls
 
 # --- NCBI / ENA ---
 NCBI_EMAIL: ""              # Used as contact email for Unpaywall PDF lookup (optional)
