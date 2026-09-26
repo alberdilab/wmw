@@ -26,7 +26,7 @@ ENA Portal API ──► wmw fetch ──► normalize ──► filter ──�
 Airtable ──► wmw process ──► build manifest ──► drakkar <workflow> ──► update status
                                                           │
                             cataloging outputs ──► Airtable (stats, Genomes, attachments)
-                                                          └──► ERDA (assemblies + final bins)
+                                                          └──► ERDA (assemblies, final bins, contig map)
 
                             amr outputs ──► Airtable (per-assembly counts, table attachments)
                                                           └──► ERDA (AMR result tables, prodigal gene calls)
@@ -225,7 +225,7 @@ between requests. Returns empty dict on any failure (publication metadata is opt
 | No Click/Typer | Matches ehio and drakkar; no extra dependency. |
 | Dedup by accession | Re-running scan or fetch over overlapping accessions is safe. |
 | Config in package dir | Consistent with ehio; single location, editable in-place. |
-| ERDA layout is study-first | `{base}/{code}/assemblies/` and `{base}/{code}/bins/` keeps everything for one study under one folder, so a study can be archived or shared whole. ehio's `ASB/{batch}` + `MAG/{batch}` split predates wmw and is kept there for link stability. |
+| ERDA layout is study-first | `{base}/{code}/assemblies/` and `{base}/{code}/bins/` keeps everything for one study under one folder, including `all_contig_to_bin.csv` beside the bin FASTAs, so a study can be archived or shared whole. ehio's `ASB/{batch}` + `MAG/{batch}` split predates wmw and is kept there for link stability. |
 | ERDA transfer runs last | Airtable writes happen first in `_finalize_cataloging_outputs()`, so a failed or slow transfer never costs the metadata. Per-file failures are collected and reported instead of aborting. |
 | ERDA transfer never auto-replaces | The attachment-replacement flag exists because Airtable *appends* on upload; SFTP has no such quirk, and re-sending multi-GB assemblies on every rerun would be pure cost. Files already present are skipped; `wmw upload-erda --replace-files` is the explicit override. |
 | All bins archived, not just the good ones | The Airtable Genomes table is curated (completeness > 50, contamination < 10); the ERDA copy is an archive of what binette actually produced. |

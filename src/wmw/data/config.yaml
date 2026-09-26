@@ -206,10 +206,10 @@ DRAKKAR_CONDA_ENV: "/projects/alberdilab/data/environments/conda/drakkar" # Cond
 DRAKKAR_OUTPUT_DIR: "/projects/alberdilab/scratch/jpl786/wmw"  # Root output directory for drakkar runs
 
 # --- ERDA transfer (SFTP) ---
-# Assemblies and the binette-refined final bins are transferred to ERDA when
-# cataloging outputs are finalised. Remote paths are built per study code as:
+# Assemblies, binette-refined final bins and the aggregate contig-to-bin table
+# are transferred to ERDA when cataloging outputs are finalised. Remote paths:
 #   {SFTP_REMOTE_BASE}/{code}/{SFTP_REMOTE_ASSEMBLY_DIR}  assemblies, gzipped
-#   {SFTP_REMOTE_BASE}/{code}/{SFTP_REMOTE_BIN_DIR}       bin FASTAs, gzipped
+#   {SFTP_REMOTE_BASE}/{code}/{SFTP_REMOTE_BIN_DIR}       bin FASTAs (gzipped) + all_contig_to_bin.csv
 #   {SFTP_REMOTE_BASE}/{code}/{SFTP_REMOTE_AMR_DIR}       AMR result tables, batch-prefixed
 #   {SFTP_REMOTE_BASE}/{code}/{SFTP_REMOTE_GENE_DIR}      prodigal .faa/.ffn gene calls, gzipped
 # Leave SFTP_HOST or SFTP_REMOTE_BASE empty to disable ERDA transfers entirely.

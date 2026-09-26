@@ -486,7 +486,7 @@ wmw upload-amr [--study CODE]         # omit to do every batch on disk
 
 ## wmw upload-erda
 
-Transfer the assemblies and binette-refined final bins of a study to ERDA,
+Transfer the assemblies and binette-refined final outputs of a study to ERDA,
 along with its AMR result tables or the prodigal gene calls of its AMR run.
 These transfers normally start automatically when the matching outputs are
 finalized:
@@ -532,6 +532,7 @@ cannot be cleared for every batch at once.
 |---|---|
 | `cataloging/megahit/{assembly}/{assembly}.fna` | `{SFTP_REMOTE_BASE}/{code}/{SFTP_REMOTE_ASSEMBLY_DIR}/{assembly}_contigs.fasta.gz` |
 | every path in `cataloging/final/all_bin_paths.txt` | `{SFTP_REMOTE_BASE}/{code}/{SFTP_REMOTE_BIN_DIR}/{genome}.fa.gz` |
+| `cataloging/final/all_contig_to_bin.csv` | `{SFTP_REMOTE_BASE}/{code}/{SFTP_REMOTE_BIN_DIR}/all_contig_to_bin.csv` |
 
 With the shipped defaults that is `/WMW/{code}/assemblies/` and
 `/WMW/{code}/bins/`.
@@ -573,13 +574,14 @@ by every later transfer.
 **What is transferred — `--what all`**
 
 Each of the above that the batch has files for. A batch that has not reached
-AMR still gets its assemblies and bins archived.
+AMR still gets its assemblies, bins and aggregate contig-to-bin table archived.
 
 **Notes**
-- Both assemblies and bins are gzipped straight into the SFTP connection, so a
-  multi-GB assembly never needs a temporary `.gz` on the local disk. Each
-  transfer is staged through a `.part` name and renamed only once the write
-  completes, so an interrupted upload leaves no file that looks finished.
+- Assemblies and bins are gzipped straight into the SFTP connection, while
+  `all_contig_to_bin.csv` is copied unchanged. A multi-GB assembly therefore
+  never needs a temporary `.gz` on the local disk. Each transfer is staged
+  through a `.part` name and renamed only once the write completes, so an
+  interrupted upload leaves no file that looks finished.
 - Every bin in `all_bin_paths.txt` is archived, including bins below the
   completeness/contamination thresholds that gate the Airtable Genomes table.
   The ERDA copy is an archive of what binette produced, not a curated set.

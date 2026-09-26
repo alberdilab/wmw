@@ -89,6 +89,12 @@ class _FakeTransfer:
         self.upload_stream(remote_path, lambda h: transfer.gzip_into(source, h))
         return True
 
+    def upload_file(self, source, remote_path, verbose=False, skip_existing=True) -> bool:
+        if skip_existing and self.remote_exists(remote_path):
+            return False
+        self.upload_stream(remote_path, lambda h: transfer._copy_into(source, h))
+        return True
+
 
 # ---------------------------------------------------------------------------
 # path helpers
@@ -167,6 +173,25 @@ def test_upload_to_erda_sends_assemblies_and_bins_study_first(tmp_path):
         fake.streamed["/WMW/ST001/bins/SA000022_bin_1.fa.gz"]
     ) == b">bin1\nGGGG\n"
     assert fake.removed_dirs == []
+
+
+def test_upload_to_erda_sends_all_contig_to_bin_csv_unchanged(tmp_path):
+    work_dir = _make_cataloging_output(tmp_path)
+    table = work_dir / "cataloging" / "final" / "all_contig_to_bin.csv"
+    table.write_bytes(b"contig,bin\ncontig1,SA000022_bin_1\n")
+    fake = _FakeTransfer()
+
+    with (
+        patch("wmw.transfer.SFTPTransfer", return_value=fake),
+        patch("wmw.transfer.paramiko_available", return_value=True),
+    ):
+        assert cli._upload_cataloging_outputs_to_erda(
+            _erda_args(tmp_path), "ST001", tmp_path
+        ) is True
+
+    remote_path = "/WMW/ST001/bins/all_contig_to_bin.csv"
+    assert fake.streamed[remote_path] == table.read_bytes()
+    assert table in cli._erda_payload_files("cataloging", work_dir, "ST001")
 
 
 def test_upload_to_erda_skips_files_already_present(tmp_path):

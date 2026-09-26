@@ -6,7 +6,12 @@ All notable changes to wmw are documented here.
 
 ### Added
 
-- No unreleased changes yet.
+- **The aggregate contig-to-bin table is archived on ERDA.** Cataloging
+  finalization and `wmw upload-erda --what cataloging` now copy
+  `cataloging/final/all_contig_to_bin.csv` unchanged to
+  `{SFTP_REMOTE_BASE}/{code}/{SFTP_REMOTE_BIN_DIR}/all_contig_to_bin.csv`
+  (with the defaults, `/WMW/{code}/bins/all_contig_to_bin.csv`). It participates
+  in dry-run discovery, existing-file skips, retries, and `--replace-files`.
 
 ## [0.6.12] - 2026-09-17
 

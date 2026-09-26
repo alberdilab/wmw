@@ -2403,14 +2403,15 @@ def _upload_cataloging_outputs_to_erda(
     prefix: str = "",
     replace_existing: bool = False,
 ) -> bool:
-    """Transfer assemblies and binette-refined bins of one study to ERDA.
+    """Transfer assemblies and binette-refined outputs of one study to ERDA.
 
     Assemblies go to {base}/{code}/{assemblies}/{assembly}_contigs.fasta.gz and
     the final bins listed in all_bin_paths.txt to {base}/{code}/{bins}/
-    {genome}.fa.gz, both gzipped into the SFTP connection so a multi-GB assembly
-    never needs a temporary copy on the local disk. Files already present are
-    skipped unless `replace_existing` is set, which clears both remote
-    subfolders first.
+    {genome}.fa.gz. When present, cataloging/final/all_contig_to_bin.csv goes to
+    the same bins directory unchanged. FASTAs are gzipped into the SFTP
+    connection so a multi-GB assembly never needs a temporary copy on the local
+    disk. Files already present are skipped unless `replace_existing` is set,
+    which clears both remote subfolders first.
 
     Returns True when the study's outputs are on ERDA — whether this call sent
     them or found them already there — and False when the archive is incomplete.
@@ -2429,6 +2430,8 @@ def _upload_cataloging_outputs_to_erda(
         work_dir / "cataloging" / "final" / "all_bin_paths.txt"
     )
     existing_bins = {name: p for name, p in bin_paths.items() if p.exists()}
+    contig_to_bin = work_dir / "cataloging" / "final" / "all_contig_to_bin.csv"
+    has_contig_to_bin = contig_to_bin.is_file()
     if len(existing_bins) < len(bin_paths):
         out.warn(
             f"{label}{_pl(len(bin_paths) - len(existing_bins), 'bin FASTA')} listed in "
@@ -2438,7 +2441,7 @@ def _upload_cataloging_outputs_to_erda(
         out.warn(
             f"{label}no assembly FASTA found under {work_dir / 'cataloging' / 'megahit'}."
         )
-    if not assemblies and not existing_bins:
+    if not assemblies and not existing_bins and not has_contig_to_bin:
         out.warn(f"{label}nothing to transfer to ERDA.")
         return False
 
@@ -2450,7 +2453,8 @@ def _upload_cataloging_outputs_to_erda(
 
     out.info(
         f"{label}transferring {_pl(len(assemblies), 'assembly', 'assemblies')} and "
-        f"{_pl(len(existing_bins), 'bin')} → "
+        f"{_pl(len(existing_bins), 'bin')}"
+        f"{', plus the contig-to-bin table' if has_contig_to_bin else ''} → "
         f"{settings['user']}@{settings['host']}:{study_root} …"
     )
 
@@ -2499,6 +2503,16 @@ def _upload_cataloging_outputs_to_erda(
                         skipped += 1
                 except Exception as exc:
                     failed.append(f"{genome_name} ({exc})")
+
+            if has_contig_to_bin:
+                remote_path = f"{remote_bin_dir}/{contig_to_bin.name}"
+                try:
+                    if xfer.upload_file(contig_to_bin, remote_path, verbose=verbose):
+                        uploaded += 1
+                    else:
+                        skipped += 1
+                except Exception as exc:
+                    failed.append(f"{contig_to_bin.name} ({exc})")
     except Exception as exc:
         out.warn(f"{label}ERDA transfer failed: {exc}")
         return False
@@ -2735,7 +2749,9 @@ def _erda_payload_files(what: str, work_dir: Path, study_code: str) -> list[Path
             work_dir / "cataloging" / "final" / "all_bin_paths.txt"
         )
         bins = sorted(p for p in bin_paths.values() if p.exists())
-        return _find_assembly_fastas(work_dir) + bins
+        contig_to_bin = work_dir / "cataloging" / "final" / "all_contig_to_bin.csv"
+        tables = [contig_to_bin] if contig_to_bin.is_file() else []
+        return _find_assembly_fastas(work_dir) + bins + tables
     if what == "amr":
         return [source for source, _, _ in _amr_erda_files(work_dir, study_code)]
     return drakkar.amr_gene_call_files(work_dir)
@@ -3413,7 +3429,9 @@ def _finalize_cataloging_outputs(
     )
 
     # Assemblies and the binette-refined bins are archived on ERDA. This runs
-    # after the Airtable work so a transfer failure never costs the metadata.
+    # The aggregate contig-to-bin table is archived beside the bins when it is
+    # present. This runs after the Airtable work so a transfer failure never
+    # costs the metadata.
     # Files already on ERDA are always skipped rather than re-sent: the
     # attachment-replacement flag works around Airtable appending on upload,
     # which has no equivalent over SFTP, and re-pushing multi-GB assemblies on
@@ -4769,16 +4787,16 @@ def _build_parser() -> argparse.ArgumentParser:
     # ---- upload-erda ----
     p_upload_erda = sub.add_parser(
         "upload-erda",
-        help="Transfer assemblies, final bins, AMR tables or gene calls to ERDA.",
+        help="Transfer cataloging outputs, AMR tables or gene calls to ERDA.",
         description=(
-            "Transfer the assemblies and the binette-refined final bins of a "
-            "study to ERDA, its AMR result tables, or the prodigal gene calls "
-            "(.faa/.ffn) of its AMR run. All are normally sent automatically "
-            "when the corresponding outputs are finalised — assemblies and gene "
-            "calls in detached '{code}-erda-upload' and '{code}-erda-genes' "
-            "screen sessions, the small AMR tables inline. Run this by hand to "
-            "retry a failed transfer, or without --study to archive every batch "
-            "on disk."
+            "Transfer a study's assemblies, binette-refined final bins and "
+            "aggregate contig-to-bin table to ERDA, its AMR result tables, or "
+            "the prodigal gene calls (.faa/.ffn) of its AMR run. All are "
+            "normally sent automatically when the corresponding outputs are "
+            "finalised — cataloging outputs and gene calls in detached "
+            "'{code}-erda-upload' and '{code}-erda-genes' screen sessions, the "
+            "small AMR tables inline. Run this by hand to retry a failed "
+            "transfer, or without --study to archive every batch on disk."
         ),
     )
     p_upload_erda.add_argument(
@@ -4797,9 +4815,10 @@ def _build_parser() -> argparse.ArgumentParser:
         default="cataloging",
         choices=[*_ERDA_PAYLOADS, "all"],
         help=(
-            "Which outputs to transfer: 'cataloging' (assemblies and bins, the "
-            "default), 'amr' (the aggregate AMR result tables), 'genes' (the "
-            "prodigal .faa/.ffn gene calls of the AMR run), or 'all'."
+            "Which outputs to transfer: 'cataloging' (assemblies, bins and the "
+            "contig-to-bin table; the default), 'amr' (the aggregate AMR result "
+            "tables), 'genes' (the prodigal .faa/.ffn gene calls of the AMR "
+            "run), or 'all'."
         ),
     )
     p_upload_erda.add_argument(
