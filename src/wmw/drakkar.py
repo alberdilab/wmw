@@ -386,7 +386,7 @@ TSV_STAGES: tuple[str, ...] = ("preprocessing", "cataloging")
 _WORK_DIR_STAGES: tuple[str, ...] = ("amr", "profiling", "annotating")
 
 # Stages whose resource envelope the Airtable boost columns widen.
-_BOOSTED_STAGES: tuple[str, ...] = ("preprocessing", "amr")
+_BOOSTED_STAGES: tuple[str, ...] = ("preprocessing", "cataloging", "amr")
 
 
 def stages_from(stage: str) -> tuple[str, ...]:

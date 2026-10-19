@@ -8,6 +8,14 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.7.1] - 2026-10-19
+
+### Changed
+
+- **The `Memory boost` / `Time boost` columns now also widen `drakkar cataloging`.**
+  Until now only `preprocessing` and `amr` received `--memory-multiplier` and
+  `--time-multiplier`, so assemblies that hit the Slurm time limit could not be given
+  more room from Airtable.
 ## [0.7.0] - 2026-10-19
 
 ### Added

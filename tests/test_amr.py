@@ -1209,3 +1209,18 @@ def test_upload_amr_reports_an_output_tree_with_no_amr_run(tmp_path, amr_config)
         assert cli.cmd_upload_amr(_upload_amr_args(tmp_path)) == 1
     require.assert_not_called()
 
+
+
+def test_cataloging_stage_receives_the_boost_multipliers(tmp_path):
+    flags = drakkar._stage_drakkar_flags(
+        "cataloging",
+        tmp_path / "ST001",
+        tmp_path / "ST001.tsv",
+        slurm=True,
+        memory_multiplier="1.5",
+        time_multiplier="3",
+        slurm_partition=None,
+        slurm_qos=None,
+    )
+    assert "--memory-multiplier 1.5" in flags
+    assert "--time-multiplier 3" in flags
