@@ -600,6 +600,24 @@ AMR still gets its assemblies, bins and aggregate contig-to-bin table archived.
 
 ---
 
+## wmw unlock / wmw resume
+
+Set a study's status for recovery without opening Airtable.
+
+```
+wmw unlock|resume --study CODE [--process] [--slurm]
+                  [--airtable-token TOKEN] [--base-id BASE_ID]
+                  [--studies-table TABLE] [--samples-table TABLE]
+```
+
+`unlock` sets the status `unlock` (clear a stale Snakemake lock, then resume); `resume`
+sets `resume` (continue from the first stage with missing outputs). Both print the
+`wmw process --batch CODE` command to run next; `--process` runs it, with `--slurm`
+passed through. Launch from a login shell (`bash -lic`): a generated script stops with a
+message in `<code>.err` and parks the study in `resume` when `conda` or `module` is missing.
+
+---
+
 ## wmw status
 
 Display sample status breakdown from Airtable.

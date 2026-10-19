@@ -492,6 +492,81 @@ def test_script_gives_conda_no_tty_to_prompt_on(tmp_path):
     assert "exec < /dev/null >>" in script
 
 
+def _preflight(script):
+    return script[script.index("# Check the launch shell"):script.index("_WMW_STOP_FILE=")]
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+@pytest.mark.parametrize("unlock,status", [(False, "resume"), (True, "unlock")])
+def test_pipeline_script_preflight_is_valid_bash_and_parks_study(tmp_path, unlock, status):
+    script = drakkar.generate_pipeline_script(
+        code="PRJ008",
+        work_dir=tmp_path,
+        conda_env="/envs/drakkar",
+        stages=drakkar.stages_from("amr"),
+        unlock=unlock,
+    )
+    assert subprocess.run(["bash", "-n"], input=script, text=True).returncode == 0
+    assert script.index("conda activate") < script.index("# Check the launch shell")
+    assert script.index("# Check the launch shell") < script.index("_WMW_STOP_FILE=")
+    assert "command -v conda" in script
+    assert "type -t module" in script
+    assert f"--workflow amr --status {status}" in _preflight(script)
+    assert script.index("# Check the launch shell") < script.index("trap _on_exit_amr EXIT")
+
+
+def test_pipeline_script_without_conda_env_has_no_preflight(tmp_path):
+    script = drakkar.generate_pipeline_script(
+        code="PRJ008", work_dir=tmp_path, conda_env="", stages=("amr",)
+    )
+    assert "# Check the launch shell" not in script
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_pipeline_preflight_exits_with_message_under_stripped_path(tmp_path):
+    script = drakkar.generate_pipeline_script(
+        code="PRJ008", work_dir=tmp_path, conda_env="/envs/drakkar", stages=("amr",)
+    )
+    result = subprocess.run(
+        ["bash", "-c", _preflight(script)],
+        env={"PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert "conda is missing" in result.stderr.splitlines()[0]
+    assert "bash -lic" in result.stderr
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_pipeline_preflight_accepts_a_large_module_function_under_pipefail(tmp_path):
+    script = drakkar.generate_pipeline_script(
+        code="PRJ008", work_dir=tmp_path, conda_env="/envs/drakkar", stages=("amr",)
+    )
+    body = "\n".join(f"    : line {i}" for i in range(3000))
+    prog = (
+        "set -euo pipefail\n"
+        "conda() { :; }\n"
+        f"module() {{\n{body}\n}}\n"
+        + _preflight(script)
+        + "echo preflight-ok\n"
+    )
+    for _ in range(10):
+        result = subprocess.run(["bash", "-c", prog], capture_output=True, text=True)
+        assert result.stdout.strip() == "preflight-ok", result.stderr
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_pipeline_preflight_rejects_missing_module_function(tmp_path):
+    script = drakkar.generate_pipeline_script(
+        code="PRJ008", work_dir=tmp_path, conda_env="/envs/drakkar", stages=("amr",)
+    )
+    prog = "set -euo pipefail\nconda() { :; }\n" + _preflight(script)
+    result = subprocess.run(["bash", "-c", prog], capture_output=True, text=True)
+    assert result.returncode == 1
+    assert "module function is missing" in result.stderr
+
+
 def test_annotation_outputs_present_requires_gene_annotations_and_taxonomy(tmp_path):
     annotation_dir = tmp_path / "annotating"
     annotation_dir.mkdir()
@@ -595,8 +670,13 @@ def _run_stubbed_script(tmp_path, drakkar_body, locked=False, unlock=False):
     )
     script_path = work_dir / "PRJ011.sh"
     script_path.write_text(script)
-    # No conda on PATH, so the activation block is skipped as it is on a host without it.
-    subprocess.run(["bash", str(script_path)], env={"PATH": "/usr/bin:/bin"}, check=False)
+    bash_env = tmp_path / "launch-shell.sh"
+    bash_env.write_text("conda() { printf '/nonexistent'; }\nmodule() { :; }\n")
+    subprocess.run(
+        ["bash", str(script_path)],
+        env={"PATH": "/usr/bin:/bin", "BASH_ENV": str(bash_env)},
+        check=False,
+    )
     return calls.read_text().splitlines(), (work_dir / "PRJ011.err").read_text()
 
 

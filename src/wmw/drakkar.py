@@ -592,6 +592,32 @@ def generate_pipeline_script(
 
     stop_file = shlex.quote(str(work_dir / ".wmw-stop"))
     output_dir_arg = f" --output-dir {shlex.quote(str(work_dir.parent))}"
+    # A failed preflight parks the study where `wmw process` will pick it up again;
+    # an 'unlock' request must stay 'unlock', or the next run skips `drakkar unlock`.
+    parked_status = _set_status_line(
+        wmw_cmd, code, stages[0], "unlock" if unlock else "resume", output_dir_arg, guarded=False
+    )
+    preflight_fail = [
+        f"    {parked_status} >/dev/null 2>&1 "
+        '|| echo "wmw: could not update the study status in Airtable." >&2',
+        "    exit 1",
+        "fi",
+    ]
+    preflight_lines: list[str] = []
+    if conda_env:
+        # `module` is the HPC's environment-modules function (login shells only);
+        # hosts without a configured conda env are not expected to have it.
+        # No pipe here: under pipefail, `head -1` SIGPIPEs `type` on a big function.
+        preflight_lines.extend([
+            "# Check the launch shell before installing a stage exit trap.",
+            "if ! command -v conda >/dev/null 2>&1; then",
+            '    echo "wmw: conda is missing; launch shell needs conda and a login shell (bash -lic)." >&2',
+            *preflight_fail,
+            'if [ "$(type -t module 2>/dev/null)" != function ]; then',
+            '    echo "wmw: module function is missing; launch shell needs conda and a login shell (bash -lic)." >&2',
+            *preflight_fail,
+            "",
+        ])
 
     labels = [_STAGE_LABELS[s] for s in stages]
     header = " → ".join(labels) if len(labels) > 1 else f"{labels[0]} only"
@@ -612,6 +638,7 @@ def generate_pipeline_script(
         "echo \"=== $(date '+%Y-%m-%d %H:%M:%S') ===\" >&2",
         "",
         *conda_lines,
+        *preflight_lines,
         f"_WMW_STOP_FILE={stop_file}",
         'rm -f "$_WMW_STOP_FILE"',
         "_WMW_LOCKED=0",

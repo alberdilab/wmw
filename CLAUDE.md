@@ -56,6 +56,7 @@ wmw upload-erda [--study CODE] [--what cataloging|amr|genes|all] [--output-dir D
                 [--sftp-remote-base PATH] [--sftp-amr-dir NAME] [--sftp-gene-dir NAME]
                 [--replace-files] [--dry-run] [--verbose]
 wmw status  [--batch BATCH]
+wmw unlock|resume --study CODE [--process] [--slurm]
 wmw config  --view | --edit
 wmw update
 ```
@@ -95,7 +96,7 @@ wmw update
 - ERDA transfers skip files already present; `replace_existing_attachments` is deliberately **not** propagated to them (it works around Airtable appending on upload). `wmw upload-erda --replace-files` is the explicit re-transfer
 
 ## Tests & release
-`pytest tests/` (547 tests) · `python scripts/release.py X.Y.Z` (add `--dry-run` first)
+`pytest tests/` (567 tests) · `python scripts/release.py X.Y.Z` (add `--dry-run` first)
 
 ## Changelog policy
 - Every code change must be logged under the `[Unreleased]` section of `CHANGELOG.md` before the work is considered done.

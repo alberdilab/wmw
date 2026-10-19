@@ -3743,6 +3743,54 @@ def cmd_set_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_recovery(args: argparse.Namespace, status: str) -> int:
+    from wmw.airtable import UnknownSelectOptionError
+
+    studies_table = _conf(args, "studies_table", "STUDIES_TABLE") or "Studies"
+    samples_table = _conf(args, "samples_table", "SAMPLES_TABLE") or "Samples"
+    study_code = args.study
+
+    client = _require_airtable(args, studies_table, samples_table)
+    study_record = client.fetch_study_by_code(studies_table, study_code)
+    if not study_record:
+        _die(f"No study with code {study_code!r} found in Airtable.")
+
+    try:
+        client.set_study_status(studies_table, [study_record["id"]], status)
+        out.success(f"Study {study_code} status → {status!r}.")
+    except UnknownSelectOptionError as exc:
+        _die(f"{exc} The study status was not changed.")
+
+    next_step = f"wmw process --batch {study_code}"
+    if args.slurm:
+        next_step += " --slurm"
+    out.info(f"Next step: {next_step}")
+
+    if args.process:
+        process_args = argparse.Namespace(
+            batch=study_code,
+            workflow="preprocessing",
+            only=False,
+            slurm=args.slurm,
+            output_dir="",
+            studies_table=args.studies_table,
+            samples_table=args.samples_table,
+            genomes_table="",
+            airtable_token=args.airtable_token,
+            base_id=args.base_id,
+        )
+        return cmd_process(process_args)
+    return 0
+
+
+def cmd_unlock(args: argparse.Namespace) -> int:
+    return _cmd_recovery(args, "unlock")
+
+
+def cmd_resume(args: argparse.Namespace) -> int:
+    return _cmd_recovery(args, "resume")
+
+
 def cmd_upload_genome_files(args: argparse.Namespace) -> int:
     samples_table = _conf(args, "samples_table", "SAMPLES_TABLE") or "Samples"
     genomes_table = _conf(args, "genomes_table", "GENOMES_TABLE")
@@ -4674,6 +4722,43 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Override DRAKKAR_OUTPUT_DIR from config.",
     )
     p_setstatus.set_defaults(func=cmd_set_status)
+
+    # ---- unlock / resume ----
+    for command, handler in (("unlock", cmd_unlock), ("resume", cmd_resume)):
+        p_recovery = sub.add_parser(
+            command,
+            help=f"Set a study to {command!r} for the next processing run.",
+        )
+        _add_airtable_flags(p_recovery)
+        p_recovery.add_argument(
+            "--study",
+            metavar="CODE",
+            required=True,
+            help="Study code (batch label) to update.",
+        )
+        p_recovery.add_argument(
+            "--studies-table",
+            metavar="TABLE",
+            default="",
+            help="Override Studies table name from config.",
+        )
+        p_recovery.add_argument(
+            "--samples-table",
+            metavar="TABLE",
+            default="",
+            help="Override Samples table name from config.",
+        )
+        p_recovery.add_argument(
+            "--process",
+            action="store_true",
+            help="Start processing this study after updating its status.",
+        )
+        p_recovery.add_argument(
+            "--slurm",
+            action="store_true",
+            help="Pass --slurm to processing when used with --process.",
+        )
+        p_recovery.set_defaults(func=handler)
 
     # ---- upload-genome-files (internal) ----
     p_upload_genomes = sub.add_parser(

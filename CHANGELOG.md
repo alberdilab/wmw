@@ -6,7 +6,18 @@ All notable changes to wmw are documented here.
 
 ### Added
 
-- No unreleased changes yet.
+- **`wmw unlock --study CODE` and `wmw resume --study CODE`** set a study's status to
+  `unlock` or `resume` in Airtable and print the next step. `--process` (with
+  `--slurm`) goes on to run `wmw process --batch CODE`. `set-status` still accepts only
+  the statuses launch scripts report.
+
+### Changed
+
+- **Launch scripts check their shell before starting.** A script now stops at once, with
+  one line in `<code>.err`, when `conda` or the `module`
+  function is missing (checked only when `DRAKKAR_CONDA_ENV` is set, i.e. on the HPC), i.e. when it was launched from a shell that is not a login shell.
+  The study is parked in `resume` instead of `error`, so relaunching with
+  `bash -lic` retries cleanly.
 
 ## [0.6.14] - 2026-10-19
 
