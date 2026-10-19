@@ -79,14 +79,21 @@ def _conf(args: argparse.Namespace, cli_attr: str, config_key: str, required: bo
     return value
 
 
+# Checked in order; AIRTABLE_TOKEN is the legacy name, kept as a fallback.
+AIRTABLE_TOKEN_ENV_VARS = ("AIRTABLE_WMW_TOKEN", "AIRTABLE_TOKEN")
+
+
 def _resolve_token(args: argparse.Namespace) -> str:
     token = (getattr(args, "airtable_token", None) or "").strip()
     if not token:
-        token = os.environ.get("AIRTABLE_TOKEN", "").strip()
+        for var in AIRTABLE_TOKEN_ENV_VARS:
+            token = os.environ.get(var, "").strip()
+            if token:
+                break
     if not token:
         _die(
-            "Airtable token not found. "
-            "Provide --airtable-token or export AIRTABLE_TOKEN."
+            "Airtable token not found. Provide --airtable-token or export "
+            "AIRTABLE_WMW_TOKEN (legacy: AIRTABLE_TOKEN)."
         )
     return token
 
@@ -2306,7 +2313,8 @@ def _launch_genome_file_upload_screen(
     env = os.environ.copy()
     token = str(getattr(args, "airtable_token", "") or "").strip()
     if token:
-        env["AIRTABLE_TOKEN"] = token
+        for var in AIRTABLE_TOKEN_ENV_VARS:
+            env[var] = token
 
     try:
         sp.run(
@@ -4075,12 +4083,19 @@ def cmd_status(args: argparse.Namespace) -> int:
     client = _airtable_client(args)
 
     # Samples breakdown
-    formula = f'{{batch}} = "{batch}"' if batch else None
-    samples = client.fetch_all(samples_table, formula=formula)
+    samples = client.fetch_all_samples(samples_table)
+    if batch:
+        study = client.fetch_study_by_code(studies_table, batch)
+        if not study:
+            _die(f"No study with code {batch!r} found in Airtable.")
+        samples = [
+            r for r in samples
+            if study["id"] in (r["fields"].get("parent_study") or [])
+        ]
 
     counts: dict[str, int] = {}
     for rec in samples:
-        status = rec["fields"].get("status", "unknown")
+        status = rec["fields"].get("status") or "unknown"
         counts[status] = counts.get(status, 0) + 1
 
     tbl = out.make_table("Status", "Count")
@@ -4946,7 +4961,7 @@ def _add_airtable_flags(parser: argparse.ArgumentParser) -> None:
             "--airtable-token",
             metavar="TOKEN",
             default="",
-            help="Airtable personal access token (overrides $AIRTABLE_TOKEN and config).",
+            help="Airtable personal access token (overrides $AIRTABLE_WMW_TOKEN / $AIRTABLE_TOKEN and config).",
         )
     if "base_id" not in existing:
         parser.add_argument(

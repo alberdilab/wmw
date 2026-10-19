@@ -600,7 +600,7 @@ def generate_pipeline_script(
         "#!/usr/bin/env bash",
         f"# wmw-generated script — batch {code} ({header})",
         "# Do not edit manually; re-run wmw process to regenerate.",
-        "# AIRTABLE_TOKEN must be exported in the environment before launching.",
+        "# AIRTABLE_WMW_TOKEN (or legacy AIRTABLE_TOKEN) must be exported in the environment before launching.",
         "",
         "set -euo pipefail",
         # A detached screen session still gives conda a tty, on which it blocks

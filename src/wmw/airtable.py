@@ -373,6 +373,11 @@ class AirtableClient:
         records = tbl.all(formula=formula, max_records=1)
         return self._dec(records[0], self._studies_fm) if records else None
 
+    def fetch_all_samples(self, samples_table: str) -> list[dict[str, Any]]:
+        """Return every decoded record in the Samples table (python field names)."""
+        tbl = self._tbl(samples_table, self._samples_fm)
+        return [self._dec(r, self._samples_fm) for r in tbl.all()]
+
     def fetch_samples_for_study(
         self,
         samples_table: str,

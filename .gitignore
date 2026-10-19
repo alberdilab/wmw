@@ -22,3 +22,9 @@ htmlcov/
 .idea/
 .vscode/
 *.swp
+
+# Codeome agent jobs
+.codeome/jobs/
+.codeome/worktrees/
+.codeome/plans/
+.codeome/context/

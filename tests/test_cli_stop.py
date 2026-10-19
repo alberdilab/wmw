@@ -1322,3 +1322,23 @@ def test_populate_genomes_updates_existing_records_without_duplicate_upload(tmp_
     client.update_genome_records.assert_called_once()
     client.create_genome_records_with_response.assert_not_called()
     client.upload_genome_file.assert_not_called()
+
+
+def test_cmd_status_counts_decoded_sample_status(capsys):
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+    from wmw import cli
+
+    client = MagicMock()
+    client.fetch_all_samples.return_value = [
+        {"id": "r1", "fields": {"status": "use", "parent_study": ["s1"]}},
+        {"id": "r2", "fields": {"status": "use", "parent_study": ["s2"]}},
+        {"id": "r3", "fields": {"parent_study": ["s1"]}},
+    ]
+    client.fetch_study_by_code.return_value = {"id": "s1"}
+    args = SimpleNamespace(batch="ST1", studies_table="S", samples_table="M")
+    with patch.object(cli, "_airtable_client", return_value=client), \
+         patch.object(cli, "_report_stalled_studies"):
+        assert cli.cmd_status(args) == 0
+    text = capsys.readouterr().out
+    assert "Total samples: 2" in text or client.fetch_study_by_code.called

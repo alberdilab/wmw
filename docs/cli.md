@@ -36,7 +36,7 @@ wmw scan [--source ARCHIVE]              # ena (default) | gsa; config: SOURCE
          [--include GROUPS]              # Human,Livestock,Aquaculture,Laboratory or All
          [--dry-run]
          [--no-publications]
-         [--airtable-token TOKEN]         # or $AIRTABLE_TOKEN env var
+         [--airtable-token TOKEN]         # or $AIRTABLE_WMW_TOKEN (legacy $AIRTABLE_TOKEN)
          [--base-id BASE_ID]              # or config WMW_BASE
          [--studies-table TABLE]          # or config STUDIES_TABLE
 ```
@@ -139,7 +139,7 @@ wmw fetch [--source ARCHIVE]             # ena (default) | gsa; config: SOURCE
           [--exclude-taxa IDS]           # comma-sep extra taxon IDs to also exclude
           [--dry-run]
           [--debug]                      # print every archive request
-          [--airtable-token TOKEN]       # or $AIRTABLE_TOKEN env var
+          [--airtable-token TOKEN]       # or $AIRTABLE_WMW_TOKEN (legacy $AIRTABLE_TOKEN)
           [--base-id BASE_ID]            # or config WMW_BASE
           [--studies-table TABLE]        # or config STUDIES_TABLE
           [--samples-table TABLE]        # or config SAMPLES_TABLE

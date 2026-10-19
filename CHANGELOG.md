@@ -6,13 +6,34 @@ All notable changes to wmw are documented here.
 
 ### Added
 
+- No unreleased changes yet.
+
+## [0.6.13] - 2026-10-19
+
+### Fixed
+
+- **`wmw status` reported every sample as `unknown`** because it read the raw
+  record by the name `status` while the base is addressed by field ID; it now
+  decodes records through the field map. `--batch` filtered on a non-existent
+  `batch` field; it now selects the samples linked to that study code.
+
+### Changed
+
+- **README is now an agent-oriented guide** to the Airtable schema (live table IDs,
+  display-name vs field-ID caveat, status lifecycle) and to how `wmw process` runs
+  Drakkar on the HPC.
+- **wmw reads the Airtable token from `AIRTABLE_WMW_TOKEN`.** `AIRTABLE_TOKEN`
+  still works as a fallback, and `--airtable-token` still wins. Detached
+  upload screens receive both names.
+
+### Added
+
 - **The aggregate contig-to-bin table is archived on ERDA.** Cataloging
   finalization and `wmw upload-erda --what cataloging` now copy
   `cataloging/final/all_contig_to_bin.csv` unchanged to
   `{SFTP_REMOTE_BASE}/{code}/{SFTP_REMOTE_BIN_DIR}/all_contig_to_bin.csv`
   (with the defaults, `/WMW/{code}/bins/all_contig_to_bin.csv`). It participates
   in dry-run discovery, existing-file skips, retries, and `--replace-files`.
-
 ## [0.6.12] - 2026-09-17
 
 ### Added
