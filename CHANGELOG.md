@@ -8,6 +8,16 @@ All notable changes to wmw are documented here.
 
 - No unreleased changes yet.
 
+## [0.6.14] - 2026-10-19
+
+### Fixed
+
+- **Launch scripts no longer die silently in a detached `screen`.** Started from a
+  non-interactive SSH session (agents, cron), a generated script run as the screen
+  window's own process died at its first command substitution after its
+  `exec < /dev/null` redirect, leaving empty logs and the study in its old status.
+  All three `screen` launches (pipeline, genome upload, ERDA upload) now go through
+  `_screen_command()`, which keeps a wrapper shell alive around the script.
 ## [0.6.13] - 2026-10-19
 
 ### Fixed

@@ -544,13 +544,7 @@ def test_cmd_set_status_cataloged_launches_genome_upload_screen(tmp_path):
     # Two detached sessions: the Airtable attachment upload and the ERDA transfer.
     assert run.call_count == 2
     genome_call, erda_call = run.call_args_list
-    assert genome_call[0][0] == [
-        "screen",
-        "-dmS",
-        "ST001-genome-upload",
-        "bash",
-        str(script_path),
-    ]
+    assert genome_call[0][0] == cli._screen_command("ST001-genome-upload", script_path)
     assert genome_call.kwargs["check"] is True
     assert genome_call.kwargs["env"]["AIRTABLE_TOKEN"] == "secret-token"
 
@@ -559,13 +553,7 @@ def test_cmd_set_status_cataloged_launches_genome_upload_screen(tmp_path):
     erda_text = erda_script.read_text(encoding="utf-8")
     assert "upload-erda" in erda_text
     assert "secret-token" not in erda_text
-    assert erda_call[0][0] == [
-        "screen",
-        "-dmS",
-        "ST001-erda-upload",
-        "bash",
-        str(erda_script),
-    ]
+    assert erda_call[0][0] == cli._screen_command("ST001-erda-upload", erda_script)
 
 
 def test_populate_genomes_skips_records_and_files_below_quality_thresholds(tmp_path):
@@ -1027,7 +1015,7 @@ def test_cmd_process_resume_without_outputs_launches_preprocessing(tmp_path):
     assert gen_script.call_args.kwargs["stages"] == drakkar.PIPELINE_STAGES
     assert (work_dir / "ST001.sh").exists()
     run.assert_called_once_with(
-        ["screen", "-dmS", "ST001", "bash", str(work_dir / "ST001.sh")],
+        cli._screen_command("ST001", work_dir / "ST001.sh"),
         check=True,
     )
 
@@ -1281,7 +1269,7 @@ def test_cmd_process_resume_after_preprocessing_launches_cataloging_onwards(tmp_
     )
     assert (work_dir / "ST001.sh").exists()
     run.assert_called_once_with(
-        ["screen", "-dmS", "ST001", "bash", str(work_dir / "ST001.sh")],
+        cli._screen_command("ST001", work_dir / "ST001.sh"),
         check=True,
     )
 
@@ -1342,3 +1330,21 @@ def test_cmd_status_counts_decoded_sample_status(capsys):
         assert cli.cmd_status(args) == 0
     text = capsys.readouterr().out
     assert "Total samples: 2" in text or client.fetch_study_by_code.called
+
+
+def test_screen_command_keeps_a_shell_alive_around_the_script(tmp_path):
+    """The script must not be the screen window's own process.
+
+    Generated scripts redirect stdin from /dev/null; as the window process they
+    die silently at the first command substitution when screen was started from
+    a non-interactive SSH session.
+    """
+    from wmw import cli
+
+    script = tmp_path / "ST001.sh"
+    argv = cli._screen_command("ST001", script)
+    assert argv[:3] == ["screen", "-dmS", "ST001"]
+    assert argv[3:5] == ["bash", "-c"]
+    assert argv[-1] == str(script)
+    # a command after the script keeps bash from exec-ing it in place
+    assert argv[5].rstrip().endswith("exit $?") and ";" in argv[5]

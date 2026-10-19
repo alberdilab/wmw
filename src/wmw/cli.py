@@ -79,6 +79,22 @@ def _conf(args: argparse.Namespace, cli_attr: str, config_key: str, required: bo
     return value
 
 
+def _screen_command(session_name: str, script_path: Any) -> list[str]:
+    """Return the ``screen`` argv that runs *script_path* detached as *session_name*.
+
+    The script is wrapped in a shell that stays alive. The generated scripts
+    start with ``exec < /dev/null >> log 2>> log``; run as the window's own
+    process, from a screen started in a non-interactive SSH session (an agent,
+    a cron job), bash dies at the first command substitution after that
+    redirect, with nothing in the logs and the study stuck in its old status.
+    A parent shell that outlives the script (the trailing ``exit``) avoids it.
+    """
+    return [
+        "screen", "-dmS", session_name,
+        "bash", "-c", 'bash "$1"; exit $?', "wmw-screen", str(script_path),
+    ]
+
+
 # Checked in order; AIRTABLE_TOKEN is the legacy name, kept as a fallback.
 AIRTABLE_TOKEN_ENV_VARS = ("AIRTABLE_WMW_TOKEN", "AIRTABLE_TOKEN")
 
@@ -1243,7 +1259,7 @@ def _write_and_maybe_launch_script(code: str, script_path: Path, script: str) ->
     if shutil.which("screen") is None:
         out.warn(f"  'screen' not found — script written but not launched.")
     else:
-        sp.run(["screen", "-dmS", code, "bash", str(script_path)], check=True)
+        sp.run(_screen_command(code, script_path), check=True)
         out.success(f"  Screen session '{code}' started.")
 
 
@@ -2318,7 +2334,7 @@ def _launch_genome_file_upload_screen(
 
     try:
         sp.run(
-            ["screen", "-dmS", session_name, "bash", str(script_path)],
+            _screen_command(session_name, script_path),
             check=True,
             env=env,
         )
@@ -2839,7 +2855,7 @@ def _launch_erda_upload_screen(
 
     try:
         sp.run(
-            ["screen", "-dmS", session_name, "bash", str(script_path)],
+            _screen_command(session_name, script_path),
             check=True,
             env=os.environ.copy(),
         )
